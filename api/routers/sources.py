@@ -381,6 +381,63 @@ async def get_sources(
         raise HTTPException(status_code=500, detail="Error fetching sources")
 
 
+@router.get("/sources/inbox/miniflux", response_model=List[SourceListResponse])
+async def get_miniflux_inbox(
+    limit: int = Query(20, ge=1, le=100, description="Number of items to return"),
+):
+    """Today's sources ingested from Miniflux.
+
+    Miniflux sync marks its items with the `miniflux-inbox` topic, so this
+    endpoint only looks at sources tagged that way and created on the current
+    calendar day. Untagged sources (e.g. pre-tagging syncs or manual links)
+    are intentionally excluded.
+    """
+    try:
+        query = """
+            SELECT id, asset, created, title, updated, topics,
+            (SELECT VALUE count() FROM source_embedding WHERE source = $parent.id LIMIT 1)[0].count OR 0 AS insights_count,
+            (SELECT VALUE id FROM source_embedding WHERE source = $parent.id LIMIT 1) != [] AS embedded
+            FROM source
+            WHERE topics CONTAINS 'miniflux-inbox'
+            AND time::day(created) == time::day(time::now())
+            ORDER BY created DESC
+            LIMIT $limit
+        """
+        result = await repo_query(query, {"limit": limit})
+
+        response_list = []
+        for row in result:
+            response_list.append(
+                SourceListResponse(
+                    id=row["id"],
+                    title=row.get("title"),
+                    topics=row.get("topics") or [],
+                    asset=AssetModel(
+                        file_path=row["asset"].get("file_path")
+                        if row.get("asset")
+                        else None,
+                        url=row["asset"].get("url") if row.get("asset") else None,
+                    )
+                    if row.get("asset")
+                    else None,
+                    embedded=row.get("embedded", False),
+                    embedded_chunks=0,  # Not needed in list view
+                    insights_count=row.get("insights_count", 0),
+                    created=str(row["created"]),
+                    updated=str(row["updated"]),
+                )
+            )
+
+        return response_list
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching Miniflux inbox: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching Miniflux inbox")
+
+
 def _source_to_response(
     source: Source, embedded_chunks: int = 0, **extras: Any
 ) -> SourceResponse:
@@ -496,7 +553,7 @@ async def _create_source_async_path(
 
     source = Source(
         title=source_data.title or "Processing...",
-        topics=[],
+        topics=source_data.topics or [],
         asset=source_asset,
     )
     await source.save()
@@ -578,7 +635,7 @@ async def _create_source_sync_path(
         # Create source record - let SurrealDB generate the ID
         source = Source(
             title=source_data.title or "Processing...",
-            topics=[],
+            topics=source_data.topics or [],
         )
         await source.save()
 

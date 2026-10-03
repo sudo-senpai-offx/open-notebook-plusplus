@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Controller } from "react-hook-form"
 
 interface CreateSourceFormData {
@@ -22,6 +23,8 @@ interface CreateSourceFormData {
   transformations?: string[]
   embed: boolean
   async_processing: boolean
+  crawlSite?: boolean
+  maxPages?: string
 }
 
 // Helper functions for batch URL parsing
@@ -103,6 +106,8 @@ export function SourceTypeStep({ control, register, setValue, errors, urlValidat
   const selectedType = useWatch({ control, name: 'type' })
   const urlInput = useWatch({ control, name: 'url' })
   const fileInput = useWatch({ control, name: 'file' })
+  const crawlSite = useWatch({ control, name: 'crawlSite' })
+  const maxPages = useWatch({ control, name: 'maxPages' })
 
   // Track if HTML content was pasted
   const [hasHtmlContent, setHasHtmlContent] = useState(false)
@@ -229,6 +234,46 @@ export function SourceTypeStep({ control, register, setValue, errors, urlValidat
                           <p className="text-xs text-muted-foreground mt-2">
                             {t('sources.fixInvalidUrls')}
                           </p>
+                        </div>
+                      )}
+
+                      {/* Crawl toggle: only offered for a single URL */}
+                      {urlCount === 1 && (
+                        <div className="mt-4 p-3 rounded-md border border-border bg-muted/30">
+                          <div className="flex items-start gap-2">
+                            <Checkbox
+                              id="crawl-site"
+                              checked={crawlSite ?? false}
+                              onCheckedChange={(checked) =>
+                                setValue('crawlSite', checked === true, { shouldValidate: true })
+                              }
+                            />
+                            <div className="space-y-1">
+                              <Label htmlFor="crawl-site" className="text-sm font-medium cursor-pointer">
+                                {t('sources.crawlThisSite')}
+                              </Label>
+                              <p className="text-xs text-muted-foreground">
+                                {t('sources.crawlThisSiteDesc')}
+                              </p>
+                            </div>
+                          </div>
+                          {crawlSite && (
+                            <div className="mt-3">
+                              <Label htmlFor="max-pages" className="text-xs text-muted-foreground">
+                                {t('sources.maxPagesLabel')}
+                              </Label>
+                              <Input
+                                id="max-pages"
+                                type="number"
+                                min={1}
+                                max={500}
+                                placeholder={t('sources.maxPagesPlaceholder')}
+                                className="mt-1 max-w-[160px] text-sm"
+                                value={maxPages ?? ''}
+                                onChange={(e) => setValue('maxPages', e.target.value, { shouldValidate: true })}
+                              />
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>

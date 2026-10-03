@@ -129,8 +129,8 @@ export function SessionManager({
                   placeholder={t('chat.sessionTitlePlaceholder')}
                   className="mb-2"
                   autoFocus
-                  onKeyPress={(e) => {
-                    if (e.key === 'Enter') handleCreateSession()
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.repeat) handleCreateSession()
                   }}
                 />
                 <div className="flex gap-2">
@@ -178,8 +178,8 @@ export function SessionManager({
                         <Input
                           value={editTitle}
                           onChange={(e) => setEditTitle(e.target.value)}
-                          onKeyPress={(e) => {
-                            if (e.key === 'Enter') handleSaveEdit()
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.repeat) handleSaveEdit()
                             if (e.key === 'Escape') handleCancelEdit()
                           }}
                           autoFocus

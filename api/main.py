@@ -40,6 +40,7 @@ from api.routers import (
     providers,
     search,
     settings,
+    sites,
     source_chat,
     sources,
     speaker_profiles,
@@ -393,6 +394,7 @@ app.include_router(
 )
 app.include_router(settings.router, prefix="/api", tags=["settings"])
 app.include_router(sources.router, prefix="/api", tags=["sources"])
+app.include_router(sites.router, prefix="/api", tags=["sites"])
 app.include_router(insights.router, prefix="/api", tags=["insights"])
 app.include_router(commands_router.router, prefix="/api", tags=["commands"])
 app.include_router(podcasts.router, prefix="/api", tags=["podcasts"])

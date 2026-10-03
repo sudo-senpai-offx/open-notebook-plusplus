@@ -7,6 +7,8 @@ sqlite-db/
 surreal-data/
 docker.env
 notebook_data/
+ollama_data/
+whisper_models/
 # Python-specific
 *.py[cod]
 __pycache__/

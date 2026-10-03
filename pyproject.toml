@@ -46,6 +46,7 @@ dependencies = [
     "numpy>=2.4.1",
     "pycountry>=26.2.16",
     "babel>=2.18.0",
+    "beautifulsoup4>=4.13.0",
 ]
 
 [tool.setuptools]

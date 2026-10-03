@@ -87,7 +87,7 @@ export default function SearchPage() {
   const lastUrlParamsRef = useRef({ q: '', mode: '' })
 
   const handleSearch = useCallback(() => {
-    if (!searchQuery.trim()) return
+    if (!searchQuery.trim() || searchMutation.isPending) return
 
     searchMutation.mutate({
       query: searchQuery,
@@ -100,8 +100,9 @@ export default function SearchPage() {
     })
   }, [searchQuery, searchType, searchSources, searchNotes, scopeNotebookIds, searchMutation])
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
+  const handleSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.repeat) {
+      e.preventDefault()
       handleSearch()
     }
   }
@@ -341,7 +342,7 @@ export default function SearchPage() {
                       placeholder={t('searchPage.enterSearchPlaceholder')}
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      onKeyPress={handleKeyPress}
+                      onKeyDown={handleSearchKeyDown}
                       disabled={searchMutation.isPending}
                       className="flex-1"
                       aria-label={t('common.accessibility.enterSearch')}

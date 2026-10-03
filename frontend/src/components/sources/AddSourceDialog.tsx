@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
+import { useQueryClient } from '@tanstack/react-query'
 import { z } from 'zod'
 import { LoaderIcon, CheckCircleIcon, XCircleIcon } from 'lucide-react'
 import { toast } from 'sonner'
@@ -23,6 +24,9 @@ import { useTransformations } from '@/lib/hooks/use-transformations'
 import { useCreateSource } from '@/lib/hooks/use-sources'
 import { useSettings } from '@/lib/hooks/use-settings'
 import { CreateSourceRequest } from '@/lib/types/api'
+import { sitesApi } from '@/lib/api/sites'
+import { QUERY_KEYS } from '@/lib/api/query-client'
+import { CrawlSiteRequest } from '@/lib/types/sites'
 import { useTranslation } from '@/lib/hooks/use-translation'
 
 const MAX_BATCH_SIZE = 50
@@ -37,6 +41,8 @@ const createSourceSchema = z.object({
   transformations: z.array(z.string()).optional(),
   embed: z.boolean(),
   async_processing: z.boolean(),
+  crawlSite: z.boolean().optional(),
+  maxPages: z.string().optional(),
 }).refine((data) => {
   if (data.type === 'link') {
     return !!data.url && data.url.trim() !== ''
@@ -119,6 +125,7 @@ export function AddSourceDialog({
   const { data: notebooks = [], isLoading: notebooksLoading } = useNotebooks()
   const { data: transformations = [], isLoading: transformationsLoading } = useTransformations()
   const { data: settings } = useSettings()
+  const queryClient = useQueryClient()
 
   // Form setup
   const {
@@ -136,6 +143,7 @@ export function AddSourceDialog({
       embed: settings?.default_embedding_option === 'always' || settings?.default_embedding_option === 'ask',
       async_processing: true,
       transformations: [],
+      crawlSite: false,
     },
   })
 
@@ -157,6 +165,7 @@ export function AddSourceDialog({
         embed: embedValue,
         async_processing: true,
         transformations: [],
+        crawlSite: false,
       })
     }
   }, [settings, transformations, defaultNotebookId, reset])
@@ -298,6 +307,50 @@ export function AddSourceDialog({
 
   // Single source submission
   const submitSingleSource = async (data: CreateSourceFormData): Promise<void> => {
+    // Crawl mode: single URL + "crawl this site" → create a Site and start a crawl
+    if (
+      data.crawlSite &&
+      data.type === 'link' &&
+      parsedUrls.length === 1
+    ) {
+      const siteUrl = parsedUrls[0]
+      const maxPagesRaw = data.maxPages?.trim()
+      const maxPages = maxPagesRaw ? Number(maxPagesRaw) : undefined
+
+      setProcessingStatus({ message: t('sources.crawlProcessing') })
+
+      const site = await sitesApi.createSite({ url: siteUrl, max_pages: maxPages })
+
+      const crawlRequest: CrawlSiteRequest = {
+        notebook_ids: selectedNotebooks.length > 0 ? selectedNotebooks : undefined,
+        transformations: selectedTransformations.length > 0 ? selectedTransformations : undefined,
+        embed: data.embed,
+      }
+      if (maxPages) crawlRequest.max_pages = maxPages
+
+      await sitesApi.crawlSite(site.id, crawlRequest)
+
+      // Refresh the sites list
+      await queryClient.invalidateQueries({ queryKey: QUERY_KEYS.sites })
+
+      // Refresh affected notebooks' sources so crawled pages show up
+      for (const notebookId of selectedNotebooks) {
+        await queryClient.invalidateQueries({
+          queryKey: QUERY_KEYS.sources(notebookId),
+          refetchType: 'active',
+        })
+        await queryClient.invalidateQueries({
+          queryKey: QUERY_KEYS.sourcesInfinite(notebookId),
+          refetchType: 'active',
+        })
+      }
+
+      toast.success(t('sites.crawlStarted'), {
+        description: t('sites.crawlStartedDesc'),
+      })
+      return
+    }
+
     const createRequest: CreateSourceRequest = {
       type: data.type,
       notebooks: selectedNotebooks,

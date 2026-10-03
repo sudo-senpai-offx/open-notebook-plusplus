@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useState } from 'react'
-import { AlertCircle, Loader2, RefreshCcw } from 'lucide-react'
+import { AlertCircle, ChevronDown, ChevronUp, Loader2, RefreshCcw } from 'lucide-react'
 
 import { useDeletePodcastEpisode, usePodcastEpisodes, useRetryPodcastEpisode } from '@/lib/hooks/use-podcasts'
 import { EpisodeCard } from '@/components/podcasts/EpisodeCard'
@@ -12,6 +12,9 @@ import { Separator } from '@/components/ui/separator'
 import { GeneratePodcastDialog } from '@/components/podcasts/GeneratePodcastDialog'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import type { TFunction } from 'i18next'
+import type { PodcastEpisode } from '@/lib/types/podcasts'
+
+const PAGE_SIZE = 5
 
 const getSTATUS_ORDER = (t: TFunction): Array<{
   key: 'running' | 'completed' | 'failed' | 'pending'
@@ -80,6 +83,14 @@ export function EpisodesTab() {
 
   const emptyState = !isLoading && episodes.length === 0
 
+  const [expandedGroups, setExpandedGroups] = useState<
+    Partial<Record<'running' | 'completed' | 'failed' | 'pending', boolean>>
+  >({})
+
+  const toggleGroup = useCallback((key: 'running' | 'completed' | 'failed' | 'pending') => {
+    setExpandedGroups((prev) => ({ ...prev, [key]: !prev[key] }))
+  }, [])
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -143,10 +154,17 @@ export function EpisodesTab() {
       ) : null}
 
       {getSTATUS_ORDER(t).map(({ key, title, description }) => {
-        const data = statusGroups[key]
-        if (!data || data.length === 0) {
+        const group = statusGroups[key]
+        if (!group || group.length === 0) {
           return null
         }
+
+        const isExpanded = expandedGroups[key] ?? false
+        const visible: PodcastEpisode[] = isExpanded
+          ? group
+          : group.slice(0, PAGE_SIZE)
+        const hiddenCount = group.length - visible.length
+        const canToggle = group.length > PAGE_SIZE
 
         return (
           <section key={key} className="space-y-4">
@@ -158,7 +176,7 @@ export function EpisodesTab() {
             </div>
             <Separator />
             <div className="space-y-4">
-              {data.map((episode) => (
+              {visible.map((episode) => (
                 <EpisodeCard
                   key={episode.id}
                   episode={episode}
@@ -169,6 +187,22 @@ export function EpisodesTab() {
                 />
               ))}
             </div>
+            {canToggle ? (
+              <div className="flex justify-center">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => toggleGroup(key)}
+                  aria-expanded={isExpanded}
+                >
+                  {isExpanded ? <ChevronUp className="mr-2 h-4 w-4" /> : <ChevronDown className="mr-2 h-4 w-4" />}
+                  {isExpanded ? t('podcasts.showLess') : t('podcasts.showMore')}
+                  {!isExpanded && hiddenCount > 0 ? (
+                    <span className="ml-1 text-muted-foreground">({hiddenCount})</span>
+                  ) : null}
+                </Button>
+              </div>
+            ) : null}
           </section>
         )
       })}

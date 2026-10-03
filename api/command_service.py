@@ -20,6 +20,7 @@ class CommandService:
             # This is needed because submit_command validates against local registry
             try:
                 import commands.podcast_commands  # noqa: F401
+                import commands.site_commands  # noqa: F401
             except ImportError as import_err:
                 logger.error(f"Failed to import command modules: {import_err}")
                 raise ValueError("Command modules not available")

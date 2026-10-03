@@ -15,7 +15,9 @@ services:
       # for local debugging (e.g. Surrealist, `surreal sql`). Exposing this
       # on 0.0.0.0 would let anyone who can reach the host connect with the
       # default root:root credentials.
-      - "127.0.0.1:8000:8000"
+      # Not on 8000: StudyLens (~/tools/studylens) publishes host 8000.
+      # 8108 is free for host-side SurrealDB debugging.
+      - "127.0.0.1:8108:8000"
     volumes:
       - ./surreal_data:/mydata
     environment:
@@ -24,14 +26,15 @@ services:
     pull_policy: always
 
   open_notebook:
-    image: lfnovo/open_notebook:v1-latest
+    build: .
     ports:
       - "8502:8502"  # Web UI
       - "5055:5055"  # REST API
     environment:
-      # REQUIRED: Change this to your own secret string
-      # This encrypts your API keys in the database
-      - OPEN_NOTEBOOK_ENCRYPTION_KEY=change-me-to-a-secret-string
+      # REQUIRED: encryption key for API keys stored in the DB.
+      # Loaded from .env (gitignored); do not commit a real secret here.
+      # Changing it will make already-encrypted credentials undecryptable.
+      - OPEN_NOTEBOOK_ENCRYPTION_KEY=${OPEN_NOTEBOOK_ENCRYPTION_KEY}
 
       # Database connection. SURREAL_USER / SURREAL_PASSWORD default to root:root
       # for local use; override them in a .env file before exposing the instance
@@ -41,6 +44,13 @@ services:
       - SURREAL_PASSWORD=${SURREAL_PASSWORD:-root}
       - SURREAL_NAMESPACE=open_notebook
       - SURREAL_DATABASE=open_notebook
+
+      # Chat / embedding / STT / TTS providers are configured via the Settings UI
+      # (stored in SurrealDB), NOT via these env vars — the app does not read
+      # OPEN_NOTEBOOK_PROVIDER_* / *_API_URL. Only OLLAMA_API_BASE is honoured
+      # here, pointing at the host's systemd-managed Ollama instance.
+
+      - OLLAMA_API_BASE=http://host.docker.internal:11434
 
       # OPTIONAL: heavy extraction runtimes, installed on first startup when
       # enabled (downloads are cached on the ./notebook_data volume, so only the
@@ -53,10 +63,48 @@ services:
       # OPTIONAL: max concurrent background tasks the worker processes at once
       # (default 5). Set to 1 for sequential processing on single-GPU / local
       # LLM setups to avoid overloading the model with parallel requests.
-      # - OPEN_NOTEBOOK_WORKER_MAX_TASKS=1
+      - OPEN_NOTEBOOK_WORKER_MAX_TASKS=1
     volumes:
       - ./notebook_data:/app/data
+    # Reach the host's systemd-managed Ollama (http://host.docker.internal:11434)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - surrealdb
     restart: always
     pull_policy: always
+
+  whisper:
+    build: ../whisper.cpp
+    image: whisper.cpp:local
+    command: ["./build/bin/whisper-server", "--model", "/app/models/ggml-large-v3-turbo-q5_0.bin", "--host", "0.0.0.0", "--port", "9000", "--inference-path", "/v1/audio/transcriptions"]
+    ports:
+      - "9000:9000"
+    volumes:
+      - ../whisper_models:/app/models
+    profiles: ["media"]
+    restart: always
+
+  piper:
+    build: /home/dev-sudo-senpai/piper
+    image: piper:local
+    profiles: ["media"]
+    ports:
+      - "9600:9600"
+    volumes:
+      - ~/piper_models:/app/models
+    restart: always
+
+  # piper-plus in-process Japanese TTS (multilingual tsukuyomi). Same voices
+  # dir, OpenAI-compatible contract on 9601.
+  piper-ja:
+    build: /home/dev-sudo-senpai/piper-ja
+    image: piper-ja:local
+    profiles: ["media"]
+    ports:
+      - "9601:9601"
+    volumes:
+      - ~/piper_models:/app/models
+    restart: always
+
+

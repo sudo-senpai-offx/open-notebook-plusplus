@@ -1,0 +1,5 @@
+-- Migration 26 rollback: remove site_id link and the site table (ADR-008)
+
+REMOVE FIELD IF EXISTS site_id ON TABLE source;
+
+REMOVE TABLE IF EXISTS site;

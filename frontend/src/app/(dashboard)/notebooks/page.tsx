@@ -5,6 +5,7 @@ import { useMemo, useState } from 'react'
 import { AppShell } from '@/components/layout/AppShell'
 import { NotebookList } from './components/NotebookList'
 import { RecentlyViewed } from './components/RecentlyViewed'
+import { MinifluxInbox } from './components/MinifluxInbox'
 import { Button } from '@/components/ui/button'
 import { Plus, RefreshCw, LayoutGrid, List } from 'lucide-react'
 import { useNotebooks } from '@/lib/hooks/use-notebooks'
@@ -103,6 +104,8 @@ export default function NotebooksPage() {
         </div>
         
         <div className="space-y-8">
+          <MinifluxInbox />
+
           <RecentlyViewed />
 
           <NotebookList 

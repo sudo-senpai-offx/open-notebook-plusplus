@@ -17,11 +17,40 @@ from open_notebook.podcasts.models import (
 )
 from open_notebook.utils.model_utils import full_model_dump
 
+
+# NOTE: podcast_creator is an optional dependency (not present in this
+# environment's poetry venv). `configure`/`create_podcast` are bound to real
+# module-level names so the worker can `import commands` without the library,
+# tests can patch the names, and the command raises a clear error only when
+# actually invoked while the library is missing.
+def _load_podcast_creator() -> tuple:
+    """Import podcast_creator on first use and return (configure, create_podcast).
+
+    Deferred import keeps `import commands` working without the optional
+    library; a missing library surfaces as a RuntimeError at call time, which
+    marks the job failed (RuntimeError is transient, so it would retry rather
+    than permanently fail - intended, since the library may be installed later).
+    """
+    try:
+        from podcast_creator import configure, create_podcast
+    except ImportError as e:
+        logger.error(f"Failed to import podcast_creator: {e}")
+        raise RuntimeError("podcast_creator library not available") from e
+    return configure, create_podcast
+
+
+def _podcast_creator_unavailable(*args, **kwargs):
+    """Placeholder standing in for `configure`/`create_podcast` when the
+    optional podcast_creator library is not installed."""
+    _load_podcast_creator()  # raises RuntimeError when the library is missing
+    raise RuntimeError("podcast_creator library not available")
+
+
 try:
     from podcast_creator import configure, create_podcast
-except ImportError as e:
-    logger.error(f"Failed to import podcast_creator: {e}")
-    raise ValueError("podcast_creator library not available")
+except ImportError:
+    configure = _podcast_creator_unavailable
+    create_podcast = _podcast_creator_unavailable
 
 
 def build_episode_output_dir(podcasts_folder: str = PODCASTS_FOLDER) -> tuple[str, Path]:

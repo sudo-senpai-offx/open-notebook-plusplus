@@ -1,0 +1,24 @@
+-- Migration 26: Site crawling - add `site` table and link crawled sources (ADR-008)
+-- The `site` table stores crawl configuration and lifecycle state, read/written by
+-- the `crawl_site` command and the /sites API router.
+
+DEFINE TABLE IF NOT EXISTS site SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS url ON TABLE site TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS name ON TABLE site TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS restrict_to_origin ON TABLE site TYPE option<bool> DEFAULT True;
+DEFINE FIELD IF NOT EXISTS follow_sitemap ON TABLE site TYPE option<bool> DEFAULT True;
+DEFINE FIELD IF NOT EXISTS respect_robots_txt ON TABLE site TYPE option<bool> DEFAULT True;
+DEFINE FIELD IF NOT EXISTS max_pages ON TABLE site TYPE option<int> DEFAULT 50;
+DEFINE FIELD IF NOT EXISTS user_agent ON TABLE site TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE site TYPE option<string> DEFAULT 'idle';
+DEFINE FIELD IF NOT EXISTS last_run_at ON TABLE site TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_run_duration ON TABLE site TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS last_error ON TABLE site TYPE option<string>;
+
+DEFINE FIELD IF NOT EXISTS created ON site DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON site DEFAULT time::now() VALUE time::now();
+
+-- Soft link from crawled sources back to their site. Optional on purpose: a site
+-- deletion nulls the link instead of cascading, so sources survive site removal.
+DEFINE FIELD IF NOT EXISTS site_id ON TABLE source TYPE option<record<site>>;

@@ -415,11 +415,22 @@ class Source(ObjectModel):
     command: Optional[Union[str, RecordID]] = Field(
         default=None, description="Link to surreal-commands processing job"
     )
+    site_id: Optional[Union[str, RecordID]] = Field(
+        default=None, description="Link to the site this source was crawled from"
+    )
 
     @field_validator("command", mode="before")
     @classmethod
     def parse_command(cls, value):
         """Parse command field to ensure RecordID format"""
+        if isinstance(value, str) and value:
+            return ensure_record_id(value)
+        return value
+
+    @field_validator("site_id", mode="before")
+    @classmethod
+    def parse_site_id(cls, value):
+        """Parse site_id field to ensure RecordID format"""
         if isinstance(value, str) and value:
             return ensure_record_id(value)
         return value
@@ -527,10 +538,15 @@ class Source(ObjectModel):
             logger.exception(e)
             raise DatabaseOperationError("Failed to fetch insights for source")
 
-    async def add_to_notebook(self, notebook_id: str) -> Any:
+    async def add_to_notebook(self, notebook_id: str, validate: bool = True) -> Any:
         if not notebook_id:
             raise InvalidInputError("Notebook ID must be provided")
-        await Notebook.get(notebook_id)  # raises NotFoundError if invalid/missing
+        if validate:
+            # SurrealDB record links do NOT prevent dangling references, so verify
+            # the notebook exists eagerly. Callers that already validated the set
+            # (e.g. the site crawl worker) skip this to avoid a full model fetch
+            # once per relate.
+            await Notebook.get(notebook_id)  # raises NotFoundError if invalid/missing
         return await self.relate("reference", notebook_id)
 
     async def vectorize(self) -> str:

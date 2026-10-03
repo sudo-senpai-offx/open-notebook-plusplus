@@ -29,6 +29,14 @@ export const sourcesApi = {
     return response.data
   },
 
+  inboxMiniflux: async (limit = 10) => {
+    const response = await apiClient.get<SourceListResponse[]>(
+      '/sources/inbox/miniflux',
+      { params: { limit } },
+    )
+    return response.data
+  },
+
   create: async (data: CreateSourceRequest & { file?: File }) => {
     // Always use FormData to match backend expectations
     const formData = new FormData()

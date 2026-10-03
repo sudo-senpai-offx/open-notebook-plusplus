@@ -351,5 +351,59 @@ class TestErrorClassifier413:
         assert "payload is too large" in message
 
 
+# ============================================================================
+# TEST SUITE 5: Error Classification for Empty Messages
+# ============================================================================
+
+
+class TestErrorClassifierEmptyMessage:
+    """Provider errors (e.g. httpx.ReadTimeout, EsperantoError) may carry an empty
+    message. classify_error must never surface truncated empty text."""
+
+    def _classify(self, exc):
+        from open_notebook.utils.error_classifier import classify_error
+
+        return classify_error(exc)
+
+    def test_read_timeout_empty_message_maps_to_network_error(self):
+        import httpx
+
+        exc = httpx.ReadTimeout("", request=httpx.Request("GET", "http://localhost"))
+        exc_class, message = self._classify(exc)
+        assert exc_class.__name__ == "NetworkError"
+        assert message.strip()
+
+    def test_esperanto_error_empty_message_not_empty_output(self):
+        from esperanto.common_types.exceptions import EsperantoError
+
+        exc_class, message = self._classify(EsperantoError(""))
+        assert exc_class.__name__ == "ExternalServiceError"
+        assert message.strip()
+        assert "EsperantoError" in message
+
+    def test_unclassified_empty_message_falls_back_to_type_name(self):
+        class WeirdEmptyError(Exception):
+            pass
+
+        exc_class, message = self._classify(WeirdEmptyError(""))
+        assert exc_class.__name__ == "ExternalServiceError"
+        assert message.strip()
+        assert "WeirdEmptyError" in message
+
+    def test_pass_through_rule_with_empty_message_is_not_blank(self):
+        from open_notebook.utils.error_classifier import _CLASSIFICATION_RULES
+
+        pass_through = [m for _, _, m in _CLASSIFICATION_RULES if m is None]
+        assert pass_through, "Expected at least one pass-through rule"
+        # A pass-through exception matching a keyword on top of an empty message
+        # should still fall back to the type name rather than empty text.
+        class ModelNotFoundError(Exception):
+            pass
+
+        exc_class, message = self._classify(ModelNotFoundError("does not exist"))
+        assert exc_class.__name__ == "ConfigurationError"
+        assert message.strip()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

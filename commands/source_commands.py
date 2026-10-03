@@ -13,6 +13,7 @@ from open_notebook.exceptions import (
     ContextLengthExceededError,
     IncompleteGenerationError,
     InvalidInputError,
+    NotFoundError,
 )
 
 try:
@@ -85,7 +86,7 @@ async def process_source_command(
         # 2. Get existing source record to update its command field
         source = await Source.get(input_data.source_id)
         if not source:
-            raise ValueError(f"Source '{input_data.source_id}' not found")
+            raise NotFoundError(f"Source '{input_data.source_id}' not found")
 
         # Update source with command reference
         source.command = (
@@ -142,6 +143,26 @@ async def process_source_command(
             f"Generation failed (permanent) for source {input_data.source_id}: {e}"
         )
         raise  # Preserve failed job status; stop_on prevents automatic retries.
+    except NotFoundError as e:
+        # Source referenced by the job no longer exists (e.g. docker-era
+        # cleanup deleted records while jobs were queued). Rather than
+        # surfacing a permanent failure for a record that can never be
+        # processed, complete the job successfully as a no-op and log the
+        # reason for traceability.
+        processing_time = time.time() - start_time
+        logger.warning(
+            f"Source processing skipped for source {input_data.source_id} - "
+            f"not found: {e}"
+        )
+        return SourceProcessingOutput(
+            success=True,
+            source_id=input_data.source_id,
+            embedded_chunks=0,
+            insights_created=0,
+            processing_time=processing_time,
+            error_message=str(e),
+        )
+
     except ValueError as e:
         # Validation errors are permanent failures. Re-raise so surreal-commands
         # marks the job as `failed` (stop_on=[ValueError] already prevents
@@ -227,7 +248,7 @@ async def run_transformation_command(
         # Load source
         source = await Source.get(input_data.source_id)
         if not source:
-            raise ValueError(f"Source '{input_data.source_id}' not found")
+            raise NotFoundError(f"Source '{input_data.source_id}' not found")
 
         # Load transformation
         transformation = await Transformation.get(input_data.transformation_id)
@@ -264,6 +285,22 @@ async def run_transformation_command(
             f"{input_data.transformation_id} on source {input_data.source_id}: {e}"
         )
         raise  # Preserve failed job status; stop_on prevents automatic retries.
+    except NotFoundError as e:
+        # Source referenced by the job no longer exists - complete as a clean
+        # no-op instead of a permanent failure (see process_source_command).
+        processing_time = time.time() - start_time
+        logger.warning(
+            f"Transformation skipped for source {input_data.source_id} - "
+            f"source not found: {e}"
+        )
+        return RunTransformationOutput(
+            success=True,
+            source_id=input_data.source_id,
+            transformation_id=input_data.transformation_id,
+            processing_time=processing_time,
+            error_message=str(e),
+        )
+
     except ValueError as e:
         # Validation errors are permanent failures - don't retry
         processing_time = time.time() - start_time

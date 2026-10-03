@@ -46,13 +46,24 @@ ENV PYTHONUNBUFFERED=1
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 ENV UV_HTTP_TIMEOUT=120
+# Cap parallel downloads: under Docker Desktop's embedded DNS (192.168.65.7)
+# uv's default burst of simultaneous lookups returns EAI_AGAIN, failing the
+# whole venv download. A small pool keeps DNS traffic burst-free and reliable.
+ENV UV_CONCURRENT_DOWNLOADS=8
 
 # Copy dependency files and minimal package structure first for better layer caching
 COPY pyproject.toml uv.lock ./
 COPY open_notebook/__init__.py ./open_notebook/__init__.py
 
 # Install dependencies (this layer is cached unless dependencies change)
-RUN uv sync --frozen --no-dev
+# Retry to survive transient DNS/registry failures (same pattern as npm ci
+# above); uv's wheel cache persists across attempts within this layer, so a
+# flaky lookup on files.pythonhosted.org does not mean re-downloading wheels.
+RUN i=0; until uv sync --frozen --no-dev; do \
+      i=$((i+1)); \
+      if [ "$i" -ge 5 ]; then echo "uv sync failed after $i attempts"; exit 1; fi; \
+      echo "uv sync failed (attempt $i); retrying in 15s"; sleep 15; \
+    done
 
 # Pre-download tiktoken encoding so the app works offline (issue #264).
 # /app/tiktoken-cache is intentionally outside /app/data/ so that volume mounts
@@ -68,12 +79,14 @@ FROM surrealdb/surrealdb:v2 AS surreal-binary
 # Stage 4: Shared runtime base (everything common to both variants)
 FROM python:3.12-slim-trixie AS runtime-base
 
-# Install only runtime system dependencies (no build tools)
-# Add Node.js 22.x LTS for running the frontend
+# Install runtime system dependencies
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ffmpeg \
     supervisor \
     curl \
+    chromium \
+    libglib2.0-0 \
+    libgl1 \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -85,6 +98,14 @@ WORKDIR /app
 
 # Copy the virtual environment from the backend builder
 COPY --from=backend-builder /app/.venv /app/.venv
+
+# Note: Docling / Crawl4AI are NOT pre-installed here. They are opt-in heavy
+# runtimes (see docs/7-DEVELOPMENT/decisions/ADR-007-optin-runtimes.md): the
+# compose profile keeps OPEN_NOTEBOOK_ENABLE_DOCLING / CRAWL4AI off by default,
+# and scripts/docker-entrypoint.sh installs them on first boot only when those
+# flags are turned on (cached on /app/data). Installing them unconditionally
+# here would add several GB (ML stack, OCR, Chromium) to every image for
+# functionality the local profile never uses.
 
 # Copy the source code
 COPY . /app

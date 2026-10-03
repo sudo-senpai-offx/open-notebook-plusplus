@@ -358,6 +358,12 @@ class SourceCreate(BaseModel):
     async_processing: bool = Field(
         False, description="Whether to process source asynchronously"
     )
+    # Optional topic tags applied at creation time
+    topics: Optional[List[str]] = Field(
+        None,
+        max_length=50,
+        description="Topic tags to set on the source (max 50)",
+    )
 
     @model_validator(mode="after")
     def validate_notebook_fields(self):
@@ -463,6 +469,98 @@ class SourceStatusResponse(BaseModel):
         None, description="Detailed processing information"
     )
     command_id: Optional[str] = Field(None, description="Command ID if available")
+
+
+# Site crawling API models (ADR-008)
+class SiteCreate(BaseModel):
+    url: str = Field(..., description="Seed URL the crawl starts from")
+    name: Optional[str] = Field(None, description="Display name for the site")
+    restrict_to_origin: bool = Field(
+        True, description="Only crawl pages on the seed origin"
+    )
+    follow_sitemap: bool = Field(True, description="Seed the crawl from /sitemap.xml")
+    respect_robots_txt: bool = Field(
+        True, description="Honor robots.txt disallow rules"
+    )
+    max_pages: int = Field(50, ge=1, le=1000, description="Max pages per crawl")
+    user_agent: Optional[str] = Field(None, description="User-Agent for the crawl")
+
+
+class SiteUpdate(BaseModel):
+    name: Optional[str] = Field(None, description="Display name for the site")
+    restrict_to_origin: Optional[bool] = Field(
+        None, description="Only crawl pages on the seed origin"
+    )
+    follow_sitemap: Optional[bool] = Field(
+        None, description="Seed the crawl from /sitemap.xml"
+    )
+    respect_robots_txt: Optional[bool] = Field(
+        None, description="Honor robots.txt disallow rules"
+    )
+    max_pages: Optional[int] = Field(None, ge=1, le=1000, description="Max pages per crawl")
+    user_agent: Optional[str] = Field(None, description="User-Agent for the crawl")
+
+
+class SiteResponse(BaseModel):
+    id: str
+    url: str
+    name: Optional[str]
+    restrict_to_origin: bool
+    follow_sitemap: bool
+    respect_robots_txt: bool
+    max_pages: int
+    user_agent: Optional[str]
+    status: Optional[str]
+    last_run_at: Optional[str]
+    last_run_duration: Optional[float]
+    last_error: Optional[str]
+    created: str
+    updated: str
+
+
+class SiteListResponse(BaseModel):
+    id: str
+    url: str
+    name: Optional[str]
+    max_pages: int
+    status: Optional[str]
+    last_run_at: Optional[str]
+    last_run_duration: Optional[float]
+    last_error: Optional[str]
+    created: str
+    updated: str
+    source_count: int = 0
+
+
+class CrawlSiteRequest(BaseModel):
+    notebook_ids: List[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description="Notebooks to attach crawled sources to (max 50)",
+    )
+    transformations: List[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description="Transformation IDs to apply to each crawled page (max 50)",
+    )
+    embed: bool = Field(True, description="Whether to embed crawled pages for search")
+    max_pages: Optional[int] = Field(
+        None, ge=1, le=1000, description="Override the site's max_pages for this run"
+    )
+
+
+class CrawlSiteResponse(BaseModel):
+    job_id: str
+    message: str = "Crawl job submitted"
+
+
+class SiteSourceResponse(BaseModel):
+    id: str
+    title: Optional[str]
+    url: Optional[str]
+    status: Optional[str]
+    created: str
+    updated: str
 
 
 # Error response

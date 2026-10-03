@@ -84,17 +84,26 @@ def classify_error(exception: BaseException) -> tuple[type[OpenNotebookError], s
     error_type_name = type(exception).__name__.lower()
     combined = f"{error_type_name}: {error_str}"
 
+    # Some provider errors (e.g. httpx.TimeoutException, EsperantoError) carry an
+    # empty message. Falling back to the exception type name keeps the surfaced
+    # error text meaningful instead of truncated empty text like "AI service error: ".
+    fallback_message = type(exception).__name__
+
     for keywords, exc_class, message in _CLASSIFICATION_RULES:
         for keyword in keywords:
             if keyword in combined:
-                user_message = message if message is not None else _truncate(str(exception))
+                user_message = (
+                    message
+                    if message is not None
+                    else _truncate(str(exception) or fallback_message)
+                )
                 return exc_class, user_message
 
     # Unclassified error - log for future improvement
     logger.warning(
         f"Unclassified LLM error ({type(exception).__name__}): {exception}"
     )
-    return ExternalServiceError, f"AI service error: {_truncate(str(exception))}"
+    return ExternalServiceError, f"AI service error: {_truncate(str(exception) or fallback_message)}"
 
 
 def _truncate(text: str, max_length: int = 200) -> str:

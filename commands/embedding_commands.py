@@ -16,7 +16,11 @@ from surreal_commands import CommandInput, CommandOutput, command, submit_comman
 from open_notebook.ai.models import model_manager
 from open_notebook.database.repository import ensure_record_id, repo_insert, repo_query
 from open_notebook.domain.notebook import Note, Source, SourceInsight
-from open_notebook.exceptions import ConfigurationError, ContextLengthExceededError
+from open_notebook.exceptions import (
+    ConfigurationError,
+    ContextLengthExceededError,
+    NotFoundError,
+)
 from open_notebook.utils.chunking import ContentType, chunk_text, detect_content_type
 from open_notebook.utils.embedding import generate_embedding, generate_embeddings
 
@@ -82,6 +86,18 @@ async def _embed_record(
         )
         return extra_fields, processing_time, None
 
+    except NotFoundError as e:
+        # Record was deleted while the job was queued (e.g. docker-era
+        # cleanup). Treat as a clean no-op: complete successfully so the
+        # failure list isn't polluted by stale references, but log the reason
+        # for traceability.
+        processing_time = time.time() - start_time
+        cmd_id = get_command_id(input_data)
+        logger.warning(
+            f"Embedding skipped for {kind} {record_id} - not found "
+            f"(command: {cmd_id}): {e}"
+        )
+        return {}, processing_time, None
     except ValueError as e:
         # Permanent failure - don't retry
         processing_time = time.time() - start_time
@@ -111,7 +127,7 @@ async def _embed_markdown_record(
     # 1. Load record
     record = await loader(record_id)
     if not record:
-        raise ValueError(f"{label} '{record_id}' not found")
+        raise NotFoundError(f"{label} '{record_id}' not found")
 
     if not record.content or not record.content.strip():
         raise ValueError(f"{label} '{record_id}' has no content to embed")
@@ -327,7 +343,7 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
         # 1. Load source
         source = await Source.get(input_data.source_id)
         if not source:
-            raise ValueError(f"Source '{input_data.source_id}' not found")
+            raise NotFoundError(f"Source '{input_data.source_id}' not found")
 
         if not source.full_text or not source.full_text.strip():
             raise ValueError(f"Source '{input_data.source_id}' has no text to embed")
