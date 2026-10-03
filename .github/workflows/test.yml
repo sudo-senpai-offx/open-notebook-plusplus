@@ -9,6 +9,7 @@ on:
       - '**.md'
       - 'docs/**'
       - '.github/workflows/claude*.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -157,3 +158,87 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  resource-envelope:
+    name: Resource Envelope (optional, non-gating)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    timeout-minutes: 30
+    env:
+      MEASURE_SURREAL_ADDRESS: 127.0.0.1
+      MEASURE_SURREAL_PORT: '8000'
+      OLLAMA_API_BASE: http://127.0.0.1:11434
+    services:
+      surrealdb:
+        image: surrealdb/surrealdb:v2
+        command: start --bind 0.0.0.0:8000
+        env:
+          SURREAL_USER: root
+          SURREAL_PASS: root
+        ports:
+          - 8000:8000
+      ollama:
+        image: ollama/ollama:latest
+        ports:
+          - 11434:11434
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Write .env for spawned processes
+        run: |
+          printf 'SURREAL_USER=root\nSURREAL_PASSWORD=root\nOPEN_NOTEBOOK_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)" > .env
+          cat .env
+
+      - name: Wait for SurrealDB
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf -m 2 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+              echo "SurrealDB healthy after ${i} tries"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "SurrealDB did not become healthy" >&2
+          exit 1
+
+      - name: Wait for Ollama
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf -m 2 "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1; then
+              echo "Ollama ready after ${i} tries"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Ollama did not become ready" >&2
+          exit 1
+
+      - name: Pull bge-m3 embedding model
+        run: |
+          docker exec "${{ job.services.ollama.id }}" ollama pull bge-m3
+          curl -sf -m 2 "http://127.0.0.1:11434/api/tags" -o /dev/null
+          echo "bge-m3 available"
+
+      - name: Seed embedding model + default into SurrealDB
+        run: |
+          printf "CREATE model:ci_bge_m3 CONTENT { name: 'bge-m3', provider: 'ollama', type: 'embedding' };\nUPSERT open_notebook:default_models CONTENT { default_embedding_model: 'model:ci_bge_m3' };\n" | docker exec -i "${{ job.services.surrealdb.id }}" /surreal sql \
+            --endpoint "http://127.0.0.1:8000" \
+            --username root --password root \
+            --namespace open_notebook --database open_notebook
+          echo "Seeded model + defaults"
+
+      - name: Run resource harness (spawn + smoke)
+        run: bash scripts/measure_resources.sh
