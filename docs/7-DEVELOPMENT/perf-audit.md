@@ -268,7 +268,116 @@ matches samples to diff top-K recall against the after-probe.
   vector, assertions unchanged). `test_migration_25_up_down_up` applies only
   migration 24, so its 2-dim fixture is untouched.
 
-## 5. Module sweep
+#### A1 experiment-1 keep/rollback gate: envelope capacity + parity verdict (2026-10-07)
+
+**OOM was envelope capacity, not migration 28.** After `--force-recreate` (which
+re-drops docker limits to compose defaults) the app ran uncapped and idle
+footprint was ~1,286 MiB — i.e. it no longer fit the 1,280m throttle cap, so a
+vector search (which briefly stretches RSS) tripped `exit 137`. Proof: text
+search survived the same cap; api never runs HNSW (surrealdb does); process list
+was clean of orphans; light GET + text search OK. After re-applying the throttle
+the app immediately OOM'd again — the *envelope* no longer fit, so the F flag is
+on the envelope, not the migration.
+
+**Envelope correction (applied live, kept for every A1 probe below):** app
+memory raised to **2 GiB** (CPU stays 2c; surrealdb stays 1c/512m). The stack
+then runs vector search end-to-end. Rationale: 2 GiB is the smallest raise that
+fits idle+peak; db verbatim at 512m proves DB memory is not the constraint.
+(Note: `docker update` limits do not survive `compose up --force-recreate`;
+deploys still rebuild the image.)
+
+**Verdict: REJECT A1 step 1 — roll back to migration 27 at the gate.** The
+locked keep-condition is *strictly positive latency delta* **AND** *parity
+(≥ same hits, output shape intact)*. The db-phase delta is strictly positive
+(**818 ms vs 3194 ms baseline p50, −74%**) and shape is intact, but parity
+**fails on both corpora**:
+
+| Corpus | baseline (fn27) | after (fn28) | delta |
+|---|---|---|---|
+| test85 (85 srcs) | 22 hits | **17 hits** | −5 |
+| fixture (4 srcs) | 4 hits | **0 hits** | −4 |
+
+Determinism confirmed (repeat A/B runs return identical hit sets; the deltas are
+envelope-independent — hits are a pure function of fn + data + query params,
+identical bodies: `limit=100`, `minimum_score=0.2`).
+
+**Root cause (authoritative SQL reproduction on live 2.7, same bge-m3 query
+vector):** fn28's inner KNN runs a **global, per-table fetch window**
+(`<|200,200|>` → actually returned 190 rows, worst-sim ≈ 0.4289, because HNSW
+returns ≤ K candidates) *before* the outer scope/threshold filter. Exact-scan
+hits whose sim sits below the window floor fall out:
+
+- fixture's 4 hits (sim 0.4036–0.4189) are **all below the window floor
+  0.4289** → fn28 returns 0. A small notebook whose matches are merely "good,
+  not stellar" loses everything; this is a recall cliff, not drift.
+- test85 loses 6 parent sources (sim 0.4342–0.4591) plus a chunk-selection
+  artifact (same source surviving via a lower-scoring chunk, e.g. 0.4911 →
+  0.4896). 9 source-level diffs observed at the SQL level vs the 5 lost at the
+  API level.
+
+**Rejected rationale (recorded per locked plan):** migration 28's own comment
+flags rows beyond the fetch window as "a documented approximation" — that
+approximation violated the parity half of the gate on both corpora. The window
+is a hard cap that scales with table size / query crowdedness, independent of
+envelope. EF/K bump (e.g. K=1000/EF=1000) is **not in scope** for A1 step 1 and
+would still be an approximation with a partial-footprint tradeoff; per the plan,
+parity failure = roll back + record, then re-sequence. **Action taken:
+`run_one_down()` applied 28_down (HNSW indexes removed, exact-scan fn27
+restored verbatim); live fn27 re-verified to return 22 / 4 hits.**
+
+**Durable seal of the rejection (migration 29, landed live 2026-10-07):** the
+live cluster had drifted back to the rejected state — because migration 28 is
+baked into the container image, the rejected HNSW + KNN fn was **re-applied on
+container restart** (DB at version 28, `INFO FOR DB` showed the KNN operator
+again, no 27 len-guard), re-creating the parity loss until stopped. Migration
+29 makes the rejection terminal: `run_all()` re-applied 28_down's statements
+(fn27 exact-scan restored verbatim, 3 HNSW indexes removed) and bumped the DB
+to **version 29** with `needs_migration = false`, so no redeploy ever re-runs
+28. Verified on the live DB: version 29, exact-scan `fn::vector_search`
+(len-guard + `>= min_similarity` present, no `<|...|>` KNN operator), HNSW
+indexes absent. Post-seal parity probe on `test` (85 src, "the importance",
+`limit=100`, `minimum_score=0.2`): **22 hits**, shape
+`{id, parent_id, title, similarity, matches}` — matches the recorded baseline.
+29 down (29_down.surrealql) restores 28's HNSW/KNN state byte-for-byte, so the
+28/29 pair stays fully reversible for audit. Deploy note: the baked image still
+carries 28/29; a fresh deploy applies 29 at first boot once the DB is at 28 —
+the DB is now ahead, so restarts are safe.
+
+**Seal re-verified after a SurrealDB container restart (2026-10-07):** the DB
+container restarted cleanly mid-fixture-provisioning (`restart: always`; exit 0,
+not OOM — 512 MiB / 1 CPU envelope untouched). The migration table survived
+unchanged (`_sbl_migrations` = 1..29), and `INFO FOR TABLE` confirms the seal
+holds: `idx_source_embedding_hnsw` / `idx_source_insight_hnsw` / `idx_note_hnsw`
+absent on all three embedding tables, migration-1 BM25 `SEARCH ANALYZER`
+indexes intact, `fn::vector_search` still the exact scan (len-guard +
+`>= min_similarity`, no KNN operator). The migration version lives in the DB
+(not the container), so a DB restart cannot re-apply 28 — the durable seal is
+restart-proof. (Note: `INFO FOR DB` exposes functions/analyzers but **not**
+indexes; indexes are per-table via `INFO FOR TABLE`.)
+
+**Worker stall incident — root cause + fix (2026-10-07):** after that DB
+restart, the `surreal-commands-worker` supervisord program kept running but
+quietly stopped consuming the command queue: new ingest commands stayed in
+status `new` forever and the sync source-create path timed out at 300 s
+("Command … did not complete within 300 seconds"), which failed fixture
+provisioning twice (source 1, both attempts; partial notebooks cleaned up).
+Cause: the worker holds a long-lived SurrealDB subscription; the DB restart
+invalidate it and the worker never reconnected. Fix (no code change):
+`kill -TERM <worker pid>` → supervisord `autorestart=true` respawned it with a
+fresh connection; the two stuck commands immediately ran to `completed` and the
+queue drained. Watch item for A2: a DB restart silently wedges the worker; after
+any DB bounce, verify the queue drains (`SELECT … FROM command WHERE status =
+'new'`) rather than assuming ingest works.
+
+**A2 #6 fixture re-provisioned + 4-hit parity re-check (2026-10-07):**
+`scripts/create_fixture_notebook.py --sources 4` succeeded on the healthy
+worker → `notebook:1n4cb4qr744izp5xdo26` (fixture-throttle-…, 4 sources / 9
+chunks, embedded_chunks 2/2/3/2). Scoped `search.vector` on the fixture
+("the importance", default limit/min_score): **4 hits, shape
+`{id, matches, parent_id, similarity, title}`** — exact match to the recorded
+golden (4 hits / sim 0.4036–0.4189). test85 re-probe in the same run: **22
+hits**, same shape (baseline 22). The fixture is now the throttled corpus for
+A2 heavy flows per the locked plan.
 
 One row per module: static read + instrumented probes + footprint. Status:
 `unmeasured → probed → fixed → proven`.

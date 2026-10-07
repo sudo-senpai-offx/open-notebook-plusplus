@@ -6,10 +6,13 @@ from surrealdb import AsyncSurreal, RecordID
 
 MIGRATIONS = Path("open_notebook/database/migrations")
 
-# Migration 28 adds a write-enforced HNSW index with DIMENSION 1024 (matching
-# the embedder), so fixtures must use 1024-dim vectors — a documented schema
-# contract (see 28.surrealql), not test-gaming. Queries use the same vector as
-# the indexed rows, so similarities/assertions are unchanged from the 2-dim era.
+# Migration 28 added a write-enforced HNSW index with DIMENSION 1024 (matching
+# the embedder); migration 29 durably sealed the rejected A1 experiment back to
+# migration 27's exact sequential-cosine scan and removed those indexes. The
+# 1024-dim fixture contract is unchanged: fn27 guards on
+# array::len(embedding)=array::len($query), so rows and queries must share the
+# embedder's 1024 dimensions. Queries use the same vector as the indexed rows,
+# so similarities/assertions are unchanged from the 2-dim era.
 QUERY_VEC: list[float] = [1.0] + [0.0] * 1023
 
 

@@ -559,6 +559,61 @@ class TestMigration28:
         assert "<|200,200|>" not in sql
 
 
+class TestMigration29:
+    """Migration 29 durably seals the A1 step-1 rejection: it re-applies
+    migration 27's exact sequential scan and removes the HNSW indexes, so any
+    chain ending at version 29 terminally lands in the rejected-safe state.
+    The down file un-seals back to migration 28's HNSW + KNN state (a fully
+    reversible pair). Registered manually, not auto-discovered."""
+
+    def test_migration_files_exist(self):
+        assert (MIGRATIONS_DIR / "29.surrealql").is_file()
+        assert (MIGRATIONS_DIR / "29_down.surrealql").is_file()
+
+    def test_manager_registers_migration_29(self):
+        from open_notebook.database.async_migrate import AsyncMigrationManager
+
+        manager = AsyncMigrationManager()
+        assert len(manager.up_migrations) >= 29
+        assert len(manager.up_migrations) == len(manager.down_migrations)
+        # 29 up is the seal (exact scan, no KNN); 29 down restores the KNN.
+        assert "<|200,200|>" not in manager.up_migrations[28].sql
+        assert "<|200,200|>" in manager.down_migrations[28].sql
+
+    def test_seal_removes_indexes_and_restores_exact_scan(self):
+        sql = (MIGRATIONS_DIR / "29.surrealql").read_text()
+
+        for index in (
+            "idx_source_embedding_hnsw",
+            "idx_source_insight_hnsw",
+            "idx_note_hnsw",
+        ):
+            assert f"REMOVE INDEX IF EXISTS {index} ON" in sql
+        # fn27 exact-scan guards are back (the same contract 28 dropped).
+        assert "array::len(embedding)=array::len($query)" in sql
+        assert "embedding != none" in sql
+        # No HNSW graph operator anywhere in the seal.
+        assert "<|200,200|>" not in sql
+        assert "math::max(similarity) as similarity" in sql
+        assert "array::flatten(content) as matches" in sql
+        assert "$notebook_ids: option<array<record<notebook>>>" in sql
+
+    def test_down_unseals_to_migration_28_state(self):
+        sql = (MIGRATIONS_DIR / "29_down.surrealql").read_text()
+
+        for index in (
+            "idx_source_embedding_hnsw",
+            "idx_source_insight_hnsw",
+            "idx_note_hnsw",
+        ):
+            assert f"DEFINE INDEX IF NOT EXISTS {index} ON" in sql
+        assert sql.count("HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 40 M 12") == 3
+        assert "embedding <|200,200|> $query" in sql
+        # The 27 len-guard stays out of the restored KNN fn body.
+        fn_body = sql[sql.index("DEFINE FUNCTION") :]
+        assert "array::len(embedding)=array::len($query)" not in fn_body
+
+
 class TestResolveNotebookScope:
     """resolve_notebook_scope() validates ids before any search runs (#574, #87)."""
 
