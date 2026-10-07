@@ -35,19 +35,27 @@ text flow is 315 ms — the ~3 s delta is the vector machinery
 
 ### Locked steps (run in this order; each is throttled before/after, opt-in, keep positive deltas only)
 
-> **Order re-locked 2026-10-07** by the decomposed probe (A1 step 0, see
-> perf-audit.md §Vector search decomposition): total 3813 ms = embed 217 +
-> db 3401 (**~87%**) + assemble ~0, and the DB cost is weakly corpus-dependent
-> (2395 ms on the 9-chunk fixture). The DB-side attacks (1–3) therefore run
-> *before* the embedding cache (4); the embed-cache-first order is superseded by
-> evidence, per the re-lock with the user.
+> **Order re-locked 2026-10-07 (twice).** ① **DB-first** by the decomposed probe
+> (A1 step 0, perf-audit.md §Vector search decomposition): total 3813 ms =
+> embed 217 + db 3401 (**~87%**) + assemble ~0, and the DB cost is weakly
+> corpus-dependent (2395 ms on the 9-chunk fixture) → the DB-side attacks run
+> *before* the embedding cache. ② **HNSW-first**: reading migration 27's
+> `fn::vector_search` and timing its parts (perf-audit.md §A1 experiment-1
+> design evidence) showed **no vector index exists** (only BM25 on `content` +
+> plain `FIELDS source`) and the notebook scope is a *post-filter over a global
+> brute-force cosine scan of all 3515 `source_embedding` chunks* — so
+> "projection trim" alone is ~0-delta (the fn already returns a lean
+> `{id,parent_id,title,similarity,matches}` and ≤15 candidate rows carry
+> content) and the structural fix is the missing vector index. Step 1 is now
+> the HNSW+KNN fn rewrite with lean projections folded in; projection-trim-alone
+> is recorded as rejected-by-expected-zero-delta.
 
 | Step | Change | Hypothesis / gate |
 |---|---|---|
 | 0 | **Decomposed probe flow** `search.vector.decomposed` writing `embed_ms / db_ms / assemble_ms` | **DONE (2026-10-07)** — whale is the DB-side lookup |
-| 1 | **Projection trim**: the vector call is `SELECT * FROM fn::vector_search(...)` → project only the fields the app consumes (id, similarity, parent linkage, title/snippet), not full chunk content + embedding arrays | Cuts result transfer/serialization in the DB phase; first DB-side attack |
-| 2 | **Vector-index verify/config**: confirm the chunk tables have a `TYPE VECTOR` index (HNSW + cosine); add via migration if missing; tune top-k window / k / ef if present | If `fn::vector_search` scans unindexed, this is the structural cause of the ~const 2.4–3.4 s |
-| 3 | **Payload trim**: chunk records lean; content text out of the searched projection/serialization; list response ships ids+scores, chunk text lazy-fetched for LLM context | If chunk payload shape drives the DB phase |
+| 1 | **HNSW vector index + KNN rewrite of `fn::vector_search`**: `DEFINE INDEX ... HNSW DIMENSION 1024 DIST COSINE TYPE F32` on `source_embedding` / `source_insight` / `note` (all 1024-dim `array<float>`); fn rewritten to `<|fetch_k, EF|>` KNN with `source IN $scoped_sources` as KnnScan prefilter + cosine-threshold post-filter, lean projections, **identical output shape** (`id, parent_id, title, math::max(similarity), array::flatten(content) matches`). Projection trim folded in as the lean-projection requirement | Replaces the exact ~2.5–9 s global scan; recall/parity gate on the A2 fixture + 85-source corpus (top-K overlap + similarity drift) before latency wins count; expected DB phase ≪ 500 ms throttled |
+| 2 | **Scoping indexes**: `DEFINE INDEX` on `reference.out` + `artifact.out` (scope subqueries ~0.3–0.7 s today, unindexed) | Cheaper scope resolution; measured separately so its delta stays attributable |
+| 3 | **Payload trim**: content pulled only for grouped winners (KNN fetch-k carries content for fetch_k rows); list response ships ids+scores, chunk text lazy-fetched for LLM context | Only if KNN fetch-k shows a real content-transfer cost |
 | 4 | Query-embedding cache (hash of normalized query → reuse embed) | Zero recall cost; caps the ~217 ms leg on repeated queries |
 | 5 | Only if 1–4 exhausted — re-probe mixture / hybrid with fresh numbers | Flags stay OFF unless one proves positive; reranker already rejected (worse) and stays rejected |
 

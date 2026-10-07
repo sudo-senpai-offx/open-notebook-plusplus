@@ -178,6 +178,42 @@ corpus-size-dependent and dominated by fixed machinery (table scan / distance
 computation over the full chunk set / result serialization), which reinforces
 attacking the DB side before the embedding cache.
 
+#### A1 experiment-1 design evidence: why HNSW comes first (2026-10-07)
+
+Reading migration 27's `fn::vector_search` body and timing its parts on the live
+DB before changing anything:
+
+- **No vector index exists.** The migrations declare only BM25 indexes on
+  `content` and a plain `FIELDS source` index (`idx_source_embedding_source`).
+  `fn::vector_search` therefore runs an **exact sequential cosine scan** of the
+  chunk tables on every query.
+- **Scope is a post-filter, not a scan limit.** `WHERE ... source IN
+  $scoped_sources` is evaluated after the cosine scan, so a search scoped to the
+  9-chunk fixture still scans the *global* corpus: `source_embedding` = 3515
+  rows (all notebooks), `source_insight` = 43, `note` = 2. This explains the
+  earlier "weak corpus dependence": the driver is the global table size, not the
+  scoped set.
+- **Component timings** (live 2.7.0, single samples, ambient background worker
+  load — treat as order-of-magnitude): scope subqueries `reference` (111 rows)
+  ~0.35 s and `artifact` (2 rows) ~0.3 s; whole-table cosine scans
+  `source_embedding` ~2.5–9 s, `source_insight` ~0.6 s, `note` ~0.5 s. The
+  brute-force scan is the DB whale.
+- **Embeds are uniform**: 1024-dim `array<float>` on all three tables → a single
+  HNSW `DIMENSION 1024 DIST COSINE TYPE F32` story.
+- **SurrealDB 2.7 supports the fix** — validated on a scratch table (created
+  with copies of a real 1024-dim embedding, queried, then dropped): the HNSW
+  `DEFINE INDEX` clause, the KNN operator `WHERE embedding <|K, EF|> $query`,
+  `vector::distance::knn()` to read back the computed value, and indexed-field
+  conditions (e.g. `flag = true`) becoming **prefilter predicates inside
+  KnnScan** — exactly what scoped search needs. (`EXPLAIN` is a suffix clause in
+  this build, e.g. `SELECT ... EXPLAIN FULL`.)
+- **Conclusion** (re-locked with the user, locked-plan-2026-10.md): A1 step 1 is
+  now the HNSW vector index + KNN rewrite of `fn::vector_search` with lean
+  projections folded in. "Projection trim alone" is recorded as
+  rejected-by-expected-zero-delta: the fn already returns a lean
+  `{id,parent_id,title,similarity,matches}` and ≤15 candidate rows carry content,
+  so the app-side `SELECT *` wrapper contributes nothing.
+
 ## 5. Module sweep
 
 One row per module: static read + instrumented probes + footprint. Status:
