@@ -214,6 +214,60 @@ DB before changing anything:
   `{id,parent_id,title,similarity,matches}` and ≤15 candidate rows carry content,
   so the app-side `SELECT *` wrapper contributes nothing.
 
+#### A1 experiment-1: throttled before-baseline + plan/schema evidence (2026-10-07)
+
+Throttled envelope applied (`scripts/throttle.sh apply`: app 2 cpu / 1280m,
+surrealdb 1 cpu / 512m; state `/tmp/opencode-throttle-state.txt`). Baseline
+captured with `scripts/latency_probes.py --flows
+search.vector,search.vector.decomposed -n 5 --mode before-hnsw --json` (warmup
+beat discarded) plus golden result captures for the same query ("the
+importance", default `limit=100`, `minimum_score=0.2`) at
+`/tmp/opencode/a1-hnsw-golden/before_{test85,fixture}.json`:
+
+| Corpus | Flow | p50 | mean | p90 | hits |
+|---|---|---|---|---|---|
+| test85 (85 srcs) | search.vector | 3531.9 | 3572.7 | 3599.6 | 22 |
+| test85 (85 srcs) | .db phase | **3194.0** | 3215.8 | 3206.0 | |
+| fixture (4 srcs) | search.vector | 2458.0 | 2511.1 | 2490.3 | 4 |
+| fixture (4 srcs) | .db phase | **2069.0** | 2069.0 | 2074.0 | |
+
+The before-hnsw goldens carry ranked id / parent_id / similarity / title /
+matches samples to diff top-K recall against the after-probe.
+
+**Plan-evidence battery** (scaled scratch table, 300 × 1024-dim rows copied from
+`source_embedding`, HNSW `DIMENSION 1024 DIST COSINE TYPE F32 EFC 40 M 12`,
+`EXPLAIN FULL` suffix clause):
+
+- **KNN alone stays graph-driven.** `WHERE embedding <|200,200|> $query` →
+  `Iterate Index: idx_..._hnsw <|200,200|>`. Dropping the migration-27
+  `embedding != NONE` guard does **not** regress the plan, so it is removed too
+  (the index omits NONE rows, and 2.7 hard-errors wrong-dim inserts, so every
+  indexed row is a valid 1024-dim vector).
+- **The `array::len(embedding)=array::len($query)` guard is dropped**: EXPLAIN
+  proves it forces `Iterate Table` + `Fallback`, dead-walking the exact scan.
+- **Scope/threshold filters must NOT live in the KNN WHERE.** On 2.7,
+  `WHERE embedding <|K,EF|> $q AND src IN $scope` plans as `Iterate Index:
+  idx_..._src` and returns `[]`; the swapped order stays on HNSW but returns
+  wrong rows (1 hit vs the exact 5). The validated shape is a **subquery wrap**:
+  the inner KNN select projects `vector::similarity::cosine(embedding, $query)
+  AS similarity` (+ id / title / content / parent_id / scope key); the outer
+  applies `WHERE (!$scoped OR scope_key IN $scoped_sources) AND similarity >=
+  $min_similarity ORDER BY similarity DESC LIMIT $match_count`.
+- **Fetch-K = 200 / EF = 200 fixed literals** (KNN requires unsigned-int
+  literals — variables are a parse error — and EF must be ≥ K). Covers default
+  `limit=100` plus headroom; `match_count > 200` truncates to the fetch window
+  — a documented approximation, re-checked in the after-probe. On the 300-row
+  sample, inner `K=200` + outer scope/threshold returned the **byte-identical
+  top-5 (ids + similarity values) to the exhaustive scoped baseline**; 16 of the
+  24 in-scope rows fell inside the fetch window.
+- **Schema contract change (tests).** HNSW `DIMENSION 1024` enforces 1024-dim
+  embeddings at write time (`Incorrect vector dimension` on mismatch — verified
+  both on live 2.7 and on the embedded `mem://` engine the suite uses). The
+  migration-content fixture in `tests/test_text_search_parent.py` used 2-dim
+  `[1.0, 0.0]` vectors; those become 1024-dim arrays (query vector == embedded
+  vector, assertions unchanged). `test_migration_25_up_down_up` applies only
+  migration 24, so its 2-dim fixture is untouched.
+
 ## 5. Module sweep
 
 One row per module: static read + instrumented probes + footprint. Status:

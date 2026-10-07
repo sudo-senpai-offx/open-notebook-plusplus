@@ -498,6 +498,67 @@ class TestMigration24:
         assert "$show_notes: bool, $min_similarity: float)" in sql
 
 
+class TestMigration28:
+    """Migration 28 adds write-enforced HNSW indexes (DIMENSION 1024, matching
+    the embedder) and rewrites fn::vector_search to a KNN pre-filter with scope
+    + threshold in the outer wrapper. The down file restores migration 27's
+    exact sequential scan. Registered manually, not auto-discovered."""
+
+    def test_migration_files_exist(self):
+        assert (MIGRATIONS_DIR / "28.surrealql").is_file()
+        assert (MIGRATIONS_DIR / "28_down.surrealql").is_file()
+
+    def test_manager_registers_migration_28(self):
+        from open_notebook.database.async_migrate import AsyncMigrationManager
+
+        manager = AsyncMigrationManager()
+        assert len(manager.up_migrations) >= 28
+        assert len(manager.up_migrations) == len(manager.down_migrations)
+        assert "<|200,200|>" in manager.up_migrations[27].sql
+        assert "<|200,200|>" not in manager.down_migrations[27].sql
+
+    def test_up_defines_hnsw_indexes_and_knn_rewrite(self):
+        sql = (MIGRATIONS_DIR / "28.surrealql").read_text()
+
+        # Write-enforced HNSW index: dimension contracts the embedder, so the
+        # 2-dim parity fixtures had to move to 1024-dim (documented contract).
+        for index in (
+            "idx_source_embedding_hnsw",
+            "idx_source_insight_hnsw",
+            "idx_note_hnsw",
+        ):
+            assert f"DEFINE INDEX IF NOT EXISTS {index} ON" in sql
+        assert sql.count("HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 40 M 12") == 3
+
+        # KNN pre-filter replaces the exact scan; the 27 len-guard is gone
+        # (proven to force Iterate Table + Fallback, killing HNSW). The guard
+        # text appears only in the explanatory comment, never in the fn body.
+        assert "embedding <|200,200|> $query" in sql
+        fn_body = sql[sql.index("DEFINE FUNCTION") :]
+        assert "array::len(embedding)=array::len($query)" not in fn_body
+        assert "embedding != none" not in fn_body
+        # Scope and threshold live in the OUTER wrapper, never the KNN WHERE.
+        assert "scope_key IN $scoped_sources" in sql
+        assert "similarity >= $min_similarity" in sql
+        # Output shape stays byte-identical to migration 27.
+        assert "array::flatten(content) as matches" in sql
+        assert "math::max(similarity) as similarity" in sql
+        assert "$notebook_ids: option<array<record<notebook>>>" in sql
+
+    def test_down_removes_indexes_and_restores_exact_scan(self):
+        sql = (MIGRATIONS_DIR / "28_down.surrealql").read_text()
+
+        for index in (
+            "idx_source_embedding_hnsw",
+            "idx_source_insight_hnsw",
+            "idx_note_hnsw",
+        ):
+            assert f"REMOVE INDEX IF EXISTS {index} ON" in sql
+        assert "array::len(embedding)=array::len($query)" in sql
+        assert "embedding != none" in sql
+        assert "<|200,200|>" not in sql
+
+
 class TestResolveNotebookScope:
     """resolve_notebook_scope() validates ids before any search runs (#574, #87)."""
 

@@ -1,0 +1,106 @@
+-- Migration 28: HNSW vector index + KNN rewrite of fn::vector_search
+-- (A1 experiment-1 step 1, re-locked HNSW-first 2026-10-07)
+--
+-- Replaces migration 27's exact sequential cosine scan with a graph-driven HNSW
+-- search while keeping the fn output shape byte-identical:
+--   id, parent_id, title, math::max(similarity),
+--   array::flatten(content) as matches
+-- grouped by id, parent_id, title, ordered by similarity DESC, LIMIT $match_count.
+--
+-- Constraints proven on live SurrealDB 2.7 (docs/7-DEVELOPMENT/perf-audit.md):
+--   * The HNSW index dimension must equal the embedder dimension (1024).
+--     Wrong-dimension inserts are rejected at write time, so every indexed row
+--     is a valid vector; the migration-27 `embedding != NONE` guard is dropped
+--     (index rows always have embeddings).
+--   * <|K, EF|> requires unsigned-int literals (variables are a parse error)
+--     and EF must be >= K. K=200/EF=200 covers match_count <= 100 (API default)
+--     plus headroom; rows beyond the fetch window are a documented approximation.
+--   * Scope / threshold filters MUST live in an outer wrapper: on 2.7 they
+--     degrade the inner plan to src-index iteration (or return wrong rows).
+--   * The `array::len(embedding)=array::len($query)` guard from 27 is dropped:
+--     EXPLAIN proves it forces Iterate Table + Fallback, killing HNSW.
+
+REMOVE FUNCTION IF EXISTS fn::vector_search;
+
+DEFINE INDEX IF NOT EXISTS idx_source_embedding_hnsw ON source_embedding FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 40 M 12;
+DEFINE INDEX IF NOT EXISTS idx_source_insight_hnsw ON source_insight FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 40 M 12;
+DEFINE INDEX IF NOT EXISTS idx_note_hnsw ON note FIELDS embedding HNSW DIMENSION 1024 DIST COSINE TYPE F32 EFC 40 M 12;
+
+DEFINE FUNCTION IF NOT EXISTS fn::vector_search($query: array<float>, $match_count: int, $sources: bool, $show_notes: bool, $min_similarity: float, $notebook_ids: option<array<record<notebook>>>) {
+
+    let $scoped = $notebook_ids != NONE AND array::len($notebook_ids) > 0;
+    let $scoped_sources = IF $scoped { (SELECT VALUE in FROM reference WHERE out IN $notebook_ids) } ELSE { [] };
+    let $scoped_notes = IF $scoped { (SELECT VALUE in FROM artifact WHERE out IN $notebook_ids) } ELSE { [] };
+
+    let $source_embedding_search =
+        IF $sources {(
+            SELECT id, parent_id, title, content, similarity FROM (
+                SELECT
+                    source.id AS id,
+                    source.title AS title,
+                    content,
+                    source.id AS parent_id,
+                    source AS scope_key,
+                    vector::similarity::cosine(embedding, $query) AS similarity
+                FROM source_embedding
+                WHERE embedding <|200,200|> $query
+            )
+            WHERE (!$scoped OR scope_key IN $scoped_sources) AND similarity >= $min_similarity
+            ORDER BY similarity DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    let $source_insight_search =
+        IF $sources {(
+            SELECT id, parent_id, title, content, similarity FROM (
+                SELECT
+                    id,
+                    insight_type + ' - ' + (source.title OR '') AS title,
+                    content,
+                    source.id AS parent_id,
+                    source AS scope_key,
+                    vector::similarity::cosine(embedding, $query) AS similarity
+                FROM source_insight
+                WHERE embedding <|200,200|> $query
+            )
+            WHERE (!$scoped OR scope_key IN $scoped_sources) AND similarity >= $min_similarity
+            ORDER BY similarity DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    let $note_content_search =
+        IF $show_notes {(
+            SELECT id, parent_id, title, content, similarity FROM (
+                SELECT
+                    id,
+                    title,
+                    content,
+                    id AS parent_id,
+                    vector::similarity::cosine(embedding, $query) AS similarity
+                FROM note
+                WHERE embedding <|200,200|> $query
+            )
+            WHERE (!$scoped OR id IN $scoped_notes) AND similarity >= $min_similarity
+            ORDER BY similarity DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    let $all_results = array::union(
+        array::union($source_embedding_search, $source_insight_search),
+        $note_content_search
+    );
+
+    RETURN (
+        SELECT id, parent_id, title, math::max(similarity) as similarity,
+               array::flatten(content) as matches
+        FROM $all_results
+        WHERE id is not None
+        GROUP BY id, parent_id, title
+        ORDER BY similarity DESC
+        LIMIT $match_count
+    );
+
+};

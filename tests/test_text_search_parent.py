@@ -1,9 +1,16 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 from surrealdb import AsyncSurreal, RecordID
 
 MIGRATIONS = Path("open_notebook/database/migrations")
+
+# Migration 28 adds a write-enforced HNSW index with DIMENSION 1024 (matching
+# the embedder), so fixtures must use 1024-dim vectors — a documented schema
+# contract (see 28.surrealql), not test-gaming. Queries use the same vector as
+# the indexed rows, so similarities/assertions are unchanged from the 2-dim era.
+QUERY_VEC: list[float] = [1.0] + [0.0] * 1023
 
 
 def records(value: object) -> list[dict[str, object]]:
@@ -35,13 +42,13 @@ async def test_text_insights_keep_their_id_and_resolve_the_parent_source(
         for migration in AsyncMigrationManager().up_migrations[23:]:
             await db.query(migration.sql)
         await db.query(
-            """
+            f"""
             CREATE notebook:chosen SET name = 'Chosen';
             CREATE notebook:other SET name = 'Other';
             CREATE source:parent SET title = 'quasar source', full_text = 'quasar text';
             CREATE source_insight:insight SET source = source:parent,
-                insight_type = 'summary', content = 'quasar evidence', embedding = [1.0, 0.0];
-            CREATE note:control SET title = 'quasar note', content = 'quasar note', embedding = [1.0, 0.0];
+                insight_type = 'summary', content = 'quasar evidence', embedding = {QUERY_VEC};
+            CREATE note:control SET title = 'quasar note', content = 'quasar note', embedding = {QUERY_VEC};
             RELATE source:parent->reference->notebook:chosen;
             RELATE note:control->artifact->notebook:chosen;
             """
@@ -56,10 +63,14 @@ async def test_text_insights_keep_their_id_and_resolve_the_parent_source(
         assert str(by_id["source_insight:insight"]["parent_id"]) == "source:parent"
         assert str(by_id["source:parent"]["parent_id"]) == "source:parent"
         assert str(by_id["note:control"]["parent_id"]) == "note:control"
+        vars: dict[str, Any] = {
+            "query": QUERY_VEC,
+            "scope": None if scope is None else [item for item in scope],
+        }
         vector = records(
             await db.query(
-                "RETURN fn::vector_search([1.0, 0.0], 10, true, false, 0.5, $scope);",
-                {"scope": None if scope is None else [item for item in scope]},
+                "RETURN fn::vector_search($query, 10, true, false, 0.5, $scope);",
+                vars,
             )
         )
         assert str(vector[0]["parent_id"]) == "source:parent"
