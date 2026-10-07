@@ -25,8 +25,8 @@ from open_notebook.utils.chunking import ContentType, chunk_text, detect_content
 from open_notebook.utils.embedding import generate_embedding, generate_embeddings
 
 # NOTE: `stop_on` below can never trigger in practice — each command catches
-# ValueError internally and returns success=False instead of raising, so the
-# retry layer never sees it. Kept as-is on purpose; to be revisited in a
+# ValueError (and NotFoundError) internally and returns success=False instead
+# of raising, so the retry layer never sees it. Kept as-is on purpose; to be revisited in a
 # dedicated error-handling PR.
 EMBED_RETRY_CONFIG = {
     "max_attempts": 5,
@@ -70,7 +70,8 @@ async def _embed_record(
     Returns:
         (extra_output_fields, processing_time, error_message)
         extra_output_fields is None and error_message is set on permanent
-        (ValueError) failure. Transient failures re-raise so the retry layer
+        (ValueError, or NotFoundError for a record deleted before the job ran)
+        failure. Transient failures re-raise so the retry layer
         can handle them.
     """
     start_time = time.time()
@@ -86,20 +87,10 @@ async def _embed_record(
         )
         return extra_fields, processing_time, None
 
-    except NotFoundError as e:
-        # Record was deleted while the job was queued (e.g. docker-era
-        # cleanup). Treat as a clean no-op: complete successfully so the
-        # failure list isn't polluted by stale references, but log the reason
-        # for traceability.
-        processing_time = time.time() - start_time
-        cmd_id = get_command_id(input_data)
-        logger.warning(
-            f"Embedding skipped for {kind} {record_id} - not found "
-            f"(command: {cmd_id}): {e}"
-        )
-        return {}, processing_time, None
-    except ValueError as e:
-        # Permanent failure - don't retry
+    except (ValueError, NotFoundError) as e:
+        # Permanent failure - don't retry. NotFoundError means the record was
+        # deleted before the job ran (ObjectModel.get raises it only for a
+        # missing record; DB failures are DatabaseOperationError and retry).
         processing_time = time.time() - start_time
         cmd_id = get_command_id(input_data)
         logger.error(f"Failed to embed {kind} {record_id} (command: {cmd_id}): {e}")
@@ -127,7 +118,7 @@ async def _embed_markdown_record(
     # 1. Load record
     record = await loader(record_id)
     if not record:
-        raise NotFoundError(f"{label} '{record_id}' not found")
+        raise ValueError(f"{label} '{record_id}' not found")
 
     if not record.content or not record.content.strip():
         raise ValueError(f"{label} '{record_id}' has no content to embed")
@@ -249,7 +240,8 @@ async def embed_note_command(input_data: EmbedNoteInput) -> EmbedNoteOutput:
     Retry Strategy:
     - Retries up to 5 times for transient failures (network, timeout, etc.)
     - Uses exponential-jitter backoff (1-60s)
-    - Does NOT retry permanent failures (ValueError for validation errors)
+    - Does NOT retry permanent failures (ValueError for validation errors,
+      NotFoundError for a record deleted before the job ran)
     """
 
     async def embed() -> Tuple[Dict[str, Any], str]:
@@ -291,7 +283,8 @@ async def embed_insight_command(input_data: EmbedInsightInput) -> EmbedInsightOu
     Retry Strategy:
     - Retries up to 5 times for transient failures (network, timeout, etc.)
     - Uses exponential-jitter backoff (1-60s)
-    - Does NOT retry permanent failures (ValueError for validation errors)
+    - Does NOT retry permanent failures (ValueError for validation errors,
+      NotFoundError for a record deleted before the job ran)
     """
 
     async def embed() -> Tuple[Dict[str, Any], str]:
@@ -336,14 +329,15 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
     Retry Strategy:
     - Retries up to 5 times for transient failures (network, timeout, etc.)
     - Uses exponential-jitter backoff (1-60s)
-    - Does NOT retry permanent failures (ValueError for validation errors)
+    - Does NOT retry permanent failures (ValueError for validation errors,
+      NotFoundError for a record deleted before the job ran)
     """
 
     async def embed() -> Tuple[Dict[str, Any], str]:
         # 1. Load source
         source = await Source.get(input_data.source_id)
         if not source:
-            raise NotFoundError(f"Source '{input_data.source_id}' not found")
+            raise ValueError(f"Source '{input_data.source_id}' not found")
 
         if not source.full_text or not source.full_text.strip():
             raise ValueError(f"Source '{input_data.source_id}' has no text to embed")
@@ -456,7 +450,8 @@ async def create_insight_command(
     Retry Strategy:
     - Retries up to 5 times for transient failures (network, timeout, etc.)
     - Uses exponential-jitter backoff (1-60s)
-    - Does NOT retry permanent failures (ValueError for validation errors)
+    - Does NOT retry permanent failures (ValueError for validation errors,
+      NotFoundError for a record deleted before the job ran)
     """
     start_time = time.time()
 

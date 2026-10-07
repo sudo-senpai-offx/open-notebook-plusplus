@@ -604,9 +604,192 @@ class TestContentProcessDeleteSource:
 
 
 # ============================================================================
-# TEST SUITE 6: Per-transformation model_id forwarding (#1137)
+# TEST SUITE 6: Scanned-PDF fail-fast + actionable empty-content error
 # ============================================================================
 
+
+class TestScannedPdfFailFast:
+    """Scanned/image-only PDFs fail fast with an OCR hint instead of extracting
+    every page and then surfacing the generic empty-content error."""
+
+    @staticmethod
+    def _model_manager() -> MagicMock:
+        mm_instance = MagicMock()
+        mm_instance.get_defaults = AsyncMock(
+            return_value=MagicMock(default_speech_to_text_model=None)
+        )
+        return mm_instance
+
+    @staticmethod
+    def _content_settings(document_engine: str) -> MagicMock:
+        return MagicMock(
+            youtube_preferred_languages=None,
+            default_content_processing_engine_url=None,
+            default_content_processing_engine_doc=document_engine,
+            docling_ocr=None,
+            docling_formulas=None,
+            docling_vision=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_scanned_pdf_fails_fast_with_ocr_hint(self, tmp_path):
+        from open_notebook.graphs.source import SourceState, content_process
+
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 image-only")
+
+        with (
+            patch(
+                "open_notebook.graphs.source.ModelManager",
+                return_value=self._model_manager(),
+            ),
+            patch("open_notebook.graphs.source.ContentSettings") as mock_settings,
+            patch("open_notebook.graphs.source.extract_content") as mock_extract,
+            patch(
+                "open_notebook.graphs.source._pdf_text_layer_present",
+                return_value=False,
+            ),
+            patch(
+                "open_notebook.graphs.source.docling_available", return_value=False
+            ),
+        ):
+            mock_settings.get_instance = AsyncMock(
+                return_value=self._content_settings("simple")
+            )
+            state = {
+                "source_id": "source:123",
+                "content_state": {"file_path": str(pdf)},
+                "embed": False,
+                "apply_transformations": [],
+            }
+            with pytest.raises(ValueError) as exc:
+                await content_process(cast(SourceState, state))
+
+        message = str(exc.value).lower()
+        assert "scanned" in message or "image-only" in message
+        assert "ocr" in message
+        assert "docling" in message
+        mock_extract.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_text_pdf_proceeds_past_probe(self, tmp_path):
+        from content_core.common import ExtractionOutput
+
+        from open_notebook.graphs.source import SourceState, content_process
+
+        pdf = tmp_path / "text.pdf"
+        pdf.write_bytes(b"%PDF-1.4 has text")
+
+        with (
+            patch(
+                "open_notebook.graphs.source.ModelManager",
+                return_value=self._model_manager(),
+            ),
+            patch("open_notebook.graphs.source.ContentSettings") as mock_settings,
+            patch("open_notebook.graphs.source.extract_content") as mock_extract,
+            patch(
+                "open_notebook.graphs.source._pdf_text_layer_present",
+                return_value=True,
+            ),
+            patch(
+                "open_notebook.graphs.source.docling_available", return_value=False
+            ),
+        ):
+            mock_settings.get_instance = AsyncMock(
+                return_value=self._content_settings("simple")
+            )
+            mock_extract.return_value = ExtractionOutput(title="T", content="body")
+            state = {
+                "source_id": "source:123",
+                "content_state": {"file_path": str(pdf)},
+                "embed": False,
+                "apply_transformations": [],
+            }
+            await content_process(cast(SourceState, state))
+
+        mock_extract.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_docling_routing_skips_probe(self, tmp_path):
+        from content_core.common import ExtractionOutput
+
+        from open_notebook.graphs.source import SourceState, content_process
+
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 image-only")
+
+        with (
+            patch(
+                "open_notebook.graphs.source.ModelManager",
+                return_value=self._model_manager(),
+            ),
+            patch("open_notebook.graphs.source.ContentSettings") as mock_settings,
+            patch("open_notebook.graphs.source.extract_content") as mock_extract,
+            patch(
+                "open_notebook.graphs.source._pdf_text_layer_present"
+            ) as mock_probe,
+            patch(
+                "open_notebook.graphs.source.docling_available", return_value=True
+            ),
+        ):
+            mock_settings.get_instance = AsyncMock(
+                return_value=self._content_settings("auto")
+            )
+            mock_extract.return_value = ExtractionOutput(title="T", content="body")
+            state = {
+                "source_id": "source:123",
+                "content_state": {"file_path": str(pdf)},
+                "embed": False,
+                "apply_transformations": [],
+            }
+            await content_process(cast(SourceState, state))
+
+        mock_probe.assert_not_called()
+        mock_extract.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_file_extraction_message_mentions_ocr(self, tmp_path):
+        from content_core.common import ExtractionOutput
+
+        from open_notebook.graphs.source import SourceState, content_process
+
+        pdf = tmp_path / "empty.pdf"
+        pdf.write_bytes(b"%PDF-1.4 has text but extracts empty")
+
+        with (
+            patch(
+                "open_notebook.graphs.source.ModelManager",
+                return_value=self._model_manager(),
+            ),
+            patch("open_notebook.graphs.source.ContentSettings") as mock_settings,
+            patch("open_notebook.graphs.source.extract_content") as mock_extract,
+            patch(
+                "open_notebook.graphs.source._pdf_text_layer_present",
+                return_value=True,
+            ),
+            patch(
+                "open_notebook.graphs.source.docling_available", return_value=False
+            ),
+        ):
+            mock_settings.get_instance = AsyncMock(
+                return_value=self._content_settings("simple")
+            )
+            mock_extract.return_value = ExtractionOutput(title="", content="   ")
+            state = {
+                "source_id": "source:123",
+                "content_state": {"file_path": str(pdf)},
+                "embed": False,
+                "apply_transformations": [],
+            }
+            with pytest.raises(ValueError) as exc:
+                await content_process(cast(SourceState, state))
+
+        assert "ocr" in str(exc.value).lower()
+
+
+# ============================================================================
+# TEST SUITE 7: Per-transformation model_id forwarding (#1137)
+# ============================================================================
 
 class TestTransformationModelIdForwarding:
     """Both call sites must forward transformation.model_id into the graph via

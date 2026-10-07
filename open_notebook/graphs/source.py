@@ -1,7 +1,10 @@
+import asyncio
 import operator
 import os
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
+import content_core as cc
 from content_core import ContentCoreConfig, extract_content
 from content_core.common import ExtractionOutput
 from langchain_core.runnables import RunnableConfig
@@ -15,7 +18,15 @@ from open_notebook.domain.content_settings import ContentSettings
 from open_notebook.domain.notebook import Asset, Source
 from open_notebook.domain.transformation import Transformation
 from open_notebook.graphs.transformation import graph as transform_graph
-from open_notebook.utils.runtime_capabilities import engine_runtime_missing
+from open_notebook.utils.runtime_capabilities import (
+    docling_available,
+    engine_runtime_missing,
+)
+
+# content-core >= 2.1 disables its own Loguru logging for library consumers.
+# Both the API and the worker import this module before extracting anything,
+# so re-enable it here to keep extraction logs in their output.
+logger.enable("content_core")
 
 # Default preferred languages for YouTube transcript selection, used when
 # ContentSettings.youtube_preferred_languages is unset. content-core's own
@@ -73,6 +84,126 @@ def _usable_engine(engine: str, kind: str) -> str:
         f"Set {missing_env_var}=true to enable it (see ADR-007)."
     )
     return "auto"
+
+
+def _is_youtube_url(url: str) -> bool:
+    """Whether ``url`` points at YouTube (by hostname, not substring)."""
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("youtube.com", "youtu.be") or host.endswith(".youtube.com")
+
+
+_YOUTUBE_NO_TRANSCRIPT_MESSAGE = (
+    "Could not extract content from this YouTube video. "
+    "No transcript or subtitles are available. "
+    "Try configuring a Speech-to-Text model in Settings "
+    "to transcribe the audio instead."
+)
+
+
+def _extraction_error(error: "cc.ContentCoreError", url: str) -> ValueError:
+    """Turn a content-core extraction error into a user-facing permanent failure.
+
+    content-core >= 2.2 raises typed errors instead of returning empty content.
+    They are all treated as permanent (ValueError is in process_source's
+    stop_on): content-core already retries transient failures internally,
+    including NetworkError, and our worker's 15 attempts exist for SurrealDB
+    transaction conflicts, not for re-fetching an unreachable page. A failed
+    source can still be retried from the UI.
+
+    The message is fixed per type: content-core's own text can carry proxy
+    credentials, local paths or configuration details, so it only goes to the
+    worker log (logged by the caller, and kept as the exception's cause).
+    """
+
+    if isinstance(error, cc.NoTranscriptFound):
+        return ValueError(_YOUTUBE_NO_TRANSCRIPT_MESSAGE)
+    # content-core reports a failure of both YouTube transcript paths (e.g.
+    # IpBlocked) as "YouTube transcript extraction failed ..."; other
+    # ExternalServiceErrors on a YouTube URL (speech-to-text provider, fetch
+    # engine) get the generic message below.
+    if (
+        isinstance(error, cc.ExternalServiceError)
+        and url
+        and _is_youtube_url(url)
+        and "youtube transcript" in str(error).lower()
+    ):
+        return ValueError(
+            "YouTube blocked or failed the transcript request. If this keeps "
+            "happening, set CCORE_YOUTUBE_PROXY (a residential proxy) or "
+            "CCORE_YOUTUBE_COOKIES_FILE for the worker."
+        )
+    if isinstance(error, cc.NotFoundError):
+        return ValueError(
+            "The page was not found (it may have been removed or moved). Check the URL."
+        )
+    if isinstance(error, cc.NetworkError):
+        return ValueError(
+            "Could not reach this address (connection, timeout or DNS error). "
+            "Check the URL and try again."
+        )
+    if isinstance(error, cc.InvalidInputError):
+        return ValueError("This URL or input is not valid.")
+    if isinstance(error, cc.UnsupportedTypeException):
+        return ValueError("This file type is not supported.")
+    if isinstance(error, cc.FileOperationError):
+        return ValueError(
+            "The file could not be read. It may be corrupted or in an "
+            "unsupported format."
+        )
+    if isinstance(error, cc.ConfigurationError):
+        return ValueError(
+            "Content extraction is not configured correctly. Check the content "
+            "processing engine and speech-to-text settings; the worker log has "
+            "the details."
+        )
+    if isinstance(error, cc.ExternalServiceError):
+        return ValueError("The content extraction service failed.")
+    return ValueError("Could not extract content from this source.")
+
+
+_SCANNED_PDF_MESSAGE = (
+    "This PDF has no text layer on the sampled pages, so it looks scanned or "
+    "image-only. Turn on OCR to read it: enable the Docling document engine "
+    "(set OPEN_NOTEBOOK_ENABLE_DOCLING=true for the worker), then choose "
+    "Docling under Settings \u2192 Content Processing and retry this source."
+)
+
+
+def _pdf_engine_uses_ocr(document_engine: str) -> bool:
+    """Whether PDFs will be routed through Docling (and therefore OCR'd).
+
+    content-core's ``auto`` routing only prefers Docling when its runtime is
+    installed, so a missing runtime means a scanned PDF has no OCR fallback and
+    would extract to empty content.
+    """
+    return document_engine == "docling" or (
+        document_engine == "auto" and docling_available()
+    )
+
+
+def _pdf_text_layer_present(file_path: str) -> bool:
+    """Whether a PDF has extractable text on its first, middle or last page.
+
+    A cheap, read-only probe used to fail fast on scanned/image-only PDFs before
+    extracting every page. Sampling spread pages avoids both a full parse and a
+    false "scanned" verdict on documents that merely start with a cover image.
+    Returns True on any uncertainty (unreadable file, missing pdfplumber) so the
+    real extraction — not this heuristic — makes the call.
+    """
+    try:
+        import pdfplumber  # type: ignore
+    except ImportError:  # pragma: no cover - pdfplumber ships with content-core
+        return True
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            pages = pdf.pages
+            if not pages:
+                return True
+            sample = {0, len(pages) // 2, len(pages) - 1}
+            return any((pages[i].extract_text() or "").strip() for i in sample)
+    except Exception as e:
+        logger.debug(f"PDF text-layer probe failed for {file_path}: {e}")
+        return True
 
 
 async def content_process(state: SourceState) -> dict:
@@ -148,35 +279,45 @@ async def content_process(state: SourceState) -> dict:
         f"docling_vision={config_kwargs.get('docling_vision', 'auto')})"
     )
 
-    processed = await extract_content(
-        url=content_state.get("url"),
-        file_path=content_state.get("file_path"),
-        content=content_state.get("content"),
-        config=config,
-    )
-
-    # content-core signals a soft extraction failure (e.g. an unreachable or
-    # invalid URL, via the bs4 fallback) by returning title="Error" and content
-    # prefixed with "Failed to extract content:" instead of raising. Detect that
-    # sentinel and raise so the job is marked failed and the source becomes
-    # retryable, rather than being saved as a "completed" source whose body is
-    # the error string.
-    if processed.title == "Error" and (processed.content or "").startswith(
-        "Failed to extract content:"
+    # Fail fast on scanned/image-only PDFs when no OCR engine is in play: the
+    # full extraction would read every page only to return empty content, and
+    # the generic "could not extract" error hides the real, actionable cause.
+    file_path = content_state.get("file_path")
+    if (
+        file_path
+        and file_path.lower().endswith(".pdf")
+        and not _pdf_engine_uses_ocr(config_kwargs.get("document_engine", "auto"))
+        and not await asyncio.to_thread(_pdf_text_layer_present, file_path)
     ):
-        raise ValueError(
-            "Could not extract content from this source. "
-            "The URL or file may be unreachable, invalid, or in an unsupported format."
+        logger.warning(
+            f"PDF {file_path} has no text layer and no OCR engine is enabled; "
+            "failing fast with an actionable message."
         )
+        raise ValueError(_SCANNED_PDF_MESSAGE)
 
+    url = content_state.get("url") or ""
+    try:
+        processed = await extract_content(
+            url=content_state.get("url"),
+            file_path=content_state.get("file_path"),
+            content=content_state.get("content"),
+            config=config,
+        )
+    except cc.ContentCoreError as e:
+        logger.warning(f"content-core extraction failed ({type(e).__name__}): {e}")
+        raise _extraction_error(e, url) from e
+
+    # Since content-core 2.2, empty content means the source was genuinely
+    # empty; extraction failures raise (handled above).
     if not processed.content or not processed.content.strip():
-        url = content_state.get("url") or ""
-        if url and ("youtube.com" in url or "youtu.be" in url):
+        if url and _is_youtube_url(url):
+            raise ValueError(_YOUTUBE_NO_TRANSCRIPT_MESSAGE)
+        if content_state.get("file_path"):
             raise ValueError(
-                "Could not extract content from this YouTube video. "
-                "No transcript or subtitles are available. "
-                "Try configuring a Speech-to-Text model in Settings "
-                "to transcribe the audio instead."
+                "Could not extract any text content from this file. It may be "
+                "empty or in a format the current engine can't read. If it's a "
+                "scanned or image-only document, turn on OCR by enabling the "
+                "Docling document engine (Settings \u2192 Content Processing)."
             )
         raise ValueError(
             "Could not extract any text content from this source. "

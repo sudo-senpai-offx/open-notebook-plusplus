@@ -325,20 +325,28 @@ Heavy use: Depends on models chosen
 6. Click **Discover Models** → **Register Models**
 
 **Available Models:**
-- `MiniMax-M2.5` — Most capable, 204K context
-- `MiniMax-M2.5-highspeed` — Faster variant, 204K context
+- Language: `MiniMax-M3` (1M-token context), `MiniMax-M2.5` and `MiniMax-M2.5-highspeed` (204K)
+- Text-to-speech: `speech-2.8-hd` (quality) and `speech-2.8-turbo` (faster). Discover Models lists both
 
 **Recommended:**
-- For quality: `MiniMax-M2.5` (best overall)
-- For speed: `MiniMax-M2.5-highspeed` (faster responses)
+- Chat and transformations: `MiniMax-M3`
+- Podcasts: `speech-2.8-hd` as the speaker profile's voice model
+
+**Text-to-speech voices:**
+In a speaker profile, set the **Voice ID** to a MiniMax voice id, for example `English_Graceful_Lady`. System voices, and voices you cloned or generated in your MiniMax account, all work. The ids are listed in the MiniMax platform's voice library.
+
+**Region:**
+MiniMax API keys are region-specific. Mainland China keys need the credential's **Base URL** set to `https://api.minimax.cn/v1`. The default is the international `https://api.minimax.io/v1`, and the same Base URL is used for chat and text-to-speech. Env-based setups use `MINIMAX_BASE_URL` (migrated into the credential's Base URL).
 
 **Advantages:**
-- Very long context (204K tokens)
+- Very long context (1M tokens on M3)
+- Chat and podcast voices from one key
 - Competitive pricing
 
 **Troubleshooting:**
-- "Invalid API key" → Check the key in the MiniMax platform
+- "Invalid API key" → Check the key in the MiniMax platform, and that its region matches the Base URL
 - "Model not available" → Re-discover models from the credential
+- Podcast fails with a voice error → Check the speaker's Voice ID against your account's voices
 
 ---
 
@@ -395,6 +403,64 @@ Heavy use: Depends on models chosen
 
 **Troubleshooting:**
 - "Invalid API key" → Check the key in the Novita console
+- "Model not available" → Re-discover models from the credential
+
+---
+
+### SiliconFlow
+
+**Cost:** Pay-per-model (competitive; some small models are free)
+
+**Get Your API Key:**
+1. Go to https://cloud.siliconflow.com/account/ak (mainland China accounts: https://cloud.siliconflow.cn/account/ak)
+2. Create an account (if needed)
+3. Create a new API key
+
+**Configure in Open Notebook:**
+1. Go to **Manage** → **Models**
+2. Click **Add Credential**
+3. Select provider: **SiliconFlow**
+4. Give it a name, paste your API key
+5. **Mainland China account?** Set **Base URL** to `https://api.siliconflow.cn/v1` (the default is the global `https://api.siliconflow.com/v1`)
+6. Click **Save**, then **Test Connection**
+7. Click **Discover Models** → **Register Models**
+
+**Notes:**
+- Hosted DeepSeek, Qwen, GLM and Kimi models behind one OpenAI-compatible key.
+- Language models only for now. Embedding, speech-to-text and text-to-speech through SiliconFlow need support in Esperanto first.
+- Env-based setup: `SILICONFLOW_API_KEY`, plus `SILICONFLOW_BASE_URL` for a mainland China account (migrated into the credential's Base URL).
+
+**Troubleshooting:**
+- "Invalid API key" → Check that the key matches the endpoint: keys from `siliconflow.cn` don't work against the global `.com` endpoint, and vice versa
+- "Model not available" → Re-discover models from the credential
+
+---
+
+### Z.ai
+
+**Cost:** Pay-per-token
+
+**Get Your API Key:**
+1. Go to https://z.ai/manage-apikey/apikey-list
+2. Create an account (if needed)
+3. Create a new API key
+
+**Configure in Open Notebook:**
+1. Go to **Manage** → **Models**
+2. Click **Add Credential**
+3. Select provider: **Z.ai**
+4. Give it a name, paste your API key
+5. Click **Save**, then **Test Connection**
+6. Click **Discover Models** → **Register Models**
+
+**Notes:**
+- Z.ai's GLM models (for example `glm-5.2`, also used for the connection test, and `glm-4.5-flash`) are available through an OpenAI-compatible API (`https://api.z.ai/api/paas/v4`). Register the models you want after **Discover Models**.
+- Language models only.
+- Env-based setup: `ZAI_API_KEY`, plus `ZAI_BASE_URL` to point at a different Z.ai endpoint (migrated into the credential's Base URL).
+
+**Troubleshooting:**
+- "Invalid API key" → Check the key in the Z.ai console
+- A model is missing from Discover Models → Type its id (e.g. `glm-4.5-flash`) in the search box and use **Add**
 - "Model not available" → Re-discover models from the credential
 
 ---

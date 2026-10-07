@@ -27,6 +27,16 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 })
 
+Object.defineProperty(window, 'localStorage', {
+  writable: true,
+  value: {
+    getItem: vi.fn(),
+    setItem: vi.fn(),
+    removeItem: vi.fn(),
+    clear: vi.fn(),
+  },
+})
+
 // Mock @/lib/hooks/use-translation with standard t() function
 vi.mock('../lib/hooks/use-translation', () => {
   return {
