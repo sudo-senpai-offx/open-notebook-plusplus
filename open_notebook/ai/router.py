@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 Policy = str  # "offline-first" | "balanced" | "speed" | "quality"
 
 
-def _classify_task(task_hint: Optional[str], input_shape: Optional[Dict[str, Any]] = None) -> TaskType:
+def _classify_task(
+    task_hint: Optional[str], input_shape: Optional[Dict[str, Any]] = None
+) -> TaskType:
     if task_hint:
         t = task_hint.lower()
         if "extract" in t:
@@ -85,7 +87,13 @@ def route_task(
         else:
             allow_cloud = False
     rd = resolve_routing(task=task, ctx_tokens=ctx_tokens, allow_cloud=allow_cloud)
-    logger.debug("router: task=%s policy=%s allow_cloud=%s primary=%s", task, policy, allow_cloud, rd.primary.name if rd.primary else None)
+    logger.debug(
+        "router: task=%s policy=%s allow_cloud=%s primary=%s",
+        task,
+        policy,
+        allow_cloud,
+        rd.primary.name if rd.primary else None,
+    )
     return rd
 
 
@@ -99,7 +107,9 @@ def get_policy() -> Dict[str, Any]:
     }
 
 
-def should_use_mixture_for(task_hint: Optional[str] = None, input_shape: Optional[Dict[str, Any]] = None) -> bool:
+def should_use_mixture_for(
+    task_hint: Optional[str] = None, input_shape: Optional[Dict[str, Any]] = None
+) -> bool:
     task = _classify_task(task_hint, input_shape)
     return should_use_mixture(task)
 

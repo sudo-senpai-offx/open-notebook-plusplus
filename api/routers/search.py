@@ -1,8 +1,8 @@
 import json
-from typing import AsyncGenerator, List
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
 from api.models import AskRequest, AskResponse, SearchRequest, SearchResponse
@@ -21,12 +21,28 @@ from open_notebook.graphs.ask import graph as ask_graph
 
 router = APIRouter()
 
+# A1 step 0: the probe harness sends this header to request a server-side
+# embed/db/assemble timing split for the vector search flow. Normal traffic
+# (no header) is byte-identical: no timing headers, no side-channel.
+TIMINGS_HEADER = "X-OpenNotebook-Timings"
+
+
+def _fmt_ms(value: Optional[float]) -> str:
+    return str(max(0, int(round(value or 0.0))))
+
 
 @router.post("/search", response_model=SearchResponse)
-async def search_knowledge_base(search_request: SearchRequest):
+async def search_knowledge_base(search_request: SearchRequest, request: Request):
     """Search the knowledge base using text or vector search."""
     try:
         notebook_ids = await resolve_notebook_scope(search_request.scope_notebook_ids)
+
+        timings: Dict[str, Optional[float]] | None = None
+        if (
+            search_request.type == "vector"
+            and request.headers.get(TIMINGS_HEADER, "") == "1"
+        ):
+            timings = {}
 
         if search_request.type == "vector":
             # Check if embedding model is available for vector search
@@ -36,7 +52,7 @@ async def search_knowledge_base(search_request: SearchRequest):
                     detail="Vector search requires an embedding model. Please configure one in the Models section.",
                 )
 
-            results = await vector_search(
+            search_kwargs: Dict[str, Any] = dict(
                 keyword=search_request.query,
                 results=search_request.limit,
                 source=search_request.search_sources,
@@ -44,6 +60,11 @@ async def search_knowledge_base(search_request: SearchRequest):
                 minimum_score=search_request.minimum_score,
                 notebook_ids=notebook_ids,
             )
+            if timings is not None:
+                # Probe-only side-channel (A1 step 0): threaded only when the
+                # probe header was sent; normal calls pass no _timings at all.
+                search_kwargs["_timings"] = timings
+            results = await vector_search(**search_kwargs)
         else:
             # Text search
             results = await text_search(
@@ -54,11 +75,24 @@ async def search_knowledge_base(search_request: SearchRequest):
                 notebook_ids=notebook_ids,
             )
 
-        return SearchResponse(
+        response = SearchResponse(
             results=results or [],
             total_count=len(results) if results else 0,
             search_type=search_request.type,
         )
+
+        # Probe-only timings (A1 step 0): surfaced as response headers so the
+        # response model and normal traffic stay untouched.
+        if timings is not None and "embed_ms" in timings:
+            headers = {
+                "X-Notebook-Embed-Ms": _fmt_ms(timings.get("embed_ms")),
+                "X-Notebook-Db-Ms": _fmt_ms(timings.get("db_ms")),
+                "X-Notebook-Assemble-Ms": _fmt_ms(timings.get("assemble_ms")),
+            }
+            return JSONResponse(
+                content=json.loads(response.model_dump_json()), headers=headers
+            )
+        return response
 
     except InvalidInputError as e:
         raise HTTPException(status_code=400, detail=str(e))

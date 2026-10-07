@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import List, Optional, Tuple
 
 from ..ai.model_policy import use_reranker

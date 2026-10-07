@@ -5,15 +5,19 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .capabilities import RoutingDecision, TaskType
+from .capabilities import RoutingDecision
 from .router import route_task
 
 logger = logging.getLogger(__name__)
 
-MixtureStrategy = str  # "map_reduce" | "classifier_fanout" | "rerank_fuse" | "synthesize"
+MixtureStrategy = (
+    str  # "map_reduce" | "classifier_fanout" | "rerank_fuse" | "synthesize"
+)
 
 
-async def _gather_bounded(coros: Sequence[Awaitable[Any]], max_concurrency: int) -> List[Any]:
+async def _gather_bounded(
+    coros: Sequence[Awaitable[Any]], max_concurrency: int
+) -> List[Any]:
     if max_concurrency <= 0:
         max_concurrency = 1
     results: List[Any] = [None] * len(coros)
@@ -80,12 +84,17 @@ async def orchestrate(
 
     result: Any = None
     if rd.use_mixture and strategy == "map_reduce" and chunks and map_fn and reduce_fn:
-        result = await map_reduce(chunks, map_fn, reduce_fn, max_concurrency=max_c, adaptive_batches=adaptive)
+        result = await map_reduce(
+            chunks, map_fn, reduce_fn, max_concurrency=max_c, adaptive_batches=adaptive
+        )
     elif rd.use_mixture and strategy == "classifier_fanout" and items and item_fn:
         result = await fanout(items, item_fn, max_concurrency=max_c)
     elif rd.use_mixture and strategy == "rerank_fuse":
         result = {"strategy": "rerank_fuse", "items": len(items or [])}
     else:
-        result = {"strategy": "single", "primary": rd.primary.name if rd.primary else None}
+        result = {
+            "strategy": "single",
+            "primary": rd.primary.name if rd.primary else None,
+        }
 
     return result, rd

@@ -83,9 +83,7 @@ async def list_sites():
                 name=site.name,
                 max_pages=site.max_pages,
                 status=site.status,
-                last_run_at=site.last_run_at.isoformat()
-                if site.last_run_at
-                else None,
+                last_run_at=site.last_run_at.isoformat() if site.last_run_at else None,
                 last_run_duration=site.last_run_duration,
                 last_error=site.last_error,
                 created=str(site.created),
@@ -195,9 +193,7 @@ async def crawl_site(site_id: str, crawl_request: CrawlSiteRequest):
     try:
         site = await Site.get(site_id)
         if site.status == "running":
-            raise HTTPException(
-                status_code=409, detail="Site is already being crawled"
-            )
+            raise HTTPException(status_code=409, detail="Site is already being crawled")
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

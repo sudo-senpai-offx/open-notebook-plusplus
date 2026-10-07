@@ -118,6 +118,66 @@ Per-process RSS, task-peak RSS, and cold-start times vs the ADR-009 envelope.
 | container RSS open_notebook | 997.6 MiB | limit 3.563 GiB |
 | container RSS surrealdb | 482.6 MiB | |
 
+### Vector search decomposition (A1 step 0, 2026-10-07, unthrottled)
+
+Added the opt-in, header-gated `_timings` side-channel to `vector_search`
+(`open_notebook/domain/notebook.py`) exposing it via `X-Notebook-*-Ms`
+response headers (`api/routers/search.py`) only when the probe sends
+`X-OpenNotebook-Timings: 1`. Normal traffic is byte-identical (no headers, no
+side-channel). Live run against the default probe corpus (the 85-source `test`
+notebook), `-n 5`, warmup beat discarded:
+
+| Phase | mean | p50 | p90 | min | max | Share of total |
+|---|---|---|---|---|---|---|
+| total (wall) | 3813.4 | 3825.2 | 3828.0 | 3701.0 | 3899.3 | 100% |
+| .embed (query embedding) | 217.2 | 203.0 | 225.0 | 202.0 | 239.0 | ~6% |
+| .db (`fn::vector_search` in SurrealDB) | 3400.5 | 3399.0 | 3417.0 | 3282.0 | 3504.0 | **~87%** |
+| .assemble (python re-rank, already sorted) | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | ~0% |
+
+**Finding:** the whale is the DB-side vector lookup (~3400 ms), not the query
+embedding (~217 ms) and not python-side rank assembly (free). The un-decomposed
+`search.vector` total on this deploy is ~3.8 s vs the 500 ms budget (throttled
+baseline 3363.7 ms). Implications for the locked A1 experiment order:
+
+- The **query-embedding cache** (locked as first experiment) can save at most
+  the ~217 ms embed leg when the same query repeats — a real but small win.
+- **Index hygiene + payload trim + DB-side query cost** are where the remaining
+  ~3.4 s lives; the A1 sequence is re-ordered below to attack the measured
+  bottleneck first, with the embedding cache kept as a cheap follow-up. Reranker
+  stays rejected; hybrid/mixture stay last-resort. (Ordering re-locked with the
+  user after this probe — see locked-plan-2026-10.md.)
+
+#### A2 fixture provisioning + scoped-search check (same deploy, 2026-10-07)
+
+`scripts/create_fixture_notebook.py` was hardened after its first run exposed a
+real stack behavior: the 3rd `POST /api/sources/json` (`embed=True`,
+`async_processing=False`) hung server-side with **no access-log line, no command
+log, and no error** for >120 s, leaving a partial fixture. The stall did not
+reproduce on re-run (transient DB hiccup), but it is a second witness for the
+B-series theme: the server can wedge on a request with nothing ever marking it
+failed. Script changes: `--create-timeout` (per-request POST timeout, default
+300 s, distinct from the poll deadline), best-effort
+`DELETE /api/notebooks/{id}` of the partial fixture on any mid-run failure, and
+retry-tolerant embed polling (a dropped poll is transient, not fatal).
+
+Fixture created cleanly: `notebook:l060pbn9hiwyst1z0xlt`
+(`fixture-throttle-1791342567-nb`), 4 sources / 9 chunks, exit 0. Probe
+discovery still picks the 85-source `test` notebook (`fixture-*` excluded).
+
+Scoped-search verification: a probe sending `scope_notebook_ids` in the JSON
+body was silently unscoped — that name is a Python-side property merging
+`notebook_id`/`notebook_ids` (api/models.py `NotebookScopeMixin`), and pydantic
+drops the unknown field, so the query ran global and leaked cross-notebook
+results. With the correct `notebook_ids` field the identical query returns only
+the fixture's sources (`total_count: 4`). No app bug — probe bug, now checked.
+
+Additional data point for the A1 re-ordering: scoped vector search on the
+9-chunk fixture still took **2395 ms** in the DB phase (vs 3400 ms on the
+85-source corpus). `fn::vector_search` cost is therefore weakly
+corpus-size-dependent and dominated by fixed machinery (table scan / distance
+computation over the full chunk set / result serialization), which reinforces
+attacking the DB side before the embedding cache.
+
 ## 5. Module sweep
 
 One row per module: static read + instrumented probes + footprint. Status:
@@ -273,3 +333,14 @@ probe at the expected lines. In-container probe on the two real uploads:
 re-triggered on the final image (was interrupted by an earlier recreate before
 the rebuild; on worker restart the stale `command` reference is cleared, so the
 retry guard does not wedge the source).
+
+**Update (2026-10-07, post-recreate):** despite the recreate, the record for
+`source:d96eq5yw5warr5a32kwd` is still `status: running` with
+`embedded_chunks: 0`, `processing_info.started_at: null` and an empty error,
+still pinned to the **pre-recreate** `command_id`. The source record was never
+marked failed (and no watchdog exists yet to do it). Visible side effects:
+the source title is still "Processing..." and the API keeps returning the
+record as un-embedded after >24 h. This is the concrete motivation for locked
+item **B3** (job-lifecycle: stale-`running` watchdog that marks dead jobs failed
+with a reason) — the retry guard clears the *command*, but nothing ever repairs
+the *source record*.

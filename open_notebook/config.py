@@ -19,20 +19,28 @@ os.makedirs(UPLOADS_FOLDER, exist_ok=True)
 PODCASTS_FOLDER = f"{DATA_FOLDER}/podcasts"
 os.makedirs(PODCASTS_FOLDER, exist_ok=True)
 # Podcast generation presets (opt-in, disabled by default)
-OPEN_NOTEBOOK_PODCAST_FAST_PRESET = os.getenv("OPEN_NOTEBOOK_PODCAST_FAST_PRESET", "false").lower() in (
+OPEN_NOTEBOOK_PODCAST_FAST_PRESET = os.getenv(
+    "OPEN_NOTEBOOK_PODCAST_FAST_PRESET", "false"
+).lower() in (
     "true",
     "1",
     "yes",
     "on",
 )
-OPEN_NOTEBOOK_PODCAST_DRAFT_PRESET = os.getenv("OPEN_NOTEBOOK_PODCAST_DRAFT_PRESET", "false").lower() in (
+OPEN_NOTEBOOK_PODCAST_DRAFT_PRESET = os.getenv(
+    "OPEN_NOTEBOOK_PODCAST_DRAFT_PRESET", "false"
+).lower() in (
     "true",
     "1",
     "yes",
     "on",
 )
-OPEN_NOTEBOOK_PODCAST_FAST_MAX_SEGMENTS = int(os.getenv("OPEN_NOTEBOOK_PODCAST_FAST_MAX_SEGMENTS", "3"))
-OPEN_NOTEBOOK_PODCAST_FAST_MAX_TOKENS = int(os.getenv("OPEN_NOTEBOOK_PODCAST_FAST_MAX_TOKENS", "500"))
+OPEN_NOTEBOOK_PODCAST_FAST_MAX_SEGMENTS = int(
+    os.getenv("OPEN_NOTEBOOK_PODCAST_FAST_MAX_SEGMENTS", "3")
+)
+OPEN_NOTEBOOK_PODCAST_FAST_MAX_TOKENS = int(
+    os.getenv("OPEN_NOTEBOOK_PODCAST_FAST_MAX_TOKENS", "500")
+)
 
 
 # TIKTOKEN CACHE FOLDER

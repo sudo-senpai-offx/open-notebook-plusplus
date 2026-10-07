@@ -44,6 +44,111 @@ class TestSearchLimitValidation:
         mock_text_search.assert_awaited_once()
 
 
+class TestVectorSearchTimings:
+    """vector_search() reports embed/db/assemble ms via the _timings side-channel (A1 step 0).
+
+    The side-channel is an in-place dict: callers that don't pass it must be
+    unaffected (notably the text->vector fallback in text_search()).
+    """
+
+    @pytest.mark.asyncio
+    async def test_timings_side_channel_populated(self):
+        from open_notebook.domain import notebook as notebook_module
+
+        timings: dict = {}
+        with (
+            patch.object(
+                notebook_module, "repo_query", new_callable=AsyncMock, return_value=[]
+            ),
+            patch(
+                "open_notebook.utils.embedding.generate_embedding",
+                new_callable=AsyncMock,
+                return_value=[0.1, 0.2, 0.3],
+            ),
+        ):
+            result = await notebook_module.vector_search("hello", 10, _timings=timings)
+
+        assert result == []
+        assert {"embed_ms", "db_ms", "assemble_ms"} <= set(timings)
+        assert all(v >= 0 for v in timings.values())
+
+    @pytest.mark.asyncio
+    async def test_no_side_channel_means_no_timing_data(self):
+        from open_notebook.domain import notebook as notebook_module
+
+        with (
+            patch.object(
+                notebook_module, "repo_query", new_callable=AsyncMock, return_value=[]
+            ),
+            patch(
+                "open_notebook.utils.embedding.generate_embedding",
+                new_callable=AsyncMock,
+                return_value=[0.1],
+            ),
+        ):
+            # Must not raise, and must not have any timings anywhere.
+            result = await notebook_module.vector_search("hello", 10)
+
+        assert result == []
+
+
+class TestSearchTimingsHeaders:
+    """Timing headers appear ONLY for the opt-in probe header (A1 step 0).
+
+    Normal traffic must stay byte-identical: no probe header -> no timing
+    headers, no _timings kwarg reaching vector_search.
+    """
+
+    @patch(
+        "api.routers.search.model_manager.get_embedding_model", new_callable=AsyncMock
+    )
+    @patch("api.routers.search.vector_search", new_callable=AsyncMock)
+    def test_timing_headers_emitted_for_probe_header(
+        self, mock_vector, mock_embed, client
+    ):
+        async def fake(
+            keyword,
+            results,
+            source=True,
+            note=True,
+            minimum_score=0.2,
+            notebook_ids=None,
+            _timings=None,
+        ):
+            if _timings is not None:
+                _timings.update({"embed_ms": 12.3, "db_ms": 340.1, "assemble_ms": 1.0})
+            return []
+
+        mock_embed.return_value = object()
+        mock_vector.side_effect = fake
+        response = client.post(
+            "/api/search",
+            json={"query": "x", "type": "vector"},
+            headers={"X-OpenNotebook-Timings": "1"},
+        )
+        assert response.status_code == 200
+        assert response.headers.get("X-Notebook-Embed-Ms") == "12"
+        assert response.headers.get("X-Notebook-Db-Ms") == "340"
+        assert response.headers.get("X-Notebook-Assemble-Ms") == "1"
+
+    @patch(
+        "api.routers.search.model_manager.get_embedding_model", new_callable=AsyncMock
+    )
+    @patch("api.routers.search.vector_search", new_callable=AsyncMock)
+    def test_no_timing_headers_without_probe_header(
+        self, mock_vector, mock_embed, client
+    ):
+        mock_embed.return_value = object()
+        mock_vector.return_value = []
+        response = client.post("/api/search", json={"query": "x", "type": "vector"})
+        assert response.status_code == 200
+        assert "X-Notebook-Embed-Ms" not in response.headers
+        assert "X-Notebook-Db-Ms" not in response.headers
+        assert "X-Notebook-Assemble-Ms" not in response.headers
+        _, kwargs = mock_vector.call_args
+        assert "_timings" not in kwargs
+
+
 class TestTextSearchHighlightOverflowFallback:
     """text_search() must fall back to vector search on a highlight position overflow (#648)."""
 

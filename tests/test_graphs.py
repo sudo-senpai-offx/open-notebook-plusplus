@@ -649,9 +649,7 @@ class TestScannedPdfFailFast:
                 "open_notebook.graphs.source._pdf_text_layer_present",
                 return_value=False,
             ),
-            patch(
-                "open_notebook.graphs.source.docling_available", return_value=False
-            ),
+            patch("open_notebook.graphs.source.docling_available", return_value=False),
         ):
             mock_settings.get_instance = AsyncMock(
                 return_value=self._content_settings("simple")
@@ -691,9 +689,7 @@ class TestScannedPdfFailFast:
                 "open_notebook.graphs.source._pdf_text_layer_present",
                 return_value=True,
             ),
-            patch(
-                "open_notebook.graphs.source.docling_available", return_value=False
-            ),
+            patch("open_notebook.graphs.source.docling_available", return_value=False),
         ):
             mock_settings.get_instance = AsyncMock(
                 return_value=self._content_settings("simple")
@@ -725,12 +721,8 @@ class TestScannedPdfFailFast:
             ),
             patch("open_notebook.graphs.source.ContentSettings") as mock_settings,
             patch("open_notebook.graphs.source.extract_content") as mock_extract,
-            patch(
-                "open_notebook.graphs.source._pdf_text_layer_present"
-            ) as mock_probe,
-            patch(
-                "open_notebook.graphs.source.docling_available", return_value=True
-            ),
+            patch("open_notebook.graphs.source._pdf_text_layer_present") as mock_probe,
+            patch("open_notebook.graphs.source.docling_available", return_value=True),
         ):
             mock_settings.get_instance = AsyncMock(
                 return_value=self._content_settings("auto")
@@ -767,9 +759,7 @@ class TestScannedPdfFailFast:
                 "open_notebook.graphs.source._pdf_text_layer_present",
                 return_value=True,
             ),
-            patch(
-                "open_notebook.graphs.source.docling_available", return_value=False
-            ),
+            patch("open_notebook.graphs.source.docling_available", return_value=False),
         ):
             mock_settings.get_instance = AsyncMock(
                 return_value=self._content_settings("simple")
@@ -790,6 +780,7 @@ class TestScannedPdfFailFast:
 # ============================================================================
 # TEST SUITE 7: Per-transformation model_id forwarding (#1137)
 # ============================================================================
+
 
 class TestTransformationModelIdForwarding:
     """Both call sites must forward transformation.model_id into the graph via

@@ -55,9 +55,9 @@ async def test_docling_selection_falls_back_to_auto_when_runtime_missing():
         patch.object(
             source_graph,
             "engine_runtime_missing",
-            side_effect=lambda e: "OPEN_NOTEBOOK_ENABLE_DOCLING"
-            if e == "docling"
-            else None,
+            side_effect=lambda e: (
+                "OPEN_NOTEBOOK_ENABLE_DOCLING" if e == "docling" else None
+            ),
         ),
         patch.object(
             source_graph.ModelManager,

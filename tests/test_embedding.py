@@ -402,6 +402,7 @@ class TestErrorClassifierEmptyMessage:
 
         pass_through = [m for _, _, m in _CLASSIFICATION_RULES if m is None]
         assert pass_through, "Expected at least one pass-through rule"
+
         # A pass-through exception matching a keyword on top of an empty message
         # should still fall back to the type name rather than empty text.
         class ModelNotFoundError(Exception):

@@ -8,6 +8,7 @@ Templates are grouped by workflow — `ask/`, `chat/`, `source_chat/`, `podcast/
 
 ```python
 from ai_prompter import Prompter
+
 prompt = Prompter(prompt_template="ask/entry", parser=parser).render(data=state)
 ```
 

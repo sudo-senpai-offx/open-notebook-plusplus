@@ -305,24 +305,36 @@ async def generate_podcast_command(
                 )
                 del episode_profiles_dict[ep_name]
 
-
         # Apply opt-in fast/draft presets (disabled by default)
-        if config.OPEN_NOTEBOOK_PODCAST_FAST_PRESET or config.OPEN_NOTEBOOK_PODCAST_DRAFT_PRESET:
+        if (
+            config.OPEN_NOTEBOOK_PODCAST_FAST_PRESET
+            or config.OPEN_NOTEBOOK_PODCAST_DRAFT_PRESET
+        ):
             try:
                 fast = config.OPEN_NOTEBOOK_PODCAST_FAST_PRESET
                 draft = config.OPEN_NOTEBOOK_PODCAST_DRAFT_PRESET
-                max_seg = config.OPEN_NOTEBOOK_PODCAST_FAST_MAX_SEGMENTS if fast else None
-                max_tok = config.OPEN_NOTEBOOK_PODCAST_FAST_MAX_TOKENS if (fast or draft) else None
+                max_seg = (
+                    config.OPEN_NOTEBOOK_PODCAST_FAST_MAX_SEGMENTS if fast else None
+                )
+                max_tok = (
+                    config.OPEN_NOTEBOOK_PODCAST_FAST_MAX_TOKENS
+                    if (fast or draft)
+                    else None
+                )
                 if max_seg is not None:
-                    episode_profile.num_segments = min(episode_profile.num_segments, max_seg)
+                    episode_profile.num_segments = min(
+                        episode_profile.num_segments, max_seg
+                    )
                 if max_tok is not None:
-                    episode_profile.max_tokens = min(episode_profile.max_tokens or max_tok, max_tok)
+                    episode_profile.max_tokens = min(
+                        episode_profile.max_tokens or max_tok, max_tok
+                    )
                     # propagate to resolved configs
-                    if 'max_tokens' in outline_config or max_tok is not None:
-                        outline_config['max_tokens'] = max_tok
-                    if 'max_tokens' in transcript_config or max_tok is not None:
-                        transcript_config['max_tokens'] = max_tok
-                    tts_config['max_tokens'] = tts_config.get('max_tokens') or max_tok
+                    if "max_tokens" in outline_config or max_tok is not None:
+                        outline_config["max_tokens"] = max_tok
+                    if "max_tokens" in transcript_config or max_tok is not None:
+                        transcript_config["max_tokens"] = max_tok
+                    tts_config["max_tokens"] = tts_config.get("max_tokens") or max_tok
             except Exception as e:
                 logger.warning(f"Failed to apply podcast fast/draft preset: {e}")
         # Resolve TTS for ALL speaker profiles (podcast-creator validates all).

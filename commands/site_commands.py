@@ -105,7 +105,10 @@ async def _ingest_page(
         "wait_strategy": "exponential_jitter",
         "wait_min": 1,
         "wait_max": 60,
-        "stop_on": [ValueError, ConfigurationError],  # Don't retry validation/config errors
+        "stop_on": [
+            ValueError,
+            ConfigurationError,
+        ],  # Don't retry validation/config errors
         "retry_log_level": "debug",
     },
 )
@@ -139,7 +142,9 @@ async def crawl_site_command(input_data: CrawlSiteInput) -> CrawlSiteOutput:
         site.last_error = None
         await site.save()
 
-        max_pages = input_data.max_pages if input_data.max_pages is not None else site.max_pages
+        max_pages = (
+            input_data.max_pages if input_data.max_pages is not None else site.max_pages
+        )
 
         existing_urls = await site.get_source_urls()
         pages = await crawl_site(

@@ -80,31 +80,146 @@ class RoutingDecision:
 
 
 _TASK_BUDGETS: Dict[TaskType, TaskBudget] = {
-    "extraction": TaskBudget(time_ms_p90=1000, peak_ram_mb=2048, max_concurrency=1, min_quality=0.7),
-    "web_extraction": TaskBudget(time_ms_p90=500, peak_ram_mb=512, max_concurrency=1, min_quality=0.7),
-    "ocr": TaskBudget(time_ms_p90=2000, peak_ram_mb=1024, max_concurrency=1, min_quality=0.7, allow_cloud=False),
-    "chunking": TaskBudget(time_ms_p90=200, peak_ram_mb=256, max_concurrency=2, min_quality=0.8),
-    "code_chunking": TaskBudget(time_ms_p90=200, peak_ram_mb=256, max_concurrency=2, min_quality=0.85),
-    "embedding": TaskBudget(time_ms_p90=800, peak_ram_mb=1536, max_concurrency=1, min_quality=0.8),
-    "transformation": TaskBudget(time_ms_p90=3000, peak_ram_mb=1024, max_concurrency=1, min_quality=0.65),
-    "rag_query": TaskBudget(time_ms_p90=500, peak_ram_mb=512, max_concurrency=2, min_quality=0.75),
-    "reasoning": TaskBudget(time_ms_p90=4000, peak_ram_mb=1024, max_concurrency=1, min_quality=0.65),
-    "chat": TaskBudget(time_ms_p90=2000, peak_ram_mb=1024, max_concurrency=1, min_quality=0.65),
-    "tts": TaskBudget(time_ms_p90=1500, peak_ram_mb=1024, max_concurrency=1, min_quality=0.7),
-    "stt": TaskBudget(time_ms_p90=1500, peak_ram_mb=1024, max_concurrency=1, min_quality=0.7),
+    "extraction": TaskBudget(
+        time_ms_p90=1000, peak_ram_mb=2048, max_concurrency=1, min_quality=0.7
+    ),
+    "web_extraction": TaskBudget(
+        time_ms_p90=500, peak_ram_mb=512, max_concurrency=1, min_quality=0.7
+    ),
+    "ocr": TaskBudget(
+        time_ms_p90=2000,
+        peak_ram_mb=1024,
+        max_concurrency=1,
+        min_quality=0.7,
+        allow_cloud=False,
+    ),
+    "chunking": TaskBudget(
+        time_ms_p90=200, peak_ram_mb=256, max_concurrency=2, min_quality=0.8
+    ),
+    "code_chunking": TaskBudget(
+        time_ms_p90=200, peak_ram_mb=256, max_concurrency=2, min_quality=0.85
+    ),
+    "embedding": TaskBudget(
+        time_ms_p90=800, peak_ram_mb=1536, max_concurrency=1, min_quality=0.8
+    ),
+    "transformation": TaskBudget(
+        time_ms_p90=3000, peak_ram_mb=1024, max_concurrency=1, min_quality=0.65
+    ),
+    "rag_query": TaskBudget(
+        time_ms_p90=500, peak_ram_mb=512, max_concurrency=2, min_quality=0.75
+    ),
+    "reasoning": TaskBudget(
+        time_ms_p90=4000, peak_ram_mb=1024, max_concurrency=1, min_quality=0.65
+    ),
+    "chat": TaskBudget(
+        time_ms_p90=2000, peak_ram_mb=1024, max_concurrency=1, min_quality=0.65
+    ),
+    "tts": TaskBudget(
+        time_ms_p90=1500, peak_ram_mb=1024, max_concurrency=1, min_quality=0.7
+    ),
+    "stt": TaskBudget(
+        time_ms_p90=1500, peak_ram_mb=1024, max_concurrency=1, min_quality=0.7
+    ),
 }
 
 
 _LOCAL_BASE: List[ModelCandidate] = [
-    ModelCandidate(name="llama3.2:3b", provider="ollama", size_mb=2000, quant="Q4_K_M", context_tokens=8192, cpu_friendly=0.95, quality=0.72, local=True),
-    ModelCandidate(name="llama3.2:1b", provider="ollama", size_mb=800, quant="Q4_K_M", context_tokens=4096, cpu_friendly=0.98, quality=0.60, local=True),
-    ModelCandidate(name="qwen2.5:3b", provider="ollama", size_mb=2000, quant="Q4_K_M", context_tokens=8192, cpu_friendly=0.94, quality=0.74, local=True),
-    ModelCandidate(name="qwen2.5:1.5b", provider="ollama", size_mb=1000, quant="Q4_K_M", context_tokens=8192, cpu_friendly=0.97, quality=0.65, local=True),
-    ModelCandidate(name="smollm2:360m", provider="ollama", size_mb=250, quant="Q4_K_M", context_tokens=2048, cpu_friendly=0.99, quality=0.55, local=True),
-    ModelCandidate(name="bge-m3", provider="ollama", size_mb=600, quant="fp16", context_tokens=8192, embedding=True, cpu_friendly=0.90, quality=0.85, local=True),
-    ModelCandidate(name="mxbai-rerank-xsmall-v1", provider="onnx", size_mb=244, quant="int8", context_tokens=512, reranker=True, supports_onnx=True, cpu_friendly=0.98, quality=0.88, local=True),
-    ModelCandidate(name="bge-reranker-base", provider="onnx", size_mb=278, quant="fp16", context_tokens=512, reranker=True, supports_onnx=True, cpu_friendly=0.96, quality=0.87, local=True),
-    ModelCandidate(name="llava:7b", provider="ollama", size_mb=4600, quant="Q4_K_M", context_tokens=4096, multimodal=True, cpu_friendly=0.60, quality=0.78, local=True),
+    ModelCandidate(
+        name="llama3.2:3b",
+        provider="ollama",
+        size_mb=2000,
+        quant="Q4_K_M",
+        context_tokens=8192,
+        cpu_friendly=0.95,
+        quality=0.72,
+        local=True,
+    ),
+    ModelCandidate(
+        name="llama3.2:1b",
+        provider="ollama",
+        size_mb=800,
+        quant="Q4_K_M",
+        context_tokens=4096,
+        cpu_friendly=0.98,
+        quality=0.60,
+        local=True,
+    ),
+    ModelCandidate(
+        name="qwen2.5:3b",
+        provider="ollama",
+        size_mb=2000,
+        quant="Q4_K_M",
+        context_tokens=8192,
+        cpu_friendly=0.94,
+        quality=0.74,
+        local=True,
+    ),
+    ModelCandidate(
+        name="qwen2.5:1.5b",
+        provider="ollama",
+        size_mb=1000,
+        quant="Q4_K_M",
+        context_tokens=8192,
+        cpu_friendly=0.97,
+        quality=0.65,
+        local=True,
+    ),
+    ModelCandidate(
+        name="smollm2:360m",
+        provider="ollama",
+        size_mb=250,
+        quant="Q4_K_M",
+        context_tokens=2048,
+        cpu_friendly=0.99,
+        quality=0.55,
+        local=True,
+    ),
+    ModelCandidate(
+        name="bge-m3",
+        provider="ollama",
+        size_mb=600,
+        quant="fp16",
+        context_tokens=8192,
+        embedding=True,
+        cpu_friendly=0.90,
+        quality=0.85,
+        local=True,
+    ),
+    ModelCandidate(
+        name="mxbai-rerank-xsmall-v1",
+        provider="onnx",
+        size_mb=244,
+        quant="int8",
+        context_tokens=512,
+        reranker=True,
+        supports_onnx=True,
+        cpu_friendly=0.98,
+        quality=0.88,
+        local=True,
+    ),
+    ModelCandidate(
+        name="bge-reranker-base",
+        provider="onnx",
+        size_mb=278,
+        quant="fp16",
+        context_tokens=512,
+        reranker=True,
+        supports_onnx=True,
+        cpu_friendly=0.96,
+        quality=0.87,
+        local=True,
+    ),
+    ModelCandidate(
+        name="llava:7b",
+        provider="ollama",
+        size_mb=4600,
+        quant="Q4_K_M",
+        context_tokens=4096,
+        multimodal=True,
+        cpu_friendly=0.60,
+        quality=0.78,
+        local=True,
+    ),
 ]
 
 
@@ -130,9 +245,17 @@ def _estimate_peak_ram_mb(candidate: ModelCandidate, ctx_tokens: int) -> int:
     return base + kv_overhead_mb + 256
 
 
-def _score_candidate(hw: HardwareInfo, task: TaskBudget, c: ModelCandidate, ctx_tokens: int) -> float:
+def _score_candidate(
+    hw: HardwareInfo, task: TaskBudget, c: ModelCandidate, ctx_tokens: int
+) -> float:
     peak = _estimate_peak_ram_mb(c, ctx_tokens)
-    ram_ok = 1.0 if peak <= hw.available_ram_mb else max(0.0, 1.0 - (peak - hw.available_ram_mb) / max(512, hw.available_ram_mb))
+    ram_ok = (
+        1.0
+        if peak <= hw.available_ram_mb
+        else max(
+            0.0, 1.0 - (peak - hw.available_ram_mb) / max(512, hw.available_ram_mb)
+        )
+    )
     cpu_ok = c.cpu_friendly
     local_pref = 1.05 if (c.local and task.prefer_local) else 1.0
     cloud_pen = 0.90 if (not c.local and not task.allow_cloud) else 1.0
@@ -140,10 +263,17 @@ def _score_candidate(hw: HardwareInfo, task: TaskBudget, c: ModelCandidate, ctx_
     return round(score, 4)
 
 
-def pick_best_for_task(task: TaskType, ctx_tokens: int = 4096, allow_cloud: Optional[bool] = None) -> RoutingDecision:
+def pick_best_for_task(
+    task: TaskType, ctx_tokens: int = 4096, allow_cloud: Optional[bool] = None
+) -> RoutingDecision:
     hw = _detect_hardware()
     budgets = _TASK_BUDGETS
-    budget = budgets.get(task, TaskBudget(time_ms_p90=2000, peak_ram_mb=1024, max_concurrency=1, min_quality=0.6))
+    budget = budgets.get(
+        task,
+        TaskBudget(
+            time_ms_p90=2000, peak_ram_mb=1024, max_concurrency=1, min_quality=0.6
+        ),
+    )
     if allow_cloud is not None:
         budget = TaskBudget(
             time_ms_p90=budget.time_ms_p90,
@@ -181,7 +311,9 @@ def pick_best_for_task(task: TaskType, ctx_tokens: int = 4096, allow_cloud: Opti
     mixture: Dict[str, Any] = {}
     if use_mixture:
         mixture = {
-            "strategy": "map_reduce" if task == "transformation" else "classifier_fanout",
+            "strategy": "map_reduce"
+            if task == "transformation"
+            else "classifier_fanout",
             "max_concurrency": budget.max_concurrency,
             "adaptive_batches": True,
         }
@@ -200,8 +332,6 @@ def pick_best_for_task(task: TaskType, ctx_tokens: int = 4096, allow_cloud: Opti
 
 def _detect_hardware() -> HardwareInfo:
     """Detect hardware characteristics."""
-    import os
-    import platform
     try:
         import psutil
     except Exception:
@@ -227,12 +357,11 @@ def _detect_hardware() -> HardwareInfo:
 
     has_avx2 = False
     try:
-        import sys
         # Simple AVX2 detection via /proc/cpuinfo if available
-        if os.path.exists('/proc/cpuinfo'):
-            with open('/proc/cpuinfo', 'r', encoding='utf-8', errors='ignore') as f:
+        if os.path.exists("/proc/cpuinfo"):
+            with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as f:
                 for line in f:
-                    if 'avx2' in line.lower():
+                    if "avx2" in line.lower():
                         has_avx2 = True
                         break
     except Exception:
@@ -240,7 +369,7 @@ def _detect_hardware() -> HardwareInfo:
 
     is_container = False
     try:
-        if os.path.exists('/.dockerenv') or os.path.exists('/run/.containerenv'):
+        if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
             is_container = True
     except Exception:
         pass
@@ -248,18 +377,22 @@ def _detect_hardware() -> HardwareInfo:
     cpu_limit_cpus = None
     try:
         # cgroup v2
-        if os.path.exists('/sys/fs/cgroup/cpu.max'):
-            with open('/sys/fs/cgroup/cpu.max', 'r') as f:
+        if os.path.exists("/sys/fs/cgroup/cpu.max"):
+            with open("/sys/fs/cgroup/cpu.max", "r") as f:
                 parts = f.read().strip().split()
                 if len(parts) == 2 and parts[0].isdigit():
-                    cpu_limit_cpus = float(parts[0]) / float(parts[1]) if float(parts[1]) > 0 else None
+                    cpu_limit_cpus = (
+                        float(parts[0]) / float(parts[1])
+                        if float(parts[1]) > 0
+                        else None
+                    )
     except Exception:
         pass
 
     mem_limit_mb = None
     try:
-        if os.path.exists('/sys/fs/cgroup/memory.max'):
-            with open('/sys/fs/cgroup/memory.max', 'r') as f:
+        if os.path.exists("/sys/fs/cgroup/memory.max"):
+            with open("/sys/fs/cgroup/memory.max", "r") as f:
                 v = f.read().strip()
                 if v.isdigit():
                     mem_limit_mb = int(int(v) / (1024 * 1024))
@@ -267,7 +400,11 @@ def _detect_hardware() -> HardwareInfo:
         pass
 
     if cpu_limit_cpus is not None:
-        cpu_cores_logical = int(cpu_limit_cpus) if cpu_limit_cpus >= 1 else max(1, int(cpu_limit_cpus * cpu_cores_logical))
+        cpu_cores_logical = (
+            int(cpu_limit_cpus)
+            if cpu_limit_cpus >= 1
+            else max(1, int(cpu_limit_cpus * cpu_cores_logical))
+        )
     if mem_limit_mb is not None:
         available_ram_mb = min(available_ram_mb, mem_limit_mb)
         total_ram_mb = min(total_ram_mb, mem_limit_mb)

@@ -56,12 +56,16 @@ class Site(ObjectModel):
 
             return [Source(**row) for row in result] if result else []
         except Exception as e:
-            raise DatabaseOperationError(f"Error fetching sources for site {self.id}: {e}") from e
+            raise DatabaseOperationError(
+                f"Error fetching sources for site {self.id}: {e}"
+            ) from e
 
     async def get_source_urls(self) -> set[str]:
         """Page URLs already ingested for this site, used to skip re-crawls."""
         if not self.id:
-            raise DatabaseOperationError(f"Saving site before crawling source urls: {self.url}")
+            raise DatabaseOperationError(
+                f"Saving site before crawling source urls: {self.url}"
+            )
         try:
             rows = await repo_query(
                 "SELECT asset.url FROM source WHERE site_id = $site_id AND asset.url != NONE",
@@ -75,4 +79,6 @@ class Site(ObjectModel):
                     urls.add(url)
             return urls
         except Exception as e:
-            raise DatabaseOperationError(f"Error fetching source urls for site {self.id}: {e}") from e
+            raise DatabaseOperationError(
+                f"Error fetching source urls for site {self.id}: {e}"
+            ) from e

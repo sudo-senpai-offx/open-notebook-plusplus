@@ -100,7 +100,9 @@ def _get_crawl_client() -> httpx.AsyncClient:
     return _crawl_client
 
 
-async def _pinned_get(url: str, user_agent: str, max_redirects: int = 5) -> Optional[httpx.Response]:
+async def _pinned_get(
+    url: str, user_agent: str, max_redirects: int = 5
+) -> Optional[httpx.Response]:
     """Fetch ``url`` over httpx, pinning DNS on every redirect hop.
 
     Returns ``None`` on transport/validation errors (the crawl treats a failed
@@ -134,7 +136,9 @@ async def _pinned_get(url: str, user_agent: str, max_redirects: int = 5) -> Opti
     return None
 
 
-async def fetch_robots_txt(seed_url: str, user_agent: str = DEFAULT_USER_AGENT) -> Optional[RobotFileParser]:
+async def fetch_robots_txt(
+    seed_url: str, user_agent: str = DEFAULT_USER_AGENT
+) -> Optional[RobotFileParser]:
     """Fetch and parse ``/robots.txt`` for the origin of ``seed_url``.
 
     Returns ``None`` when the site has no robots.txt (or it is unreachable),
@@ -291,7 +295,9 @@ async def crawl_site(
 
     candidates: List[str] = [seed]
     if follow_sitemap:
-        candidates.extend(await fetch_sitemap_urls(seed, user_agent, budget=max_pages * 4))
+        candidates.extend(
+            await fetch_sitemap_urls(seed, user_agent, budget=max_pages * 4)
+        )
     for url in candidates:
         url = _normalize_url(url)
         if url not in seen and _allowed(url):

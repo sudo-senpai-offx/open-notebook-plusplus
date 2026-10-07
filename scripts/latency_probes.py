@@ -10,6 +10,10 @@ feel fast or slow (ADR-009, docs/7-DEVELOPMENT/perf-audit.md budgets):
   sources.list        GET  /api/sources?notebook_id=
   search.text.scoped  POST /api/search {type: text, notebook_id}
   search.vector       POST /api/search {type: vector, notebook_id}   (bge-m3 via Ollama)
+  search.vector.decomposed  POST /api/search + X-OpenNotebook-Timings:1 ->
+                      also reports the server-side embed/db/assemble split headers
+                      (A1 step 0; requires the baked-in deployment) underneath the
+                      total line (as .embed/.db/.assemble rows)
   search.text.global  POST /api/search {type: text}                  (whole KB)
   ingest.text         POST /api/sources/json {type: text}  -> create probe notebook+source, then delete (--flows ingest)
 
@@ -44,17 +48,21 @@ import urllib.request
 from typing import Any, Dict, List, Tuple
 
 
-def http(
+def _request(
     base: str,
     method: str,
     path: str,
     body: Dict[str, Any] | None = None,
     timeout: int = 120,
-) -> Tuple[int, Dict[str, Any]]:
+    headers: Dict[str, str] | None = None,
+) -> Tuple[int, Dict[str, Any], Dict[str, str]]:
+    """Core request; always returns (status, payload, response_headers)."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method)
     if data is not None:
         req.add_header("Content-Type", "application/json")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode()
@@ -62,14 +70,39 @@ def http(
                 payload = json.loads(raw) if raw else {}
             except json.JSONDecodeError:
                 payload = {"_raw": raw[:200]}
-            return resp.status, payload
+            return resp.status, payload, dict(resp.headers.items())
     except urllib.error.HTTPError as e:
         raw = e.read().decode(errors="replace")[:200]
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
             payload = {"_raw": raw}
-        return e.code, payload
+        return e.code, payload, {}
+
+
+def http(
+    base: str,
+    method: str,
+    path: str,
+    body: Dict[str, Any] | None = None,
+    timeout: int = 120,
+    headers: Dict[str, str] | None = None,
+) -> Tuple[int, Dict[str, Any]]:
+    status, payload, _ = _request(
+        base, method, path, body=body, timeout=timeout, headers=headers
+    )
+    return status, payload
+
+
+def http_with_headers(
+    base: str,
+    method: str,
+    path: str,
+    body: Dict[str, Any] | None = None,
+    timeout: int = 120,
+    headers: Dict[str, str] | None = None,
+) -> Tuple[int, Dict[str, Any], Dict[str, str]]:
+    return _request(base, method, path, body=body, timeout=timeout, headers=headers)
 
 
 def time_http(*args: Any, **kwargs: Any) -> Tuple[float, int, Dict[str, Any]]:
@@ -78,14 +111,96 @@ def time_http(*args: Any, **kwargs: Any) -> Tuple[float, int, Dict[str, Any]]:
     return (time.perf_counter() - start) * 1000.0, status, payload
 
 
+def time_http_with_headers(
+    *args: Any, **kwargs: Any
+) -> Tuple[float, int, Dict[str, Any], Dict[str, str]]:
+    start = time.perf_counter()
+    status, payload, headers = http_with_headers(*args, **kwargs)
+    return (time.perf_counter() - start) * 1000.0, status, payload, headers
+
+
+# Server-side phase split for the vector flow (A1 step 0), emitted only when
+# the deployment has the baked-in code. Header names are matched
+# case-insensitively: h11/uvicorn transmit them lowercased on the wire.
+TIMING_HEADER_NAMES = (
+    "X-Notebook-Embed-Ms",
+    "X-Notebook-Db-Ms",
+    "X-Notebook-Assemble-Ms",
+)
+
+
+def header_lookup(headers: Dict[str, str], name: str) -> str | None:
+    target = name.lower()
+    for key, value in headers.items():
+        if key.lower() == target:
+            return value
+    return None
+
+
+def decomposed_vector_hit(
+    base: str,
+    notebook_id: str,
+    timeout: int,
+    sub_beats: Dict[str, List[float]],
+) -> Tuple[float, int, Dict[str, Any]]:
+    """Timed vector hit that also records the server-side phase split.
+
+    Sends ``X-OpenNotebook-Timings: 1``; the baked-in API responds with the
+    embed/db/assemble split as X-Notebook-* headers (A1 step 0). When the
+    deployment lacks the code, or the vector model is unavailable, the
+    headers simply don't appear and sub_beats stays empty.
+    """
+    total_ms, status, payload, headers = time_http_with_headers(
+        base,
+        "POST",
+        "/api/search",
+        {"query": "the importance", "type": "vector", "notebook_id": notebook_id},
+        timeout=timeout,
+        headers={"X-OpenNotebook-Timings": "1"},
+    )
+    if status < 400:
+        for name in TIMING_HEADER_NAMES:
+            value = header_lookup(headers, name)
+            if value is not None:
+                try:
+                    sub_beats.setdefault(name, []).append(float(value))
+                except ValueError:
+                    pass  # ignore garbage header values; treat as absent
+    return total_ms, status, payload
+
+
+def _make_decomposed_hit(
+    base: str, notebook_id: str, timeout: int, sub_beats: Dict[str, List[float]]
+) -> Any:
+    """Closure factory for the decomposed flow.
+
+    The probe loop drops its first (warmup) beat from the totals; drop the
+    first call's splits too so the decomposition rows cover the same beats.
+    """
+    calls = {"n": 0}
+
+    def hit() -> Tuple[float, int, Dict[str, Any]]:
+        total_ms, status, payload = decomposed_vector_hit(
+            base, notebook_id, timeout, sub_beats
+        )
+        calls["n"] += 1
+        if calls["n"] == 1:
+            sub_beats.clear()
+        return total_ms, status, payload
+
+    return hit
+
+
 def discover_probe_notebook(base: str, timeout: int) -> str:
-    status, notebooks = http(base, "GET", "/api/notebooks", timeout=timeout)
+    status, payload = http(base, "GET", "/api/notebooks", timeout=timeout)
     if status >= 400:
-        raise RuntimeError(f"GET /api/notebooks failed: {status} {notebooks}")
+        raise RuntimeError(f"GET /api/notebooks failed: {status} {payload}")
+    # GET /api/notebooks returns a JSON list of notebook objects.
+    notebooks: List[Dict[str, Any]] = payload if isinstance(payload, list) else []
     candidates = [
         nb
         for nb in notebooks
-        if not nb.get("name", "").startswith(("measure-", "probe-"))
+        if not nb.get("name", "").startswith(("measure-", "probe-", "fixture-"))
         and not nb.get("archived", False)
     ]
     if not candidates:
@@ -106,6 +221,7 @@ def build_flows(
     ``flows_arg`` selects the flows to run: "all" (default), or a
     comma-separated list of flow names and/or the "ingest" group.
     """
+    decomposed_sub: Dict[str, List[float]] = {}
     read_flows: Dict[str, Dict[str, Any]] = {
         "health": {
             "name": "health",
@@ -149,9 +265,19 @@ def build_flows(
                 base,
                 "POST",
                 "/api/search",
-                {"query": "the importance", "type": "vector", "notebook_id": notebook_id},
+                {
+                    "query": "the importance",
+                    "type": "vector",
+                    "notebook_id": notebook_id,
+                },
                 timeout=timeout,
             ),
+        },
+        "search.vector.decomposed": {
+            "name": "search.vector.decomposed",
+            "iterations": iter_n,
+            "sub_beats": decomposed_sub,
+            "hits": _make_decomposed_hit(base, notebook_id, timeout, decomposed_sub),
         },
         "search.text.global": {
             "name": "search.text.global",
@@ -198,7 +324,10 @@ def ingest_probe(base: str, timeout: int) -> Tuple[float, int, Dict[str, Any]]:
     tag = f"probe-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
     notebook_name = f"{tag}-nb"
     nb_id: str | None = None
-    payload: Dict[str, Any] = {"name": notebook_name, "description": "latency probe (auto-deleted)"}
+    payload: Dict[str, Any] = {
+        "name": notebook_name,
+        "description": "latency probe (auto-deleted)",
+    }
     try:
         # Warmup beat (DNS + connection setup + import warm path) is dropped by
         # the caller; the first real beat is the timed one.
@@ -219,7 +348,9 @@ def ingest_probe(base: str, timeout: int) -> Tuple[float, int, Dict[str, Any]]:
         start = time.perf_counter()
         # POST /api/sources is multipart-form-only (Depends(parse_source_form_data)),
         # so a JSON body gets a 422. /sources/json accepts SourceCreate directly.
-        status, created_source = http(base, "POST", "/api/sources/json", source_body, timeout=timeout)
+        status, created_source = http(
+            base, "POST", "/api/sources/json", source_body, timeout=timeout
+        )
         return (time.perf_counter() - start) * 1000.0, status, created_source
     finally:
         # Best-effort cleanup.
@@ -238,7 +369,13 @@ def percentile(sorted_ms: List[float], pct: float) -> float:
 def summarize(ms_list: List[float]) -> Dict[str, float]:
     """p50/p90/mean/min/max from a list of per-beat ms values."""
     if not ms_list:
-        return {"mean_ms": 0.0, "p50_ms": 0.0, "p90_ms": 0.0, "min_ms": 0.0, "max_ms": 0.0}
+        return {
+            "mean_ms": 0.0,
+            "p50_ms": 0.0,
+            "p90_ms": 0.0,
+            "min_ms": 0.0,
+            "max_ms": 0.0,
+        }
     sorted_ms = sorted(ms_list)
     return {
         "mean_ms": round(statistics.mean(ms_list), 1),
@@ -265,7 +402,9 @@ def main() -> int:
         return 2
 
     try:
-        notebook_id = args.notebook_id or discover_probe_notebook(args.base, args.timeout)
+        notebook_id = args.notebook_id or discover_probe_notebook(
+            args.base, args.timeout
+        )
     except Exception as e:  # noqa: BLE001 - setup failure path
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -280,8 +419,12 @@ def main() -> int:
         "flows": {},
     }
 
-    print(f"base={args.base} mode={args.mode or 'default'} probe_notebook={notebook_id}")
-    header = f"{'flow':<22}{'n':>3}{'mean_ms':>9}{'p50':>9}{'p90':>9}{'min':>9}{'max':>9}"
+    print(
+        f"base={args.base} mode={args.mode or 'default'} probe_notebook={notebook_id}"
+    )
+    header = (
+        f"{'flow':<22}{'n':>3}{'mean_ms':>9}{'p50':>9}{'p90':>9}{'min':>9}{'max':>9}"
+    )
     print(header)
     print("-" * len(header))
 
@@ -312,7 +455,29 @@ def main() -> int:
                 f"{summary['min_ms']:>9.1f}{summary['max_ms']:>9.1f}  {status_mark}"
             )
         else:
-            print(f"{name:<22}{0:>3}{'-':>9}{'-':>9}{'-':>9}{'-':>9}{'-':>9}  {status_mark}")
+            print(
+                f"{name:<22}{0:>3}{'-':>9}{'-':>9}{'-':>9}{'-':>9}{'-':>9}  {status_mark}"
+            )
+
+        # A1 step 0: server-side phase split rows (only for flows that collected
+        # them, i.e. the decomposed vector flow against a baked-in deployment).
+        for sub_label, header_name in (
+            (".embed", "X-Notebook-Embed-Ms"),
+            (".db", "X-Notebook-Db-Ms"),
+            (".assemble", "X-Notebook-Assemble-Ms"),
+        ):
+            sub_vals = flow.get("sub_beats", {}).get(header_name, [])
+            if not sub_vals:
+                continue
+            sub_summary = summarize(sub_vals)
+            report["flows"][name].setdefault("decomposed", {})[header_name] = (
+                sub_summary
+            )
+            print(
+                f"{sub_label:<22}{len(sub_vals):>3}{sub_summary['mean_ms']:>9.1f}"
+                f"{sub_summary['p50_ms']:>9.1f}{sub_summary['p90_ms']:>9.1f}"
+                f"{sub_summary['min_ms']:>9.1f}{sub_summary['max_ms']:>9.1f}"
+            )
 
     print("-" * len(header))
     if args.json:

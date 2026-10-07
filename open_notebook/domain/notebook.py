@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
@@ -908,14 +909,24 @@ async def vector_search(
     note: bool = True,
     minimum_score=0.2,
     notebook_ids: Optional[List[str]] = None,
+    _timings: Optional[Dict[str, Optional[float]]] = None,
 ):
+    """Vector search over embedded chunks.
+
+    ``_timings`` is an optional side-channel (A1 step 0): when a dict is
+    passed, the embed / retrieve / assemble phases are recorded in ms in
+    place. Callers that omit it (notably the text->vector fallback inside
+    text_search()) are completely unaffected.
+    """
     if not keyword:
         raise InvalidInputError("Search keyword cannot be empty")
     try:
         from open_notebook.utils.embedding import generate_embedding
 
         # Use unified embedding function (handles chunking if query is very long)
+        _t0 = time.perf_counter()
         embed = await generate_embedding(keyword)
+        _t1 = time.perf_counter()
         search_results = await repo_query(
             """
             SELECT * FROM fn::vector_search($embed, $results, $source, $note, $minimum_score, $notebook_ids);
@@ -929,16 +940,23 @@ async def vector_search(
                 "notebook_ids": _scope_record_ids(notebook_ids),
             },
         )
+        _t2 = time.perf_counter()
         # SurrealDB fn::vector_search declares ORDER BY similarity DESC, but the
         # SELECT * FROM fn::... wrapper can still return rows out of rank order.
         # Enforce descending similarity (stable by id for ties) before returning.
-        return sorted(
+        ranked = sorted(
             search_results or [],
             key=lambda item: (
                 -float(item.get("similarity") or 0.0),
                 str(item.get("id") or ""),
             ),
         )
+        _t3 = time.perf_counter()
+        if _timings is not None:
+            _timings["embed_ms"] = (_t1 - _t0) * 1000.0
+            _timings["db_ms"] = (_t2 - _t1) * 1000.0
+            _timings["assemble_ms"] = (_t3 - _t2) * 1000.0
+        return ranked
     except Exception as e:
         logger.error(f"Error performing vector search: {str(e)}")
         logger.exception(e)

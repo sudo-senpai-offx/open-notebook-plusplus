@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Iterable, List, TypeVar
+from typing import List, TypeVar
 
-from ..ai.model_policy import use_mixture
 from ..ai.capabilities import get_hardware
+from ..ai.model_policy import use_mixture
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
 
-def adaptive_batch_size(items: int, base: int = 50, min_b: int = 10, max_b: int = 200) -> int:
+def adaptive_batch_size(
+    items: int, base: int = 50, min_b: int = 10, max_b: int = 200
+) -> int:
     if items <= 0:
         return base
     hw = get_hardware()
@@ -40,5 +42,10 @@ def batch_items(items: List[T], base: int = 50) -> List[List[T]]:
     batches: List[List[T]] = []
     for i in range(0, len(items), b):
         batches.append(items[i : i + b])
-    logger.debug("batching.adaptive count=%s batch_size=%s batches=%s", len(items), b, len(batches))
+    logger.debug(
+        "batching.adaptive count=%s batch_size=%s batches=%s",
+        len(items),
+        b,
+        len(batches),
+    )
     return batches

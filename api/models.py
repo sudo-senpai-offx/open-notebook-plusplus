@@ -497,7 +497,9 @@ class SiteUpdate(BaseModel):
     respect_robots_txt: Optional[bool] = Field(
         None, description="Honor robots.txt disallow rules"
     )
-    max_pages: Optional[int] = Field(None, ge=1, le=1000, description="Max pages per crawl")
+    max_pages: Optional[int] = Field(
+        None, ge=1, le=1000, description="Max pages per crawl"
+    )
     user_agent: Optional[str] = Field(None, description="User-Agent for the crawl")
 
 
