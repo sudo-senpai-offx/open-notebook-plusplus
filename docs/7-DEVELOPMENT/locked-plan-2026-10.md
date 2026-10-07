@@ -35,13 +35,20 @@ text flow is 315 ms — the ~3 s delta is the vector machinery
 
 ### Locked steps (run in this order; each is throttled before/after, opt-in, keep positive deltas only)
 
+> **Order re-locked 2026-10-07** by the decomposed probe (A1 step 0, see
+> perf-audit.md §Vector search decomposition): total 3813 ms = embed 217 +
+> db 3401 (**~87%**) + assemble ~0, and the DB cost is weakly corpus-dependent
+> (2395 ms on the 9-chunk fixture). The DB-side attacks (1–3) therefore run
+> *before* the embedding cache (4); the embed-cache-first order is superseded by
+> evidence, per the re-lock with the user.
+
 | Step | Change | Hypothesis / gate |
 |---|---|---|
-| 0 | **Decomposed probe flow** `search.vector.decomposed` writing `embed_ms / db_ms / assemble_ms` | Mandatory — decide where the 3 s lives before changing anything |
-| 1 | Query-embedding cache (hash of normalized query → reuse embed) | Zero recall cost; validates embed-dominance hypothesis |
-| 2 | Matryoshka dimension truncation as opt-in flag (1024 → 512/256) | 4–16× cheaper embed + scan; small recall cost, so *after* the zero-cost cache |
-| 3 | Index hygiene: confirm HNSW + cosine metric; top-k window; cap chunks returned | If DB scan dominates |
-| 4 | Payload trimming: list response ships ids+scores; chunk text lazy-fetched for LLM context | If assemble/serialization dominates |
+| 0 | **Decomposed probe flow** `search.vector.decomposed` writing `embed_ms / db_ms / assemble_ms` | **DONE (2026-10-07)** — whale is the DB-side lookup |
+| 1 | **Projection trim**: the vector call is `SELECT * FROM fn::vector_search(...)` → project only the fields the app consumes (id, similarity, parent linkage, title/snippet), not full chunk content + embedding arrays | Cuts result transfer/serialization in the DB phase; first DB-side attack |
+| 2 | **Vector-index verify/config**: confirm the chunk tables have a `TYPE VECTOR` index (HNSW + cosine); add via migration if missing; tune top-k window / k / ef if present | If `fn::vector_search` scans unindexed, this is the structural cause of the ~const 2.4–3.4 s |
+| 3 | **Payload trim**: chunk records lean; content text out of the searched projection/serialization; list response ships ids+scores, chunk text lazy-fetched for LLM context | If chunk payload shape drives the DB phase |
+| 4 | Query-embedding cache (hash of normalized query → reuse embed) | Zero recall cost; caps the ~217 ms leg on repeated queries |
 | 5 | Only if 1–4 exhausted — re-probe mixture / hybrid with fresh numbers | Flags stay OFF unless one proves positive; reranker already rejected (worse) and stays rejected |
 
 ### A1 non-goals
