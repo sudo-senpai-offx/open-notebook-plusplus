@@ -16,6 +16,10 @@ feel fast or slow (ADR-009, docs/7-DEVELOPMENT/perf-audit.md budgets):
                       total line (as .embed/.db/.assemble rows)
   search.text.global  POST /api/search {type: text}                  (whole KB)
   ingest.text         POST /api/sources/json {type: text}  -> create probe notebook+source, then delete (--flows ingest)
+  chat.turn           POST /api/chat/execute                -> create probe-* chat session, one terse local-model turn, delete session.
+                      NOT part of --flows all: it is a slow opt-in LLM flow (model call dominates), and under a
+                      throttled envelope a starved-model timeout must read as a chat error, never an app latency beat
+                      (A2 #5 guardrail; errors are recorded separately from beats already).
 
 Each flow is hit N times (default 5) and reported as p50/p90/mean/min/max ms.
 The probe notebook is auto-discovered: the non-measure-*/probe-* notebook with
@@ -295,6 +299,14 @@ def build_flows(
             "iterations": iter_n,
             "hits": lambda: ingest_probe(base, timeout=timeout),
         },
+        "chat.turn": {
+            "name": "chat.turn",
+            "iterations": iter_n,
+            # Opt-in: slow local-model flow, excluded from --flows all so the
+            # parity battery's default harness behavior is unchanged (A2 #5).
+            "opt_in": True,
+            "hits": lambda: chat_turn_probe(base, notebook_id, timeout),
+        },
     }
 
     def select(names: List[str]) -> List[Dict[str, Any]]:
@@ -308,8 +320,52 @@ def build_flows(
         return [read_flows[name] for name in expanded if name in read_flows]
 
     if flows_arg == "all":
-        return list(read_flows.values())
+        return [flow for flow in read_flows.values() if not flow.get("opt_in")]
     return select([token.strip() for token in flows_arg.split(",")])
+
+
+def chat_turn_probe(
+    base: str, notebook_id: str, timeout: int
+) -> Tuple[float, int, Dict[str, Any]]:
+    """Create a probe-* chat session, run one terse turn, then delete it.
+
+    Measures end-to-end chat-turn latency (session resolution + context render +
+    local model call + full response) for the app's default chat model. The REST
+    surface does not stream, so first-token latency is not isolable; this flow
+    records the full-turn figure (A2 #5) and notes that in the report. Creates
+    and deletes a probe-* session, cleaning up even on mid-flow failure.
+    """
+    import uuid
+
+    tag = f"probe-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+    session_id: str | None = None
+    try:
+        status, created = http(
+            base,
+            "POST",
+            "/api/chat/sessions",
+            {"notebook_id": notebook_id, "title": f"{tag}-chat"},
+            timeout=timeout,
+        )
+        if status >= 400:
+            return 0.0, status, created
+        session_id = created["id"]
+        start = time.perf_counter()
+        status, payload = http(
+            base,
+            "POST",
+            "/api/chat/execute",
+            {
+                "session_id": session_id,
+                "message": "Reply with the single word: OK",
+                "context": {"sources": [], "notes": []},
+            },
+            timeout=timeout,
+        )
+        return (time.perf_counter() - start) * 1000.0, status, payload
+    finally:
+        if session_id:
+            http(base, "DELETE", f"/api/chat/sessions/{session_id}", timeout=timeout)
 
 
 def ingest_probe(base: str, timeout: int) -> Tuple[float, int, Dict[str, Any]]:
@@ -390,7 +446,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", default="http://localhost:5055")
     ap.add_argument("-n", "--iter", type=int, default=5)
-    ap.add_argument("--flows", default="all", help="all (default) or ingest")
+    ap.add_argument(
+        "--flows",
+        default="all",
+        help="all (default; excludes chat.turn), ingest, or a comma-separated "
+        "list incl. chat.turn (opt-in local-model flow)",
+    )
     ap.add_argument("--mode", default="", help="report label, e.g. normal/throttled")
     ap.add_argument("--notebook-id", default=None, help="skip auto-discovery")
     ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")

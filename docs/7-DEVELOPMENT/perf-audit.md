@@ -72,9 +72,9 @@ Per-process RSS, task-peak RSS, and cold-start times vs the ADR-009 envelope.
 
 ## 4. Baselines
 
-**Status:** partial baselines captured (unthrottled latency probes + container RSS). Throttled runs still pending. 
+**Status:** baselines captured (unthrottled + throttled latency probes, container RSS; A2 measurement records below).
 
-### Latency (normal) — to be recorded from `scripts/latency_probes.py --mode normal`
+### Latency (normal) — recorded from `scripts/latency_probes.py --mode normal`
 
 | Flow | p50 | p90 | mean | budget | verdict |
 |---|---|---|---|---|---|
@@ -94,17 +94,230 @@ Per-process RSS, task-peak RSS, and cold-start times vs the ADR-009 envelope.
 | notebooks.load | 65.6 | 68.4 | 66.6 | 300 | OK |
 | sources.list | 125.4 | 127.7 | 128.4 | 200 | OK |
 | search.text.scoped | 315.2 | 315.2 | 317.1 | 500 | OK |
-| search.vector | 3363.7 | 3381.5 | 3373.1 | 500 | **BELOW BUDGET (50x over)** | # vector is heavy; tune via opt-in flags only
+| search.vector | 3363.7 | 3381.5 | 3373.1 | 500 | **OVER BUDGET (6.8x p90)** — vector is heavy; tune via opt-in flags only |
 | search.text.global | 347.5 | 350.0 | 350.5 | 500 | OK |
 | ingest.text | 1282.7 | 1295.9 | 1294.7 | 1000 | OK |
 
 ### RSS + startup (ADR-009)
 
-| Component | Idle RSS | Task peak | Cold start | Envelope | Status |
-|---|---|---|---|---|---|
-| API | 562.6MiB | — | — | <220 MB / <5 s | measured (unthrottled) |
-| Worker | — | — | — | <300–500 MB / <15 s | baseline in progress |
-| Frontend (node) | — | — | — | <150 MB | baseline in progress |
+Earlier readings (partial): API 562.6 MiB measured unthrottled; worker / node
+baseline in progress. A2 #1 closed the worker + node cells and extended capture
+to whisper/piper (2026-10-07, live throttled stack).
+
+**A2 #1 re-measurement (2026-10-07, envelope: app 2 GiB / 2c, db 512 MiB / 1c):**
+
+| Component | Idle RSS | Task peak | Envelope | Status |
+|---|---|---|---|---|
+| API (`uvicorn`, VmRSS) | **~878 MiB** | ~878 MiB (flat) | <220 MB / <5 s | **measured — over budget** |
+| Worker (`surreal-commands-worker`, VmRSS) | **~865 MiB** | **~865 MiB** (embed 12 chunks: +8 KB) | <300–500 MB | **measured — over budget** |
+| Frontend (`next-server`, VmRSS) | **~52 MiB** | — (SSR) | <150 MB | measured — OK |
+| SurrealDB (container) | **~443 MiB** / 512 MiB | — | — | measured |
+| Whisper (container) | **~50 MiB** | ~50.9 MiB (idle through podcast run — TTS routes to piper-en) | — | measured (idle) |
+| Piper (container) | **~4 MiB** | **~1054.7 MiB (1.03 GiB)** — 68 s TTS window, A2 #2 | — | **measured — TTS peak** |
+| Piper-JA (container) | **~16 MiB** | ~16.4 MiB (idle — English voice) | — | measured (idle) |
+
+Container working set (the binding number for the 2 GiB envelope): docker stats
+shows the app container at **1.62 GiB / 2 GiB** (cgroup `memory.current` =
+2046 MiB incl. reclaimable cache; RSS across api+worker+node ≈ 1.86 GB). Two
+samples 10 s apart are identical — the footprint is a stable loaded working
+set, not a leak in motion. But the stack now **idles at / just under the
+envelope ceiling**, vs ~430 MB in the original ADR-009 session.
+
+Caveats: per-process VmRSS includes shared text pages and freed-but-not-returned
+pymalloc arenas, so it grows with uptime and double-counts shared wheels; the
+container-level number is what the 2 GiB cgroup actually enforces. The growth
+vs ADR-009's original ~170/~150 MB is a real modded-fork regression (eager
+`docling` + content-core/esperanto/podcast-creator imports land in both api and
+worker RSS — see the Docling trade-off note below), and it is the likely reason
+earlier transient `KeyError`/`Future cancelled` flakiness appeared under
+memory pressure. A2 #2/#5 (podcast, chat-with-ollama on the same box) start
+with only ~380 MB app-container headroom — measure and record, they will
+likely need the ADR-009 stage-4 footprint cuts to fit.
+
+#### A2 #2 podcast generation baseline (2026-10-07 — baseline-only, no gate)
+
+Job `command:nu8zbqbbwh7lucqr5g3d`, episode `a2-podcast-baseline`
+(`episode:pu87uek777eutolcjp0n`), profile `solo_expert` (outline produced 5
+segments), **default config — the fast/draft preset knobs remain OFF** (they
+are the documented opt-in tuning path, not exercised here). Envelope verified
+still applied at end of run: app 2 GiB / 2c, db 512 MiB / 1c. LLM leg: ollama
+`mistral:latest` (7.2B) host-side (12c, unthrottled — caveat below); TTS:
+`en_US-amy-medium` via piper `:9600`.
+
+**Timeline** (log timestamps UTC; submit 11:39:30.688 → success
+12:14:15.205):
+
+| Phase | Window | Duration | Share | Retries |
+|---|---|---|---|---|
+| queue → worker pickup → outline start | 11:39:30.7 → 11:39:33.9 | 3.2 s | — | — |
+| outline (5 segments) | 11:39:33.9 → 11:47:14.1 | 460.2 s | 22.1% | 1 × 180 s ReadTimeout (11:42:34) |
+| transcript (5 segments) | 11:47:14.1 → 12:13:04.7 | 1550.6 s | 74.4% | 1 × 180 s ReadTimeout (11:50:14, seg 1) |
+| TTS (38 clips, 8 batches × 5) | 12:13:04.7 → 12:14:12.9 | 68.2 s | 3.3% | — |
+| combine + finalize | 12:14:12.9 → 12:14:15.2 | 2.3 s | ~0% | — |
+| **total** | | **2084.4 s (34.7 min)** | 100% | **2** |
+
+Per-segment transcript times: 398.6 / 228.7 / 253.0 / 380.3 / 290.0 s (seg 1
+includes its retry). Output: 6.12 MB MP3, 38 clips. Poller-observed status
+wall time 2077.7 s (10 s poll granularity).
+
+**Findings:**
+
+- **LLM = 96.5% of wall time** (outline + transcript 2010.8 s of 2084.4 s);
+  TTS is 3.3%; app-side orchestration (queue pickup, batching, combine) ≈ 6 s.
+- **180 s provider read timeout is systemic for 7.2B generation on this
+  host**: 2 retries (outline attempt 1, transcript seg 1 attempt 1), both
+  recovered on retry. Retry budget = max 3 attempts, 5 s × 2ⁿ backoff, 30 s
+  cap — never exhausted. This is a baseline property, not a stack fault:
+  whole-segment generations regularly exceed the read timeout, so any timing
+  comparison must expect ~1 retry in the early long-generation phases.
+- **Envelope held end-to-end**: app container working set peaked at
+  **1455.1 MiB / 2 GiB (71%)**, db at **426 MiB / 512 MiB**; app
+  `RestartCount=0`, worker pid 222 and uvicorn pid 30 unchanged across the
+  run, no OOM, job completed. (db `RestartCount=1` predates the job — the
+  11:00 UTC stall incident already recorded under A2 #1.)
+- **Piper TTS is the memory outlier: 4.2 MiB idle → 1054.7 MiB (1.03 GiB)
+  peak** during the 68 s TTS window (raw samples at ~15 s: 671.9 / 725.4 /
+  884.5 / 1006 / 1054.7 MiB, decaying after), vs its 3.562 GiB compose limit.
+  Whisper (peak 50.9 MiB) and piper-ja (peak 16.4 MiB) stayed at idle — the
+  English voice routes to piper-en only. **Fit implication:** the concurrent
+  stack during TTS ≈ app 1.345 GiB + db ~0.35 GiB + piper 1.03 GiB ≈ 2.7 GiB
+  across per-container limits on this 16 GB host — fine here, but it would
+  **not fit a single 2 GB physical box**. TTS phase is the low-end fit risk;
+  queue ordering (transcript completes before TTS starts) keeps app below its
+  own peak while piper runs.
+- App container dips to 1.345 GiB during TTS (from its 1.421 GiB mid-run
+  peak): clean file pages reclaimed under the 2 GiB cgroup while piper demands
+  memory — the same eviction dynamic as the VmRSS caveat below.
+
+**RSS caveat (A2 #1, now observed under load):** mid-run worker/api VmRSS
+peaked at **637.7 / 655.4 MiB — *below* their idle readings (865 / 878
+MiB)**: the 2 GiB cgroup reclaims clean shared/cache pages under pressure, so
+VmRSS is not the binding number — container working set (1.40–1.46 GiB) is.
+Capture coverage: original samplers 19:39:47–19:51:07 (outline + seg 1–2),
+sampler 3/4 pairs 19:54:51–20:18:38 (seg 2 → terminal). Worker VmRSS has a
+~5 min gap 19:49:50–19:55:06 (flat 628.9 → 637.7 MiB on both sides); worker2's
+`worker=` column self-matched pgrep and is discarded, but its `api=` column is
+valid (peak 655.4 MiB, consistent) and closes the api gap.
+
+**LLM-leg caveat:** ollama runs host-side (12c) and is *not* CPU-throttled by
+the envelope (the cgroup caps app + db only) — this baseline measures app-side
+fit and queue behavior under the envelope, not low-end generation speed. Model
+knob stays default (`mistral:latest`); the podcast fast/draft presets and a
+smaller model are the opt-in paths if 34.7 min must come down.
+
+#### A2 #3 container cold starts (2026-10-07 — measure & record)
+
+Method: `docker restart open-notebook-open_notebook-1` ×3 back-to-back under
+the envelope (verified 2 GiB / 2c before and after; db 512 MiB / 1c untouched),
+no samplers running (prerequisite). Clocks: container `StartedAt` (ns) as t0,
+`docker logs -t` prefixes for in-boot markers, external polls of `GET /health`
+and `GET :8502` at 0.25 s. One additional sample was taken on the *first*
+restart after 3 h 20 m of uptime (harness v1 — its API/worker log-marker
+extraction is valid; its frontend poll had a false-success bug fixed before
+these three runs). DB migration check reads **v29 on every boot** (image max
+= 28 → no-op).
+
+| Marker (from container start) | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| entrypoint start | +0.46 s | +0.43 s | +0.42 s |
+| supervisord spawn (api / worker / frontend) | +1.69 / 1.69 / 1.70 s | +1.63 / 1.63 / 1.64 s | +1.63 / 1.63 / 1.63 s |
+| worker banner ("Starting Surreal Commands worker") | +3.40 s | +3.23 s | +3.14 s |
+| migration check (v29, no-op) | +14.94 s | +14.72 s | +14.53 s |
+| API ready (`Application startup complete`) | +14.98 s | +14.78 s | +14.58 s |
+| worker ready (`Starting LIVE query listener`) | +14.82 s | +14.46 s | +14.36 s |
+| API `/health` 200 (external poll) | +15.18 s | +15.17 s | +14.92 s |
+| wait-for-api done → frontend start | +16.78 s | +16.71 s | +16.80 s |
+| Next.js ready (`✓ Ready in 0ms`) | +17.17 s | +17.13 s | +17.21 s |
+| frontend HTTP (external poll) | +17.55 s | +17.50 s | +17.60 s |
+
+Derived: worker **spawn→ready 13.13 / 12.83 / 12.73 s** (budget `< 15 s` →
+**PASS ×3**); API spawn→ready 13.29 / 13.15 / 12.95 s; `docker restart` command
+window (stop grace + start) 2.63 / 2.15 / 2.25 s; issue→`/health` 17.58 /
+17.09 / 16.94 s; issue→frontend serving 19.95 / 19.42 / 19.62 s.
+
+**Findings:**
+
+- **Worker `< 15 s` (ADR-009 stage 2): met on every measured restart** —
+  12.7–13.1 s spawn→ready steady-state (+14.4–14.8 s from container start,
+  which includes supervisord + `uv run` overhead). Back-to-back restarts are
+  tight (±0.3 s). The first-restart-after-idle sample measured **18.9 s**
+  spawn→ready — over target; cause not isolated (first restart after 3 h 20 m
+  uptime and the podcast run's memory pressure — page-cache/host-load
+  variance, not reproducible in the warm runs). Recorded as variance, not a
+  steady-state failure.
+- **API startup is import-bound, not migration-bound**: spawn→ready ≈ 13 s,
+  of which the migration check itself is a ~0.05 s v29 no-op. The wall is the
+  shared heavy module graph — API and worker import all command modules
+  *concurrently* on 2 CPUs. If the ADR-009 `< 5 s` API budget is read
+  container-side it is missed by ~8 s; that budget belongs to
+  `measure_resources.sh` spawn mode (its own process scope), which A2 #3
+  deliberately replaced with container-level timing per the locked decision —
+  the two are not directly comparable, and the harness was not re-run here.
+- **Frontend has no build at boot**: the image ships the prebuilt standalone
+  output; `wait-for-api.sh` (5 s poll cadence) hands off 1.8–2.2 s after API
+  ready, then `node server.js` is ready in **0.39–0.41 s**. Total
+  issue→serving ≈ **19.4–20.0 s**, dominated by API readiness.
+- **Cold-start DB safety**: v29 no-op on all boots — the image (max 28) can
+  no longer re-apply migration 28, so the 09:28 boot's drift re-application
+  cannot recur; no migration work runs at cold start.
+- Envelope confirmed unchanged after the runs (`NanoCpus=2e9`,
+  `Memory=2147483648`); `RestartCount` stays 0 (manual `docker restart` does
+  not increment it).
+
+#### A2 #5 chat turn under envelope (2026-10-07 — measure & record)
+
+Flow: opt-in `chat.turn` in `scripts/latency_probes.py` (excluded from the
+default `all` discovery — the local-model flow only runs when asked for).
+`POST /api/chat/sessions` → `POST /api/chat/execute` → session `DELETE`; one
+terse turn ("Reply with the single word: OK") with an explicitly empty context
+(`sources: [], notes: []`), so the figure covers session resolution + notebook
+link + local model call + full response — notebook content never enters the
+turn (session links to the auto-discovered probe notebook, the 85-source
+`test` notebook; `fixture-*` notebooks are excluded from discovery).
+
+**Ollama wiring (locked A2 #5 decision):** for the duration of the run ollama
+was CPU-quota'd to **2 CPUs** (`systemctl set-property ollama.service
+CPUQuota=200%` → cgroup `cpu.max=200000 100000`), matching the app's 2c share,
+so the inference leg competes on the same CPU budget as everything else.
+`MemoryMax` was left at `infinity`: the default chat model is
+**aya-expanse:8b (5.1 GB)** and no low-end-plausible cap can hold it —
+`throttle.sh`'s declared `THROTTLE_OLLAMA_MEM=768m` default is aspirational
+(ollama is a host systemd service, never a container; the script's `apply`
+only touches the app + db containers) and applying it would OOM the model
+load rather than throttle it. Clamp reverted immediately after the run
+(`cpu.max` back to `max`, drop-in removed); standing policy **D3 (ollama
+host-side, uncapped)** is unchanged — this was a one-run wiring per the
+locked decision.
+
+Default chat model confirmed via `GET /api/models/defaults` →
+`model:nim5nvu897dikcxy4dji` = **aya-expanse:8b** (ollama, host). No model
+resident at run start (`ollama ps` empty) — the discarded warmup beat absorbed
+the cold load. Per-request probe timeout 120 s (`ESPERANTO_LLM_TIMEOUT=300`).
+
+| Flow | n | mean | p50 | p90 | min | max | errors |
+|---|---|---|---|---|---|---|---|
+| chat.turn | 4 (+1 warmup) | 8482.2 | 9430.6 | 9951.1 | 4461.1 | 10085.9 | **0** |
+
+(millisecond figures; `--mode throttled`, `-n 5`, first beat discarded as
+warmup; raw: `/tmp/opencode/a2-chat-throttled.txt`)
+
+**Findings:**
+
+- **0 timeouts, 0 HTTP errors.** The guardrail ("timeout counts recorded
+  separately from app latency") had nothing to separate this run: the probe
+  records transport/HTTP failures in `errors`, never as beats, so a
+  starved-model timeout could not have been folded into the latency columns
+  even if one had occurred.
+- **Budget row ("chat first token < 2 s") is not measurable on this surface.**
+  `POST /api/chat/execute` does not stream, so first-token latency cannot be
+  isolated; per the locked decision the **full-turn** figure is recorded:
+  p50 **9.43 s**, min **4.46 s**, max **10.09 s** (2c ollama + aya-expanse:8b).
+- Beat spread 4.46 s vs 9.4–10.1 s — cause not isolated (model load / page-in
+  ordering, prefill variance); n=4 too small to attribute.
+- Verdict: **recorded, not gated** (ADR-009 explicitly scopes A2 #2/#5 this
+  way) — the budget is *unverifiable* on the non-streaming REST surface, not
+  measured-and-missed. A first-token number needs a streaming surface (SSE /
+  graph stream mode); candidate follow-up, outside the locked A2 scope.
 
 ### Manual spot measurements (this dev box, unthrottled, 12c/16G)
 
@@ -378,6 +591,28 @@ chunks, embedded_chunks 2/2/3/2). Scoped `search.vector` on the fixture
 golden (4 hits / sim 0.4036–0.4189). test85 re-probe in the same run: **22
 hits**, same shape (baseline 22). The fixture is now the throttled corpus for
 A2 heavy flows per the locked plan.
+
+**A2 #6 heavy-flow status check (2026-10-07 — close-out):** the original
+defect (heavy flows reset the connection: the app process exceeded the old
+1280 MiB cap on the 85-source corpus) re-tested against the fixture under the
+live envelope (app 2 GiB / 2c, db 512 MiB / 1c, verified before + after):
+`latency_probes.py --flows
+search.vector,search.text.scoped,search.text.global,ingest.text
+--notebook-id notebook:1n4cb4qr744izp5xdo26 --mode throttled-fixture -n 3`
+→ **all four flows completed, errors 0** (no resets, no timeouts):
+
+| Flow | p50 | mean | max |
+|---|---|---|---|
+| search.vector (fixture) | 2926.2 | 3005.8 | 3085.3 |
+| search.text.scoped (fixture) | 724.3 | 11386.4 | 22048.5 |
+| search.text.global (whole KB) | 746.4 | 747.2 | 747.9 |
+| ingest.text (probe notebook, self-deleted) | 1567.0 | 3203.9 | 4840.8 |
+
+First beats in each flow absorb cold starts (scoped search max 22.0 s vs
+p50 0.72 s; ingest max 4.8 s vs p50 1.6 s) — recorded as-is, warmup not
+separately flagged by the harness in this run. No stray `probe-*`/
+`measure-*` notebooks left behind. **A2 #6 closed: fixture is the throttled
+corpus and heavy flows run on it without resets.**
 
 One row per module: static read + instrumented probes + footprint. Status:
 `unmeasured → probed → fixed → proven`.

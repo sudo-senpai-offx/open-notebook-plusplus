@@ -29,6 +29,99 @@ Stack working set without tasks: 170 + 150 + 107 ≈ **~430 MB**; mid-task ≈
 SurrealDB (~314 MB), Ollama + loaded embedding model, and headroom → the natural
 fit is the **2 GB RAM class**.
 
+### Re-measurement (2026-10-07, A2 #1 close-out — live throttled stack)
+
+Envelope at measurement: app 2 GiB / 2c, db 512 MiB / 1c (whisper/piper/piper-ja
+unconstrained by compose limits — caveat below). Idle values are two identical
+10 s-apart samples (stable working set, not a leak in motion); task peak from a
+12-chunk embed through the queue.
+
+| Component | Idle RSS | Task peak | vs original |
+|---|---|---|---|
+| API (`uvicorn`, VmRSS) | ~878 MiB | ~878 MiB (flat) | 170 MB → **5.2×** |
+| Worker (`surreal-commands-worker`, VmRSS) | ~865 MiB | ~865 MiB (12-chunk embed: +8 KB) | 150→234 MB → **~5.8×** |
+| Frontend (`next-server`, VmRSS) | ~52 MiB | — (SSR) | 107 MB → 0.5× |
+| SurrealDB (container) | ~443 MiB / 512 MiB | — | 314 → ~443 MiB |
+| Whisper (container) | ~50 MiB | ~50.9 MiB (idle through podcast run) | new cell |
+| Piper (container) | ~4.2 MiB | **~1054.7 MiB** (68 s TTS window, A2 #2) | new cell — TTS peak |
+| Piper-JA (container) | ~16 MiB | ~16.4 MiB (idle — English voice) | new cell |
+
+**Container working set (the number the 2 GiB cgroup enforces):** docker stats
+app = **1.62 GiB / 2 GiB**; cgroup `memory.current` = 2046 MiB (incl. reclaimable
+cache). RSS across api+worker+node ≈ 1.86 GB → the stack **idles at / just under
+the envelope ceiling**, leaving ~380 MB headroom for heavy flows.
+
+**A2 #2 podcast baseline (2026-10-07, baseline-only — no gate):** default
+config (fast/draft presets OFF), `solo_expert` / 5 segments, ollama
+`mistral:latest` (7.2B, host-side unthrottled) + piper `en_US-amy-medium`.
+Wall time **2084 s (34.7 min)** — LLM (outline 460 s + transcript 1551 s) =
+**96.5%**, TTS (38 clips) = 68 s. Two retries, both 180 s provider
+ReadTimeouts (7.2B long generations exceed the read timeout on this host;
+retry budget max 3 / 5 s × 2ⁿ / cap 30 s never exhausted). Envelope held:
+app container peak **1455 MiB / 2 GiB (71%)**, db 426 / 512 MiB, no OOM, no
+restart. Piper is the TTS memory outlier (4.2 MiB idle → **1054.7 MiB** in the
+68 s window): the concurrent stack during TTS ≈ app 1.345 + db 0.35 + piper
+1.03 ≈ 2.7 GiB — fits the per-container envelope here, but **not a single
+2 GB physical box**; TTS is the low-end fit risk. Mid-run worker/api VmRSS
+(637.7 / 655.4 MiB) sits *below* idle (865 / 878) — cgroup reclaim; container
+working set remains the binding metric. Full timeline, coverage notes and
+caveats: perf-audit.md § A2 #2.
+
+**A2 #3 container cold starts (2026-10-07, measure & record):** three back-to-
+back `docker restart`s under the envelope (2 GiB / 2c). Worker spawn→ready
+**12.7–13.1 s** — the stage-2 target `< 15 s` is **met** on every measured
+restart (+14.4–14.8 s from container start incl. supervisord/`uv run`); one
+first-restart-after-3 h-idle sample measured 18.9 s (variance, cause not
+isolated — recorded, not a steady-state failure). API spawn→ready ≈ 13 s,
+import-bound: both processes load the eager command-module graph concurrently
+on 2 CPUs while the v29 migration check is a ~0.05 s no-op — so the stage-1/2
+`API < 5 s` budget (defined for `measure_resources.sh` spawn mode, host
+process scope) is missed by ~8 s when read container-side; the two measurements
+are not directly comparable. Frontend has **no build at boot** (prebuilt
+standalone, `node server.js` ready 0.39–0.41 s after wait-for-api hands off);
+issue→serving ≈ 19.4–20.0 s total, dominated by API readiness. Full table:
+perf-audit.md § A2 #3.
+
+**A2 #5 chat turn (2026-10-07, measure & record):** opt-in `chat.turn` flow
+added to the probe harness (excluded from the default `all` discovery); ollama
+wired into the throttled envelope for the run per the locked decision —
+CPU-quota'd to **2 CPUs** matching the app's share (`CPUQuota=200%`, cgroup
+`cpu.max=200000 100000`), `MemoryMax` left `infinity` because the default chat
+model (aya-expanse:8b, 5.1 GB) cannot fit any low-end-plausible cap —
+`throttle.sh`'s declared 768m ollama default is never applied (host systemd
+service, not a container) and would OOM the load, not throttle it. Clamp
+reverted immediately after the run; standing policy D3 (host-side, uncapped)
+unchanged. Under the full envelope (app 2 GiB / 2c, db 512 MiB / 1c, ollama
+2c): full turn p50 **9.43 s** (min 4.46 s / max 10.09 s), **0 timeouts** —
+guardrail clean, nothing to separate from app latency. The budget row is
+first-token `< 2 s`; the non-streaming REST surface cannot isolate first
+token, so the full-turn figure is recorded per the locked decision — budget
+**unverifiable this round**, recorded not gated. Details: perf-audit.md §
+A2 #5.
+
+**A2 #6 fixture corpus (2026-10-07, close-out):** the original defect —
+throttled heavy flows resetting the connection because the app exceeded the
+old 1280 MiB cap on the 85-source corpus — is closed. Fixture
+`notebook:1n4cb4qr744izp5xdo26` (4 sources / 9 chunks) is the throttled
+corpus per the locked decision; the 85-source corpus stays for unthrottled +
+memory-profile runs. Status check under the live envelope (app 2 GiB / 2c,
+db 512 MiB / 1c): `search.vector`, `search.text.scoped`,
+`search.text.global`, `ingest.text` all completed on/with the fixture,
+**errors 0** (no resets), first-beat cold starts noted (scoped search 22.0 s
+max vs 0.72 s p50). Details: perf-audit.md § A2 #6.
+
+Caveats: per-process VmRSS includes shared text pages (double-counted across api
+and worker) and freed-but-not-returned pymalloc arenas (creeps with uptime) — the
+container-level number is the binding constraint. The growth vs the original
+~430 MB is a modded-fork regression from **eager static imports** (docling,
+content-core, esperanto, podcast_creator graph import at worker boot — see the
+import-graph table below), and is the likely root reason transient
+`KeyError`/`Future cancelled` flakes appeared under pressure. The original
+~430 MB working set is no longer the live baseline; the envelope program's
+stage-4 footprint cuts (lazy-import pass) target exactly this. A2 #2/#5 runs
+(podcast, chat wired with ollama into the envelope) proceed from ~380 MB
+headroom and are recorded, not gated.
+
 An import-graph investigation found the footprint drags are mostly **static
 venv weight, not runtime allocations**:
 
