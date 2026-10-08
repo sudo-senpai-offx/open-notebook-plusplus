@@ -15,6 +15,32 @@ permissions:
   contents: read
 
 jobs:
+  lockfile:
+    name: Lockfile Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      # Fails if uv.lock is not in sync with pyproject.toml (e.g. a dependency
+      # was edited without regenerating the lock). This is the exact failure
+      # mode behind the stub-lock incident; keep this job gating.
+      - name: Check lockfile is up to date
+        run: uv lock --check
+
+      - name: Set up Python
+        run: uv python install
+
+      # Proves the lock resolves/installs exactly as pinned: --frozen never
+      # rewrites uv.lock, so a passing run cannot mask a stale lock.
+      - name: Install strictly from the lockfile
+        run: uv sync --frozen
+
   backend:
     name: Backend Tests
     runs-on: ubuntu-latest

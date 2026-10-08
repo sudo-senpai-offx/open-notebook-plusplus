@@ -941,3 +941,27 @@ Live simulation with `OPEN_NOTEBOOK_PASSWORD=` +
 
 **Verdict: keep.** Security/debt fix, not a speedup; the "strictly positive
 delta" gate does not apply. No behaviour change when the flag is unset.
+
+### C1 — lockfile gate: CI job + mirrored pre-commit hook (2026-10-08)
+
+**Why.** The stub-`uv.lock` incident (D5, §8) was repaired by hand but nothing
+*structurally* stopped a future `pyproject.toml` edit from shipping with a stale
+or hand-edited lock: CI's `uv sync` would happily re-resolve, masking the drift.
+
+**Change.** A dedicated gating job `lockfile` in `.github/workflows/test.yml`
+(steps: `uv lock --check`, then `uv python install` + `uv sync --frozen`). The
+first fails when the lock no longer matches `pyproject.toml`; the second proves
+the lock installs exactly as pinned without rewriting it. Mirrored locally as
+the `uv-lock-check` pre-commit hook (`files: ^(pyproject\.toml|uv\.lock)$`), so
+the same failure surfaces on commit. CI's `uv sync --frozen` is deliberately
+**not** mirrored locally — it would mutate the developer's venv on every commit.
+
+**Verified with uv 0.12.23.** `uv lock --check` on HEAD: `Resolved 240 packages`
+exit 0, `uv.lock` unchanged. Negative case (a dependency added to `pyproject.toml`
+without regenerating the lock, in a throwaway copy): exit 1, "needs to be
+updated, but `--check` was provided". `uv sync --frozen --dry-run` on HEAD:
+"Checked 203 packages … Would make no changes", exit 0. Both YAML files parse and
+`pre-commit validate-config` is clean.
+
+**Verdict: keep.** Governance fix per the locked decision; runs fast and only
+when the lock inputs change.

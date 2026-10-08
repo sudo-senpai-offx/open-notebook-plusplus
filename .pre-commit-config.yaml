@@ -32,6 +32,21 @@ repos:
       # `ruff format --check .` with the same tool config, so there is no drift.
       - id: ruff-format
 
+  # ── Lockfile gate (mirrors CI `lockfile` job) ─────────────────────
+  # `uv lock --check` fails when pyproject.toml was edited without
+  # regenerating uv.lock, so a stale/stub lock cannot be committed. CI also
+  # runs `uv sync --frozen` to prove the lock installs as pinned; that step is
+  # deliberately NOT mirrored here because it would mutate the developer's
+  # virtualenv on every commit. Both hooks only run when the lock inputs change.
+  - repo: local
+    hooks:
+      - id: uv-lock-check
+        name: uv lock --check
+        entry: uv lock --check
+        language: system
+        files: ^(pyproject\.toml|uv\.lock)$
+        pass_filenames: false
+
   # ── Mypy: Python type check (mirrors CI backend-typecheck job) ────
   # Uses language: system so mypy runs through `uv` in the project's own
   # virtualenv (the same way CI and `make lint` run it). Pre-commit's
