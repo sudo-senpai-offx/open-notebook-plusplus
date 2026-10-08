@@ -1,4 +1,3 @@
-import asyncio
 import sqlite3
 from typing import Annotated, Dict, List, Optional
 
@@ -20,6 +19,7 @@ from open_notebook.utils.context_builder import (
     format_source_context,
 )
 from open_notebook.utils.error_classifier import classify_error
+from open_notebook.utils.graph_utils import run_coro_sync
 from open_notebook.utils.text_utils import extract_text_content
 
 
@@ -73,35 +73,13 @@ def _call_model_with_source_context_inner(
     if not source_id:
         raise ValueError("source_id is required in state")
 
-    # Build source context using build_source_context (run async code in new loop)
-    def build_context():
-        """Build context in a new event loop"""
-        new_loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(new_loop)
-            return new_loop.run_until_complete(
-                build_source_context(
-                    source_id=source_id,
-                    max_tokens=50000,  # Reasonable limit for source context
-                )
-            )
-        finally:
-            new_loop.close()
-            asyncio.set_event_loop(None)
-
-    # Get the built context
-    try:
-        # Try to get the current event loop
-        asyncio.get_running_loop()
-        # If we're in an event loop, run in a thread with a new loop
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(build_context)
-            context_data = future.result()
-    except RuntimeError:
-        # No event loop running, safe to create a new one
-        context_data = build_context()
+    # Build source context using build_source_context (sync-in-async helper)
+    context_data = run_coro_sync(
+        build_source_context(
+            source_id=source_id,
+            max_tokens=50000,  # Reasonable limit for source context
+        )
+    )
 
     # Extract source and insights from context
     source = None
@@ -150,44 +128,15 @@ def _call_model_with_source_context_inner(
     payload = [SystemMessage(content=system_prompt)] + state.get("messages", [])
 
     # Handle async model provisioning from sync context
-    def run_in_new_loop():
-        """Run the async function in a new event loop"""
-        new_loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(new_loop)
-            return new_loop.run_until_complete(
-                provision_langchain_model(
-                    str(payload),
-                    config.get("configurable", {}).get("model_id")
-                    or state.get("model_override"),
-                    "chat",
-                    max_tokens=8192,
-                )
-            )
-        finally:
-            new_loop.close()
-            asyncio.set_event_loop(None)
-
-    try:
-        # Try to get the current event loop
-        asyncio.get_running_loop()
-        # If we're in an event loop, run in a thread with a new loop
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(run_in_new_loop)
-            model = future.result()
-    except RuntimeError:
-        # No event loop running, safe to use asyncio.run()
-        model = asyncio.run(
-            provision_langchain_model(
-                str(payload),
-                config.get("configurable", {}).get("model_id")
-                or state.get("model_override"),
-                "chat",
-                max_tokens=8192,
-            )
+    model = run_coro_sync(
+        provision_langchain_model(
+            str(payload),
+            config.get("configurable", {}).get("model_id")
+            or state.get("model_override"),
+            "chat",
+            max_tokens=8192,
         )
+    )
 
     ai_message = model.invoke(payload)
 

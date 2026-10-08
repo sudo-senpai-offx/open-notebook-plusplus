@@ -1,9 +1,48 @@
 import asyncio
-from typing import Any
+import concurrent.futures
+from typing import Any, Coroutine, TypeVar
 
 from langchain_core.messages import BaseMessage, RemoveMessage
 from langchain_core.runnables import RunnableConfig
 from loguru import logger
+
+T = TypeVar("T")
+
+
+def run_coro_sync(coro: Coroutine[Any, Any, T]) -> T:
+    """Run a coroutine to completion from synchronous code.
+
+    Containment helper for the sync-in-async spots (B1): the LangGraph nodes
+    are synchronous and cannot await. Two cases:
+
+    * No loop running on this thread -> ``asyncio.run(coro)``.
+    * A loop is already running on this thread -> the coroutine cannot be run
+      here, and the caller cannot be made async without the full rewrite that
+      is explicitly out of scope, so it runs on a worker thread with its own
+      fresh event loop (never touching the caller's loop).
+
+    Exceptions propagate to the caller exactly as ``asyncio.run`` would raise
+    them.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: list[T] = []
+
+    def _runner() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            result.append(loop.run_until_complete(coro))
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(_runner).result()
+    return result[0]
 
 
 async def get_session_message_count(graph, session_id: str) -> int:
