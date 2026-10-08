@@ -75,6 +75,30 @@ Comprehensive list of all environment variables available in Open Notebook.
 
 ---
 
+## Model Policy & Retrieval
+
+Offline-first posture: cloud access, the router, mixture retrieval and the
+reranker are opt-in and default to **off**. These defaults are pinned by
+`tests/test_flag_defaults.py` (C2) so a future edit cannot silently flip one on.
+
+| Variable | Required? | Default | Description |
+|----------|-----------|---------|-------------|
+| `AUTO_MODEL_POLICY` | No | `offline-first` | Declared model-selection posture. |
+| `CLOUD_ALLOWED` | No | `false` | Declared master cloud opt-in. `offline-first` routing independently refuses cloud models, so leaving this `false` is the safe state. |
+| `USE_ROUTER` | No | `false` | Declared model-router opt-in. |
+| `USE_MIXTURE` | No | `false` | Gates mixture retrieval/answering and hybrid (RRF) search (`open_notebook/utils/hybrid_search.py`, `adaptive_batching.py`). |
+| `USE_RERANKER_BEFORE_TRUNCATE` | No | `false` | Gates the reranker before truncation (`open_notebook/utils/reranker.py`). |
+| `PREFER_LOCAL` | No | `true` | Declared preference for local providers. |
+| `DEGRADE_GRACEFULLY` | No | `true` | Declared graceful-degradation posture. |
+| `TIME_BUDGETS_ENFORCED` | No | `true` | Declared time-budget enforcement posture. |
+
+> **Note:** `USE_MIXTURE` and `USE_RERANKER_BEFORE_TRUNCATE` are the flags
+> consulted directly at runtime today; `CLOUD_ALLOWED`, `USE_ROUTER`,
+> `PREFER_LOCAL`, `DEGRADE_GRACEFULLY` and `TIME_BUDGETS_ENFORCED` are declared
+> policy inputs. Keeping them all at their defaults is the offline-first state.
+
+---
+
 ## API / CORS
 
 | Variable | Required? | Default | Description |

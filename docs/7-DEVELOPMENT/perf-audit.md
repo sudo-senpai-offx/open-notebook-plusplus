@@ -965,3 +965,78 @@ updated, but `--check` was provided". `uv sync --frozen --dry-run` on HEAD:
 
 **Verdict: keep.** Governance fix per the locked decision; runs fast and only
 when the lock inputs change.
+
+### C2 — pin offline-first flag defaults; documented offline-boot check (2026-10-08)
+
+**Why.** "Never auto-enable cloud / flags stay OFF" was a convention spread
+across `open_notebook/ai/model_policy.py` and its callers, with nothing stopping
+a future edit from flipping `CLOUD_ALLOWED`, `USE_MIXTURE`,
+`USE_RERANKER_BEFORE_TRUNCATE` (or a future hybrid flag) on by default.
+
+**Change.**
+- `tests/test_flag_defaults.py`: deterministic unit test pinning the whole
+  default table with the env scrubbed first (so an ambient CI/shell var cannot
+  make the assertions pass vacuously), plus a companion "flip on when set" case
+  proving the parser is real and not silently ignoring the environment.
+  `hybrid_enabled()` is asserted off too: it delegates to `use_mixture()`, so
+  hybrid search has no separate flag and cannot be enabled behind the test's
+  back.
+- `.env.example` + `docs/5-CONFIGURATION/environment-reference.md`: the flags are
+  now formalized with their offline-first defaults (the opt-in flags `false`,
+  the posture flags `true`), including an explicit `CLOUD_ALLOWED=false`.
+
+**Scope note (recorded, not fixed here).** Only `USE_MIXTURE` and
+`USE_RERANKER_BEFORE_TRUNCATE` are consulted at runtime today
+(`adaptive_batching.py`, `hybrid_search.py`, `reranker.py`). `CLOUD_ALLOWED`,
+`USE_ROUTER`, `PREFER_LOCAL`, `DEGRADE_GRACEFULLY` and `TIME_BUDGETS_ENFORCED`
+are *declared* policy inputs with `get_policy_config()` accessors but no callers
+— `route_task()` hardcodes `allow_cloud=False` for `offline-first` independently.
+Wiring them is a behaviour change outside C2's locked scope and would need its
+own probe; C2 only pins that they cannot drift.
+
+**Documented manual offline-boot check** (the locked plan rejected an automated
+netns CI variant as flaky). Reproduce by booting an isolated compose project on
+an `internal: true` network with its own ephemeral DB and no host ports:
+
+```yaml
+# /tmp/c2-offline/docker-compose.yml  (throwaway)
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2
+    command: [start, --log, warn, --user, root, --pass, root, memory]
+    networks: [c2net]
+  open_notebook:
+    image: open-notebook-open_notebook:latest
+    environment:
+      - OPEN_NOTEBOOK_ENCRYPTION_KEY=c2-offline-boot-check
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASSWORD=root
+      - SURREAL_NAMESPACE=open_notebook
+      - SURREAL_DATABASE=open_notebook
+      - OPEN_NOTEBOOK_WORKER_MAX_TASKS=1
+    depends_on: [surrealdb]
+    networks: [c2net]
+networks: {c2net: {internal: true}}
+```
+
+```sh
+docker compose -p c2offline -f /tmp/c2-offline/docker-compose.yml up -d --no-build --pull never
+docker exec c2offline-open_notebook-1 \
+  python3 -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:5055/health').status)"
+docker exec c2offline-open_notebook-1 \
+  python3 -c "import socket; socket.create_connection(('1.1.1.1',80),timeout=2)"  # must fail
+docker compose -p c2offline -f /tmp/c2-offline/docker-compose.yml down -v
+```
+
+**Verified (2026-10-08).** Run exactly as above against the current image: the
+container reached `API /health 200` in ~12 s on the internal-only network, and
+`create_connection(('1.1.1.1', 80))` from inside it failed with `OSError`. A
+separate throwaway `docker run --network none` asserted the full default table
+(`allow_cloud`/`use_router`/`use_mixture`/`use_reranker` all `False`) with no
+volume mounted. Throwaway project torn down; the live stack was untouched
+(`:5055/health` still 200). The entrypoint degrades gracefully offline — disabled
+heavy runtimes are skipped, and a failed opt-in install logs loudly and boots
+anyway.
+
+**Verdict: keep.** Governance fix; no behaviour change with the flags unset.
