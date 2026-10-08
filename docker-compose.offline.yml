@@ -1,0 +1,22 @@
+# Offline / portable deployment override for the upgraded open-notebook build.
+#
+# The main docker-compose.yml sets `pull_policy: always` on the surrealdb and
+# open_notebook services, which forces a pull attempt on every `compose up` —
+# that fails on a PC with no internet even when the images are already loaded.
+# This override pins both services to `pull_policy: never` so a machine that has
+# the images (via `docker load`, see docs/1-INSTALLATION/docker-compose.md
+# "Deploy the upgraded build on another PC") boots without touching the network.
+#
+# Usage (from a machine where the images are already loaded):
+#   docker compose -f docker-compose.yml -f docker-compose.offline.yml up -d --no-build
+#
+# `--no-build` is required: the base file still carries `build: .` for the
+# open_notebook service (harmless on machines that have a toolchain, fatal on
+# offline ones that don't), and this override intentionally leaves that key
+# untouched rather than trying to null it out (null build keys are rejected).
+services:
+  surrealdb:
+    pull_policy: never
+
+  open_notebook:
+    pull_policy: never

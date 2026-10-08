@@ -367,6 +367,77 @@ For production use, see:
 
 ---
 
+## Deploy the upgraded build on another PC
+
+> Verified end-to-end for the upgraded offline-first build (v1.15.0): every
+> committed runtime feature (job lifecycle B1–B3, auth guard B4, self-hosted
+> notifications D1) ships in the image, all opt-in flags default **OFF**, and
+> the DB persists on the `./surreal_data` bind mount.
+
+### Path A — machine has internet (and wants to build)
+
+```bash
+# 1. Get the repo at the locked HEAD
+git clone <repo-url> open-notebook && cd open-notebook
+git checkout <committed-deploy-tag-or-commit>
+
+# 2. Config from the shipped example (defaults are offline-first: all opt-in flags OFF)
+cp .env.example .env
+#   - set OPEN_NOTEBOOK_ENCRYPTION_KEY to a random 32+ char string (required to decrypt sources)
+#   - leave CLOUD_ALLOWED / USE_MIXTURE / USE_RERANKER_BEFORE_TRUNCATE at their default OFF
+#     unless you deliberately enabled them in your probe runs
+
+# 3. Build from HEAD and start
+docker compose up -d --build
+
+# 4. Re-apply the ADR-009 resource envelope (compose sets NO limits by itself)
+docker update --cpus 2  --memory 2g    --memory-swap 2g    open-notebook-open_notebook-1
+docker update --cpus 1  --memory 512m  --memory-swap 512m  open-notebook-surrealdb-1
+#    ⚠ `--memory` alone fails ("Memory limit should be smaller than already set
+#    memoryswap limit") — always pass `--memory-swap` together with `--memory`.
+```
+
+### Path B — machine has no internet / no build toolchain (portable image)
+
+```bash
+# On the source PC (where the image was built from HEAD):
+docker save open-notebook-open_notebook:latest surrealdb/surrealdb:v2 \
+  -o open-notebook-v1.15.0-images.tar
+# ~0.8 GB (measured): docker save shares the layers the two images have in
+# common, and the layers are already compressed, so gzip adds little.
+# Copy the tar to the target PC.
+
+# On the target PC (has Docker, no internet needed):
+docker load -i open-notebook-v1.15.0-images.tar
+cp .env.example .env            # set OPEN_NOTEBOOK_ENCRYPTION_KEY as above
+docker compose -f docker-compose.yml -f docker-compose.offline.yml up -d --no-build
+docker update --cpus 2 --memory 2g --memory-swap 2g     open-notebook-open_notebook-1
+docker update --cpus 1 --memory 512m --memory-swap 512m open-notebook-surrealdb-1
+# docker-compose.offline.yml pins both services to pull_policy: never, so the
+# pre-loaded images are used without any pull attempt; --no-build skips the
+# (still declared) `build:` key on the app service.
+```
+
+### Verification checklist (all of these passed on the deployed stack)
+
+```bash
+curl -s http://localhost:5055/health                       # {"status":"healthy"}
+curl -s -L -o /dev/null -w "%{http_code}\n" http://localhost:8502/   # 200 -> /notebooks
+curl -s http://localhost:5055/api/notebooks -o /dev/null -w "%{http_code}\n"  # 200
+curl -s http://localhost:5055/api/capabilities             # docling_available: true
+# runtime flags must be OFF (defaults enforced)
+docker exec open-notebook-open_notebook-1 python3 -c "from open_notebook.ai.model_policy import get_policy_config as g; c=g(); print({k:c[k] for k in ('CLOUD_ALLOWED','USE_ROUTER','USE_MIXTURE','USE_RERANKER_BEFORE_TRUNCATE')})"
+# data intact (blocking client; this build's venv returns the list directly, not {result:[...]})
+docker exec open-notebook-open_notebook-1 /app/.venv/bin/python3 -c "
+import os
+from surrealdb import Surreal
+db = Surreal(os.environ['SURREAL_URL']); db.signin({'user':'root','pass':'root'}); db.use('open_notebook','open_notebook')
+print('notebooks =', db.query('SELECT count() AS n FROM notebook GROUP ALL')[0]['n'])
+db.close()"
+```
+
+---
+
 ## Getting Help
 
 - **Discord**: [Community support](https://discord.gg/37XJPXfz2w)
