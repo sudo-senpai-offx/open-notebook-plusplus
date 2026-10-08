@@ -5,8 +5,16 @@
 # the internal DB hosts into no_proxy first so the DB websocket is never
 # tunnelled through a configured HTTP proxy (issue #1160).
 from open_notebook.utils.proxy import ensure_internal_no_proxy
+from open_notebook.utils.retry_visibility import install_retry_visibility
 
 ensure_internal_no_proxy()
+
+# Surface deep command retries (B2). The worker runs at INFO and
+# `process_source` logs every one of its 15 attempts at DEBUG, so a command
+# stuck deep in the queue is invisible; this adds a milestone-only handler.
+# Installed here because the worker imports this package after
+# `configure_logging`, so the handler survives that call.
+install_retry_visibility()
 
 from .embedding_commands import (
     embed_insight_command,

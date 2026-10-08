@@ -868,3 +868,43 @@ not taken now (they would expand the locked checkpoint set): coalescing the
 progress write and the cancel read into one `UPDATE … RETURN AFTER`
 (≈ −6 round-trips), and dropping the duplicate `progress=10` written by both the
 command and `content_process`.
+
+### B2 — deep-retry visibility for `process_source` (2026-10-08)
+
+**Backoff + jitter was already satisfied.** `process_source` runs
+`wait_strategy: "exponential_jitter"`, `wait_min: 1`, `wait_max: 120`
+(`commands/source_commands.py:56-72`), so no timing change was made. The only
+missing half of the locked decision was "a retry-distribution log line so a
+deep-queue stall is visible".
+
+**Why it was invisible.** The same command logs every retry at
+`retry_log_level: "debug"` ("Avoid log noise during transaction conflicts",
+line 71), while the worker *process* runs loguru at INFO —
+`surreal_commands.core.worker.configure_logging(debug=False)` does
+`logger.remove()` then `logger.add(sys.stderr, level="INFO")`. A command stuck
+at attempt 12/15 therefore looked identical to one that was merely slow. The
+library hardcodes `before_sleep=create_before_sleep_callback(...)` inside
+`build_async_retry_instance`, so there is no decorator hook to inject a custom
+callback — the seam has to be app-side.
+
+**Change.** `open_notebook/utils/retry_visibility.py` adds **one extra loguru
+handler** (level DEBUG) whose filter passes only *milestone* retry records —
+default every 5th attempt — and stamps the running distribution (retries
+observed, deepest attempt, next wait) into `record["extra"]` for the format.
+It is installed from `commands/__init__.py`, which the worker imports via
+`--import-modules commands` *after* `configure_logging`, so the handler
+survives. loguru is **not re-entrant** (verified: re-logging from a sink raises
+in `_handler.emit`), so the handler only filters/formats — it never calls
+`logger.*`. Config: `OPEN_NOTEBOOK_RETRY_VISIBILITY_STEP` (default 5;
+`0`/`off`/`none` disables).
+
+**Verified at the worker's effective level (loguru `level="INFO"`):** attempt 5
+emits `[Retry] deep retry | … | retries=2 deepest=5 next_wait=8.0s` on stderr,
+attempt 3 and a non-retry debug line stay hidden. Parity green — **1043 tests**
+(1029 baseline + 14 new), `ruff check` / `format --check`, `mypy .` clean.
+
+**Verdict: keep.** Observability fix, not a speedup, so the "strictly positive
+delta" gate does not apply. Deliberately does not flip `process_source` to
+`retry_log_level: "warning"` (that would emit all 15 attempts per conflict
+storm — the exact noise line 71 exists to avoid); the milestone sampling keeps
+a deep-queue stall loud without it.
