@@ -908,3 +908,36 @@ delta" gate does not apply. Deliberately does not flip `process_source` to
 `retry_log_level: "warning"` (that would emit all 15 attempts per conflict
 storm — the exact noise line 71 exists to avoid); the milestone sampling keeps
 a deep-queue stall loud without it.
+
+### B4 — opt-in `OPEN_NOTEBOOK_REQUIRE_AUTH` guard (2026-10-08)
+
+**The footgun.** `PasswordAuthMiddleware` (`api/auth.py`) authenticates only
+when `OPEN_NOTEBOOK_PASSWORD` (or `_FILE`) is set; otherwise it is a pass-through.
+That is deliberate — the latency probes, the MCP server and every local tool in
+this repo call the API unauthenticated — but it means a deployment that *meant*
+to have auth and forgot the password comes up identical to one that did not:
+wide open on :5055.
+
+**Change.** New `OPEN_NOTEBOOK_REQUIRE_AUTH` (default **off**).
+`require_auth_from_env()` accepts `1/true/yes/on` (case-insensitive) and treats
+everything else as off (a malformed value logs a warning rather than silently
+turning auth *on* against the operator's intent). `enforce_require_auth()` is
+called at the top of the API lifespan, **before** the database readiness probe
+and migrations, and raises `RuntimeError` with an actionable message when the
+flag is on and no password is configured — so the process exits instead of
+serving. `auth_is_configured()` uses the same `get_secret_from_env` lookup the
+middleware uses, so the guard and the middleware can never disagree.
+
+**Kept default-off.** Flipping it on by default would break the probe harness,
+MCP integration and the offline flow; localhost-bind-only was rejected (breaks
+compose), and document-only was rejected (the footgun stays). This is exactly
+the locked "opt-in guard" decision.
+
+**Verified.** 21 new unit tests (env parsing incl. malformed + `_FILE`,
+configured/unconfigured matrix, and a lifespan test proving the guard raises
+*before* `AsyncMigrationManager` is constructed). Parity: `ruff` / `mypy` clean.
+Live simulation with `OPEN_NOTEBOOK_PASSWORD=` +
+`OPEN_NOTEBOOK_REQUIRE_AUTH=true` raises the documented `RuntimeError`.
+
+**Verdict: keep.** Security/debt fix, not a speedup; the "strictly positive
+delta" gate does not apply. No behaviour change when the flag is unset.

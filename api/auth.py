@@ -1,12 +1,67 @@
+import os
 import secrets
 from typing import Optional
 
 from fastapi import Request
+from loguru import logger
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
 from open_notebook.utils.encryption import get_secret_from_env
+
+#: Opt-in flag (B4): when truthy, the API refuses to start unless a password
+#: is configured, instead of silently serving every request unauthenticated.
+REQUIRE_AUTH_ENV = "OPEN_NOTEBOOK_REQUIRE_AUTH"
+
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"", "0", "false", "no", "off"}
+
+
+def require_auth_from_env() -> bool:
+    """Whether the operator demanded authentication (default: off).
+
+    Unset -> ``False``. Recognized truthy/falsy spellings are case-insensitive;
+    anything else is treated as off (fail-open to the historical behaviour,
+    matching the default-off design) with a warning.
+    """
+    raw = os.environ.get(REQUIRE_AUTH_ENV)
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if value in _TRUTHY:
+        return True
+    if value in _FALSY:
+        return False
+    logger.warning(
+        f"{REQUIRE_AUTH_ENV}={raw!r} is not a recognized boolean; treating as off"
+    )
+    return False
+
+
+def auth_is_configured() -> bool:
+    """Whether an API password is configured (env or Docker secret file).
+
+    This is exactly the condition under which ``PasswordAuthMiddleware``
+    authenticates requests, so the guard and the middleware can never disagree.
+    """
+    return bool(get_secret_from_env("OPEN_NOTEBOOK_PASSWORD"))
+
+
+def enforce_require_auth() -> None:
+    """Fail fast when auth is demanded but no password is configured (B4).
+
+    Called from the API lifespan before any other startup work so a
+    ``OPEN_NOTEBOOK_REQUIRE_AUTH=true`` deployment cannot come up wide open by
+    accident.
+    """
+    if require_auth_from_env() and not auth_is_configured():
+        raise RuntimeError(
+            f"{REQUIRE_AUTH_ENV} is enabled but no API password is configured. "
+            "Set OPEN_NOTEBOOK_PASSWORD (or OPEN_NOTEBOOK_PASSWORD_FILE) to the "
+            f"password clients must send, or unset {REQUIRE_AUTH_ENV} to run "
+            "without authentication."
+        )
 
 
 class PasswordAuthMiddleware(BaseHTTPMiddleware):
