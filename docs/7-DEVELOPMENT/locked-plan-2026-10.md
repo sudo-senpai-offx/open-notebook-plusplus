@@ -5,7 +5,25 @@ Status · Date · Follows: ADR-009 (low-end x86 optimization), perf-audit.md
 <!-- Status: LOCKED via brainstorm (2026-10) — every thread below was negotiated to a decision and locked before the next thread opened.
      Update status per thread as implementation lands. -->
 
-## Scope of this document
+## Implementation status (2026-10-08)
+
+All locked threads for this cycle have landed on `main`. Full before/after
+evidence for the measured items lives in `docs/7-DEVELOPMENT/perf-audit.md`.
+
+| Thread | Commit(s) | Note |
+|---|---|---|
+| A1 · `search.vector` deficit | `262f226` (step 1: HNSW + KNN rewrite), `6592c59` (migration 29 seal) | Step 1 landed, then rejected/sealed after parity review — see perf-audit §A1; steps 2–5 stayed behind their locked gates (flags remain OFF) |
+| A2 · Measurement close-out | `7e5239b` | RSS / podcast-baseline / cold-starts / chat+ollama / fixture-corpus recorded; #4 doc hygiene folded into the thread records |
+| B1 · `run_coro_sync` helper | `b1d403e` | Contain, don't refactor — 3 call sites converted |
+| B2 · retry visibility | `3f16eae` | Backoff+jitter already present; added retry-distribution log line + every-5th visibility milestone |
+| B3 · job lifecycle | `a4fa072` | Progress + cooperative cancel + stale watchdog; +55 ms throttled accepted (stuck-command fix, not a speedup) |
+| D1 · ntfy transport | `d8848b6` | Consumes B3 lifecycle events; no `started` event; fire-and-forget |
+| B4 · auth guard | `806ba8c` | Opt-in `OPEN_NOTEBOOK_REQUIRE_AUTH`, default OFF, fail-fast |
+| C1 · lockfile gate | `5800ac3` | CI job (`uv lock --check` + `uv sync --frozen`) + pre-commit mirror |
+| C2 · flag defaults + offline boot | `ea49415` | 12-test deterministic pin; flags formalized in `.env.example`; manual offline-boot check documented + verified |
+
+Parked / reassigned threads (D2–D5) remain exactly as locked below; nothing
+here re-opens them.
 
 The negotiated, locked work plan for the heavily modded open-notebook variant.
 Every thread was brainstormed one at a time and locked before the next opened.
