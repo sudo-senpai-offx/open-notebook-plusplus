@@ -466,24 +466,28 @@ class Source(ObjectModel):
             return None
 
         try:
-            from surreal_commands import get_command_status
-
-            status_result = await get_command_status(str(self.command))
-            if not status_result:
-                return None
-
-            # Extract execution metadata if available
-            result = getattr(status_result, "result", None)
-            execution_metadata = (
-                result.get("execution_metadata", {}) if isinstance(result, dict) else {}
+            cid = str(self.command)
+            if ":" not in cid:
+                cid = f"command:{cid}"
+            rows = await repo_query(
+                "SELECT status, result, error_message, progress, stage, heartbeat_at, cancel_requested FROM $id",
+                {"id": ensure_record_id(cid)},
             )
-
+            if not rows:
+                return None
+            row = rows[0]
+            result = row.get("result") if isinstance(row.get("result"), dict) else None
+            execution_metadata = result.get("execution_metadata", {}) if result else {}
             return {
-                "status": status_result.status,
+                "status": row.get("status"),
                 "started_at": execution_metadata.get("started_at"),
                 "completed_at": execution_metadata.get("completed_at"),
-                "error": getattr(status_result, "error_message", None),
+                "error": row.get("error_message"),
                 "result": result,
+                "progress": row.get("progress"),
+                "stage": row.get("stage"),
+                "heartbeat_at": row.get("heartbeat_at"),
+                "cancel_requested": row.get("cancel_requested"),
             }
         except Exception as e:
             logger.warning(f"Failed to get command progress for {self.command}: {e}")

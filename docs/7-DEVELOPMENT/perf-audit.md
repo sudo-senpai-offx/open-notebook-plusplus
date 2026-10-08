@@ -778,3 +778,93 @@ record as un-embedded after >24 h. This is the concrete motivation for locked
 item **B3** (job-lifecycle: stale-`running` watchdog that marks dead jobs failed
 with a reason) — the retry guard clears the *command*, but nothing ever repairs
 the *source record*.
+
+### B3 — stuck-command job-lifecycle pass (2026-10-08)
+
+Lands the fix motivated at the end of §D5: a `running` command (and its source)
+that dies with a restart is now repaired **with a reason**, surfaces progress,
+and can be cancelled cooperatively. One coherent pass — no new default flags.
+
+**1. Progress.** Stage-level increments written through the existing
+`command.progress` path (top-level fields on the schemaless `command` table:
+`progress`, `stage`, `heartbeat_at`, `cancel_requested`, `cancel_requested_at`;
+terminal writes touch only `{status, result, error_message}`, so the fields
+survive). Command: 5 (starting) → 10 (extracting) → 90 (finalizing) → 100
+(completed). Graph: `content_process` 10, `save_source` 40 → 55,
+`transform_content` 70 → 75. `embed_source`: 5 → 10 → 100. Surfaced unchanged
+through `api/routers/sources.py` (`processing_info.progress` / `.stage`).
+
+*Rejected:* **page-level** OCR increments. Docling 2.124 / `content_core`
+expose no per-page hook; the only options were patching the third-party
+converter (fragile across upgrades) or forking the pipeline. Stage-level
+granularity fits the existing structure and is what shipped.
+
+**2. Cooperative cancel.** `DELETE /api/commands/{id}` MERGEs
+`cancel_requested`; the job calls `raise_if_cancelled()` at stage/node
+boundaries and raises `JobCancelledError`, added to the `stop_on` set of the
+`process_source` retry config and the embedding retry config only. The command
+library never writes a `canceled` status, so a cancelled job surfaces as
+`failed` with "Canceled by user request" (truthful — the run stopped). It cannot
+interrupt an in-flight Docling conversion (documented limitation).
+
+**3. Restart watchdog.** `api/job_monitor.py`, one loop started in the API
+lifespan (`OPEN_NOTEBOOK_JOB_MONITOR_SECONDS`, default 60). Reads active
+(`new`/`running`) rows with a column-limited SELECT (LIMIT 2000) and marks a
+`running` row failed when `heartbeat_at` is missing or older than
+`OPEN_NOTEBOOK_STALE_JOB_SECONDS` (default 300), requiring **two consecutive
+passes** to confirm. Error message `stale: no heartbeat (worker restart, crash,
+or hang)` — the reason the old behavior lost. On the pass where a tracked job
+leaves the active set, the monitor emits a lifecycle event through
+`open_notebook/utils/notify.py` (log-only today; D1 attaches ntfy). The
+heartbeat is a **separate thread** (`OPEN_NOTEBOOK_HEARTBEAT_SECONDS`, default
+30) precisely because Docling blocks the event loop; its first write lands at
+command start and it is stopped in `try/finally` on every exit path.
+
+**Verification (2026-10-08, live throttled stack — app 2 GiB / 2c, db 512 MiB / 1c):**
+
+- **Watchdog proved live.** On the first recreate after the change the monitor
+  marked **25 zombie `running` rows failed**: pass 1 baselined them (no
+  emission), pass 2 (`06:33:42`, ≈60 s later) merged `status:failed` + the stale
+  reason, pass 3 emitted 25 log-only `failed` events. The `d96eq5yw5warr5a32kwd`
+  class of zombie is now repaired with a reason instead of silently lost.
+- **Heartbeat thread writes land against the live DB** — a 1 s-interval probe
+  advanced `heartbeat_at` 4/4 ticks, so a long stage with no progress writes
+  (the exact OCR scenario) stays fresh and cannot be falsely marked stale.
+- **Parity green** — 1017 tests (1007 baseline + 10 new lifecycle tests),
+  `ruff check` / `format`, `mypy` clean.
+
+**Latency cost (throttled `ingest.text`, same envelope as §4 / A2):**
+
+| run | n | p50 | p90 | mean |
+|---|---|---|---|---|
+| A2 baseline (2026-10-07) | — | **1282.7** | **1295.9** | **1294.7** |
+| B3 run B | 4 | 1305.9 | 1323.7 | 1317.2 |
+| B3 run 2 | 7 | 1321.8 | 1346.0 | 1335.8 |
+| B3 run 1 | 7 | 1335.7 | 1370.6 | 1345.1 |
+| B3 run A | 4 | 1357.4 | 1364.3 | 1369.3 |
+| B3 run 3 | 7 | 1370.3 | 1380.4 | 1376.6 |
+
+Five clean B3 runs land p50 **1305.9–1370.3** (centre ≈1338) vs the A2 p50
+1282.7 — a consistent **≈ +55 ms (+4.3 %)** shift, slightly above the
+run-to-run spread (~50 ms).
+
+**The cost is round-trips, not the heartbeat.** A no-transformation
+`process_source` now adds **8 fresh-connection MERGE writes** (command
+5/10/90/100; graph 10/40/55; heartbeat t=0) **plus 6 cancel SELECTs** (command
+92/143/165; graph 218/352/412) — ~14 extra DB round-trips.
+`open_notebook/database/repository.py` opens a new `AsyncSurreal`
+(signin + use + close) **per `repo_query` call**, so each is a fresh websocket
+handshake (~7 ms in-container; 41.5 ms measured host→`localhost:8108`). The
+**heartbeat thread itself is one of the 14** (≈0.5 %, the "~0" the locked row
+anticipated); the balance is the progress/cancel checkpoints that deliver the
+feature. The single 2505 ms outlier in the first measurement was the watchdog's
+stale-marking/emission burst (proven by the `06:33:42` logs), not ingest code.
+
+**Verdict: accepted.** A debt/UX fix, not a speedup, so the "strictly positive
+delta" flag gate does not apply; the ≈ +4 % is on a flow already over its
+1000 ms budget and buys repair of the >24 h stuck `running` source plus visible
+progress and cancel. Keep. Two cheaper variants are recorded for a later pass,
+not taken now (they would expand the locked checkpoint set): coalescing the
+progress write and the cancel read into one `UPDATE … RETURN AFTER`
+(≈ −6 round-trips), and dropping the duplicate `progress=10` written by both the
+command and `content_process`.

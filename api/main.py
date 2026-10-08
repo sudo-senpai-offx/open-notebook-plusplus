@@ -1,6 +1,8 @@
 # Load environment variables
 from dotenv import load_dotenv
 
+from api.job_monitor import JobMonitor
+
 load_dotenv()
 
 # Keep the internal SurrealDB websocket out of any configured HTTP proxy
@@ -209,11 +211,13 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"Failed to run database migrations: {str(e)}") from e
 
     logger.success("API initialization completed successfully")
-
+    # Start job monitor
+    _job_monitor = JobMonitor()
+    _job_monitor.start()
     # Yield control to the application
     yield
-
-    # Shutdown: cleanup if needed
+    # Shutdown: stop monitor
+    await _job_monitor.stop()
     logger.info("API shutdown complete")
 
 

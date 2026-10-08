@@ -18,6 +18,11 @@ from open_notebook.domain.content_settings import ContentSettings
 from open_notebook.domain.notebook import Asset, Source
 from open_notebook.domain.transformation import Transformation
 from open_notebook.graphs.transformation import graph as transform_graph
+from open_notebook.utils.job_control import (
+    get_current_command_id,
+    raise_if_cancelled,
+    report_progress_record,
+)
 from open_notebook.utils.runtime_capabilities import (
     docling_available,
     engine_runtime_missing,
@@ -208,6 +213,9 @@ def _pdf_text_layer_present(file_path: str) -> bool:
 
 async def content_process(state: SourceState) -> dict:
     content_state: Dict[str, Any] = state["content_state"]
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=10, stage="extracting")
+    await raise_if_cancelled(cmd_id)
 
     # content-core 2.x takes engine/model overrides via ContentCoreConfig
     # (keyword-only), not inside the input dict.
@@ -340,6 +348,8 @@ async def content_process(state: SourceState) -> dict:
 
 
 async def save_source(state: SourceState) -> dict:
+    cmd_id = get_current_command_id()
+    await raise_if_cancelled(cmd_id)
     content_state = state["content_state"]
     extraction = state["extraction"]
 
@@ -373,6 +383,8 @@ async def save_source(state: SourceState) -> dict:
                 f"Source {source.id} has no text content to embed, skipping vectorization"
             )
 
+    await report_progress_record(cmd_id, progress=40, stage="extracted")
+    await report_progress_record(cmd_id, progress=55, stage="saved")
     return {"source": source}
 
 
@@ -396,6 +408,9 @@ def trigger_transformations(state: SourceState, config: RunnableConfig) -> List[
 
 
 async def transform_content(state: TransformationState) -> Optional[dict]:
+    cmd_id = get_current_command_id()
+    await raise_if_cancelled(cmd_id)
+    await report_progress_record(cmd_id, progress=70, stage="transforming")
     source = state["source"]
     content = source.full_text
     # Whitespace-only text would hit the transformation graph's empty-content
@@ -412,6 +427,7 @@ async def transform_content(state: TransformationState) -> Optional[dict]:
         config=RunnableConfig(configurable={"model_id": transformation.model_id}),
     )
     await source.add_insight(transformation.title, result["output"])
+    await report_progress_record(cmd_id, progress=75, stage="transformed")
     return {
         "transformation": [
             {

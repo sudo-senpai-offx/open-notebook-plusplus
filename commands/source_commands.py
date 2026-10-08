@@ -15,6 +15,15 @@ from open_notebook.exceptions import (
     InvalidInputError,
     NotFoundError,
 )
+from open_notebook.utils.job_control import (
+    Heartbeat,
+    JobCancelledError,
+    get_current_command_id,
+    raise_if_cancelled,
+    report_progress_record,
+    reset_current_command_id,
+    set_current_command_id,
+)
 
 try:
     from open_notebook.graphs.source import source_graph
@@ -50,6 +59,7 @@ class SourceProcessingOutput(CommandOutput):
         "wait_min": 1,
         "wait_max": 120,  # Allow queue to drain
         "stop_on": [
+            JobCancelledError,
             ValueError,
             ConfigurationError,
             ContextLengthExceededError,
@@ -68,8 +78,18 @@ async def process_source_command(
     Process source content using the source_graph workflow
     """
     start_time = time.time()
-
+    hb = None
+    cmd_id = None
     try:
+        cmd_id = get_current_command_id() or (
+            str(input_data.execution_context.command_id)
+            if input_data.execution_context
+            else None
+        )
+        hb = Heartbeat(cmd_id)
+        hb.start()
+        await report_progress_record(cmd_id, progress=5, stage="starting")
+        await raise_if_cancelled(cmd_id)
         logger.info(f"Starting source processing for source: {input_data.source_id}")
         logger.info(f"Notebook IDs: {input_data.notebook_ids}")
         logger.info(f"Transformations: {input_data.transformations}")
@@ -119,20 +139,30 @@ async def process_source_command(
         # 3. Process source with all notebooks
         logger.info(f"Processing source with {len(input_data.notebook_ids)} notebooks")
 
+        await report_progress_record(cmd_id, progress=10, stage="extracting")
+        await raise_if_cancelled(cmd_id)
         # Execute source_graph with all notebooks.
         # LangGraph accepts a partial state dict at runtime, but its typed
         # overloads require the full state type (langgraph typing limitation).
-        result = await source_graph.ainvoke(  # type: ignore[call-overload]
-            {
-                "content_state": input_data.content_state,
-                "notebook_ids": input_data.notebook_ids,  # Use notebook_ids (plural) as expected by SourceState
-                "apply_transformations": transformations,
-                "embed": input_data.embed,
-                "source_id": input_data.source_id,  # Add the source_id to the state
-            }
-        )
+        # Set the command-id contextvar so graph nodes can report progress /
+        # check for cancellation without threading cmd_id through state.
+        _cmd_token = set_current_command_id(cmd_id)
+        try:
+            result = await source_graph.ainvoke(  # type: ignore[call-overload]
+                {
+                    "content_state": input_data.content_state,
+                    "notebook_ids": input_data.notebook_ids,  # Use notebook_ids (plural) as expected by SourceState
+                    "apply_transformations": transformations,
+                    "embed": input_data.embed,
+                    "source_id": input_data.source_id,  # Add the source_id to the state
+                }
+            )
+        finally:
+            reset_current_command_id(_cmd_token)
 
         processed_source = result["source"]
+        await report_progress_record(cmd_id, progress=90, stage="finalizing")
+        await raise_if_cancelled(cmd_id)
 
         # 4. Gather processing results (notebook associations handled by source_graph)
         # Note: embedding is fire-and-forget (async job), so we can't query the
@@ -148,6 +178,7 @@ async def process_source_command(
         )
         logger.info(f"Created {insights_created} insights, embedding {embed_status}")
 
+        await report_progress_record(cmd_id, progress=100, stage="completed")
         return SourceProcessingOutput(
             success=True,
             source_id=str(processed_source.id),
@@ -181,6 +212,15 @@ async def process_source_command(
         # Transient failure - will be retried (surreal-commands logs final failure)
         logger.debug(f"Transient error processing source {input_data.source_id}: {e}")
         raise
+    finally:
+        # Stop the heartbeat thread on every exit path (success, permanent
+        # failure, transient failure): an unstopped heartbeat would keep
+        # writing heartbeat_at on a finished command forever.
+        try:
+            if hb:
+                hb.stop()
+        except Exception:
+            pass
 
 
 # ======================================================================# RUN TRANSFORMATION COMMAND

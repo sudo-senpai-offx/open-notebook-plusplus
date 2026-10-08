@@ -340,6 +340,8 @@ async def get_sources(
                     "started_at": execution_metadata.get("started_at"),
                     "completed_at": execution_metadata.get("completed_at"),
                     "error": _truncate_error(command.get("error_message")),
+                    "progress": command.get("progress"),
+                    "stage": command.get("stage"),
                 }
             elif command:
                 # Command exists but FETCH failed to resolve it (broken reference)

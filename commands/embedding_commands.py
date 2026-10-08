@@ -23,6 +23,13 @@ from open_notebook.exceptions import (
 )
 from open_notebook.utils.chunking import ContentType, chunk_text, detect_content_type
 from open_notebook.utils.embedding import generate_embedding, generate_embeddings
+from open_notebook.utils.job_control import (
+    Heartbeat,
+    JobCancelledError,
+    get_current_command_id,
+    raise_if_cancelled,
+    report_progress_record,
+)
 
 # NOTE: `stop_on` below can never trigger in practice — each command catches
 # ValueError (and NotFoundError) internally and returns success=False instead
@@ -34,6 +41,7 @@ EMBED_RETRY_CONFIG = {
     "wait_min": 1,
     "wait_max": 60,
     "stop_on": [
+        JobCancelledError,
         ValueError,
         ConfigurationError,
         ContextLengthExceededError,
@@ -415,12 +423,31 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
 
         return {"chunks_created": total_chunks}, f": {total_chunks} chunks"
 
-    extra_fields, processing_time, error_message = await _embed_record(
-        input_data,
-        kind="source",
-        record_id=input_data.source_id,
-        embed=embed,
+    cmd_id = get_current_command_id() or (
+        str(input_data.execution_context.command_id)
+        if input_data.execution_context
+        else None
     )
+    hb = Heartbeat(cmd_id)
+    hb.start()
+    try:
+        await report_progress_record(cmd_id, progress=5, stage="starting")
+        await raise_if_cancelled(cmd_id)
+        await report_progress_record(cmd_id, progress=10, stage="embedding")
+        await raise_if_cancelled(cmd_id)
+        extra_fields, processing_time, error_message = await _embed_record(
+            input_data,
+            kind="source",
+            record_id=input_data.source_id,
+            embed=embed,
+        )
+        await report_progress_record(cmd_id, progress=100, stage="completed")
+    finally:
+        try:
+            if hb:
+                hb.stop()
+        except Exception:
+            pass
 
     return EmbedSourceOutput(
         success=error_message is None,

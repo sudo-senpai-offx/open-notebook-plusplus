@@ -1,7 +1,9 @@
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from surreal_commands import get_command_status, submit_command
+from surreal_commands import submit_command
+
+from open_notebook.database.repository import ensure_record_id, repo_query
 
 
 class CommandService:
@@ -46,23 +48,35 @@ class CommandService:
 
     @staticmethod
     async def get_command_status(job_id: str) -> Dict[str, Any]:
-        """Get status of any command job"""
+        """Get status of any command job (direct row read)."""
         try:
-            status = await get_command_status(job_id)
+            jid = str(job_id)
+            if ":" not in jid:
+                jid = f"command:{jid}"
+            rows = await repo_query("SELECT * FROM $id", {"id": ensure_record_id(jid)})
+            if not rows:
+                raise ValueError(f"Job {job_id} not found")
+            row = rows[0]
+            has_progress = any(
+                row.get(k) is not None for k in ("progress", "stage", "heartbeat_at")
+            )
+            progress = (
+                {
+                    "percent": row.get("progress"),
+                    "stage": row.get("stage"),
+                    "heartbeat_at": row.get("heartbeat_at"),
+                }
+                if has_progress
+                else None
+            )
             return {
-                "job_id": job_id,
-                "status": status.status if status else "unknown",
-                "result": status.result if status else None,
-                "error_message": getattr(status, "error_message", None)
-                if status
-                else None,
-                "created": str(status.created)
-                if status and hasattr(status, "created") and status.created
-                else None,
-                "updated": str(status.updated)
-                if status and hasattr(status, "updated") and status.updated
-                else None,
-                "progress": getattr(status, "progress", None) if status else None,
+                "job_id": str(row.get("id")),
+                "status": row.get("status", "unknown"),
+                "result": row.get("result"),
+                "error_message": row.get("error_message"),
+                "created": str(row.get("created")) if row.get("created") else None,
+                "updated": str(row.get("updated")) if row.get("updated") else None,
+                "progress": progress,
             }
         except Exception as e:
             logger.error(f"Failed to get command status: {e}")
@@ -84,9 +98,29 @@ class CommandService:
     async def cancel_command_job(job_id: str) -> bool:
         """Cancel a running command job"""
         try:
-            # Implementation depends on surreal-commands cancellation support
-            # For now, just log the attempt
-            logger.info(f"Attempting to cancel job: {job_id}")
+            jid = str(job_id)
+            if ":" not in jid:
+                jid = f"command:{jid}"
+            rows = await repo_query(
+                "SELECT status FROM $id", {"id": ensure_record_id(jid)}
+            )
+            if not rows:
+                return False
+            status = rows[0].get("status")
+            if status not in ("new", "running"):
+                return False
+            from datetime import datetime, timezone
+
+            await repo_query(
+                "UPDATE $id MERGE $patch",
+                {
+                    "id": ensure_record_id(jid),
+                    "patch": {
+                        "cancel_requested": True,
+                        "cancel_requested_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                },
+            )
             return True
         except Exception as e:
             logger.error(f"Failed to cancel command job: {e}")
