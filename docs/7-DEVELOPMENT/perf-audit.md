@@ -614,6 +614,39 @@ separately flagged by the harness in this run. No stray `probe-*`/
 `measure-*` notebooks left behind. **A2 #6 closed: fixture is the throttled
 corpus and heavy flows run on it without resets.**
 
+**Docling-OOM ingest stall incident — root cause + fix (2026-10-08):** user
+reported "processing multiple sources" hanging and the UI freezing, with
+`open_notebook status=failed reason=stale: no heartbeat` on the sources.
+Root cause was **memory, not logic**: the persisted `open_notebook:content_settings`
+record had drifted to `docling_vision: true, docling_formulas: true` (code
+defaults are `False/False`; only `docling_ocr=True` is the code default).
+A multi-PDF batch (uploaded course PDFs) ran `document_engine=auto` → content-core
+chose docling → loading vision+formulas+OCR models in the app container's
+shared **2 GiB cgroup** (API ~655 MiB + worker ~600-730 MiB + node already
+consume ~1.4-1.7 GiB) → kernel OOM-killed the worker (exit 137) repeatedly
+(`memory.events oom_kill` climbed 10→13; `memory.current` pinned at ~2 GiB).
+Each crash left its in-flight command `running` with a dead heartbeat; the B3
+watchdog failed them `stale` after 300 s, but the worker's boot re-claim
+(*"Checking for existing commands… Found N"*) can reset `heartbeat_at` faster
+than the stale threshold, so zombies churn across the watchdog. The UI freeze
+was API/DB contention + UI floods during the worker thrash — the API itself
+stayed healthy (`/health` ~40 ms).
+
+Fix (**config-only, no code change, live-deployable**): `PUT /api/settings`
+→ `default_content_processing_engine_doc: "simple"` (light pdfplumber path —
+fully supported, see `test_graphs.py:584/603`), `docling_formulas: false`,
+`docling_vision: false`, keep `docling_ocr: true`. `content_process` reads
+`ContentSettings.get_instance()` per command, so no worker restart was needed.
+32 stale-casualty `process_source` commands were re-queued (`new`) and drained
+serially under the light engine. Verified: `memory.events oom_kill` **frozen at
+13**, `memory.current` bounded ~1.5-1.7 GiB, 114 chunks produced by re-queued
+sources, no fresh failures, API 200/118 ms, frontend 200/385 ms, source in-flight
+at 70% `transforming`. Watch item: re-enabling docling vision/formulas on a 2 GiB
+envelope (or a `document_engine` of `auto`/`docling` with `docling_ocr=True`,
+which is the **code default**) reproduces the OOM on PDF ingestion — a fresh 2 GiB
+deploy ingesting a PDF is still at risk; flagged as a candidate default change
+(`document_engine` auto→simple or `docling_ocr` default off) for maintainer review.
+
 One row per module: static read + instrumented probes + footprint. Status:
 `unmeasured → probed → fixed → proven`.
 

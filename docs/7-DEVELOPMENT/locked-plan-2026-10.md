@@ -21,6 +21,7 @@ evidence for the measured items lives in `docs/7-DEVELOPMENT/perf-audit.md`.
 | B4 · auth guard | `806ba8c` | Opt-in `OPEN_NOTEBOOK_REQUIRE_AUTH`, default OFF, fail-fast |
 | C1 · lockfile gate | `5800ac3` | CI job (`uv lock --check` + `uv sync --frozen`) + pre-commit mirror |
 | C2 · flag defaults + offline boot | `ea49415` | 12-test deterministic pin; flags formalized in `.env.example`; manual offline-boot check documented + verified |
+| OPS · docling-OOM ingest stall | ops (config-only, no commit) | 2026-10-08 live-deploy fix: persisted `content_settings` drifted to `docling_vision/formulas=true` → PDF batch OOM-crashed the worker in the 2 GiB cgroup (`oom_kill` 10→13) → B3 watchdog failed commands `stale: no heartbeat` + UI froze. Put `document_engine=simple`, `formulas/vision=false`, kept `ocr=true`; re-queued 32 casualties; `oom_kill` frozen, memory bounded, batch drained. Full record in perf-audit §A2. Watch: code default still `auto`+`ocr=True` → fresh 2 GiB PDF ingest can recur; default-change proposal pending maintainer review |
 
 Parked / reassigned threads (D2–D5) remain exactly as locked below; nothing
 here re-opens them.
