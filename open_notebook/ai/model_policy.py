@@ -19,6 +19,11 @@ def get_policy_config() -> Dict[str, Any]:
         in ("1", "true", "yes", "on"),
         "TIME_BUDGETS_ENFORCED": os.environ.get("TIME_BUDGETS_ENFORCED", "true").lower()
         in ("1", "true", "yes", "on"),
+        "MINI_ONLY": os.environ.get(
+            "OPEN_NOTEBOOK_MINI_ONLY",
+            os.environ.get("MINI_ONLY", "true"),
+        ).lower()
+        in ("1", "true", "yes", "on"),
         "USE_ROUTER": os.environ.get("USE_ROUTER", "false").lower()
         in ("1", "true", "yes", "on"),
         "USE_MIXTURE": os.environ.get("USE_MIXTURE", "false").lower()
