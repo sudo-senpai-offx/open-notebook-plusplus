@@ -57,7 +57,7 @@ services:
       # first boot is slow). See docs/5-CONFIGURATION/environment-reference.md.
       # Docling is enabled here so scanned/image-only PDFs and image sources get
       # OCR instead of failing with "Could not extract any text content".
-      - OPEN_NOTEBOOK_ENABLE_DOCLING=true
+      # - OPEN_NOTEBOOK_ENABLE_DOCLING=true  # disabled by default for low-end
       # - OPEN_NOTEBOOK_ENABLE_CRAWL4AI=true   # local Crawl4AI (bundles a Chromium browser)
       # - CRAWL4AI_API_URL=http://crawl4ai:11235  # use a remote Crawl4AI server instead (no local install)
       # - CRAWL4AI_API_TOKEN=${CRAWL4AI_API_TOKEN}  # bearer token for that server (required by Crawl4AI >= 0.9.0)
