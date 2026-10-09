@@ -185,3 +185,7 @@ def get_exit_code_from_exception(exc: Exception) -> int:
     if "137" in msg or "oom" in low or "out of memory" in low or "killed" in low:
         return 137
     return 0
+
+
+def is_oom_exception(exc: Exception) -> bool:
+    return get_exit_code_from_exception(exc) == 137

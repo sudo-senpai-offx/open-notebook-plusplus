@@ -278,8 +278,6 @@ async def content_process(state: SourceState) -> dict:
     # Heartbeat early during potentially long config/model init
     await report_progress_record(cmd_id, progress=12, stage="initializing")
 
-
-
     config = ContentCoreConfig(**config_kwargs) if config_kwargs else None
 
     # Log the effective extraction engines so operators can confirm which engine
