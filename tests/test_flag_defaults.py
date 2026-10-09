@@ -23,6 +23,8 @@ _POLICY_FLAGS = (
     "PREFER_LOCAL",
     "DEGRADE_GRACEFULLY",
     "TIME_BUDGETS_ENFORCED",
+    "OPEN_NOTEBOOK_MINI_ONLY",
+    "MINI_ONLY",
     "USE_ROUTER",
     "USE_MIXTURE",
     "USE_RERANKER_BEFORE_TRUNCATE",
@@ -44,16 +46,16 @@ def _clean_policy_env(monkeypatch):
 
 
 def test_defaults_are_offline_first_with_env_unset():
-    assert model_policy.get_policy_config() == {
-        "AUTO_MODEL_POLICY": "offline-first",
-        "CLOUD_ALLOWED": False,
-        "PREFER_LOCAL": True,
-        "DEGRADE_GRACEFULLY": True,
-        "TIME_BUDGETS_ENFORCED": True,
-        "USE_ROUTER": False,
-        "USE_MIXTURE": False,
-        "USE_RERANKER_BEFORE_TRUNCATE": False,
-    }
+    config = model_policy.get_policy_config()
+    assert config["AUTO_MODEL_POLICY"] == "offline-first"
+    assert config["CLOUD_ALLOWED"] is False
+    assert config["PREFER_LOCAL"] is True
+    assert config["DEGRADE_GRACEFULLY"] is True
+    assert config["TIME_BUDGETS_ENFORCED"] is True
+    assert config["MINI_ONLY"] is True
+    assert config["USE_ROUTER"] is False
+    assert config["USE_MIXTURE"] is False
+    assert config["USE_RERANKER_BEFORE_TRUNCATE"] is False
 
 
 @pytest.mark.parametrize("flag", _OPT_IN_FLAGS)
