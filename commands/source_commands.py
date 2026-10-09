@@ -284,12 +284,24 @@ async def run_transformation_command(
     - Does NOT retry permanent failures (ValueError for validation errors)
     """
     start_time = time.time()
+    hb = None
+    cmd_id = None
 
     try:
         logger.info(
             f"Running transformation {input_data.transformation_id} "
             f"on source {input_data.source_id}"
         )
+
+        # Start heartbeat for liveness during model load/generation
+        cmd_id = get_current_command_id() or (
+            str(input_data.execution_context.command_id)
+            if input_data.execution_context
+            else None
+        )
+        hb = Heartbeat(cmd_id)
+        hb.start()
+        await report_progress_record(cmd_id, progress=5, stage="starting")
 
         # Load source
         source = await Source.get(input_data.source_id)
@@ -303,6 +315,7 @@ async def run_transformation_command(
                 f"Transformation '{input_data.transformation_id}' not found"
             )
 
+        await report_progress_record(cmd_id, progress=20, stage="provisioning")
         # Run transformation graph (includes LLM call + insight creation).
         # LangGraph accepts a partial state dict at runtime, but its typed
         # overloads require the full state type (langgraph typing limitation).
@@ -310,12 +323,19 @@ async def run_transformation_command(
             input=dict(source=source, transformation=transformation),
             config=RunnableConfig(configurable={"model_id": transformation.model_id}),
         )
+        await report_progress_record(cmd_id, progress=90, stage="completed")
 
         processing_time = time.time() - start_time
         logger.info(
             f"Successfully ran transformation {input_data.transformation_id} "
             f"on source {input_data.source_id} in {processing_time:.2f}s"
         )
+
+        try:
+            if hb:
+                hb.stop()
+        except Exception:
+            pass
 
         return RunTransformationOutput(
             success=True,
@@ -339,6 +359,11 @@ async def run_transformation_command(
             f"Transformation skipped for source {input_data.source_id} - "
             f"source not found: {e}"
         )
+        try:
+            if hb:
+                hb.stop()
+        except Exception:
+            pass
         return RunTransformationOutput(
             success=True,
             source_id=input_data.source_id,
@@ -354,6 +379,11 @@ async def run_transformation_command(
             f"Failed to run transformation {input_data.transformation_id} "
             f"on source {input_data.source_id}: {e}"
         )
+        try:
+            if hb:
+                hb.stop()
+        except Exception:
+            pass
         return RunTransformationOutput(
             success=False,
             source_id=input_data.source_id,
@@ -368,3 +398,9 @@ async def run_transformation_command(
             f"on source {input_data.source_id}: {e}"
         )
         raise
+    finally:
+        try:
+            if hb:
+                hb.stop()
+        except Exception:
+            pass

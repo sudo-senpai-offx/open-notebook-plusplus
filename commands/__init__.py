@@ -8,6 +8,12 @@ from open_notebook.utils.proxy import ensure_internal_no_proxy
 from open_notebook.utils.retry_visibility import install_retry_visibility
 
 ensure_internal_no_proxy()
+try:
+    from open_notebook.utils.resource_tuning import apply_tuning
+
+    apply_tuning()
+except Exception:
+    pass
 
 # Surface deep command retries (B2). The worker runs at INFO and
 # `process_source` logs every one of its 15 attempts at DEBUG, so a command

@@ -70,3 +70,10 @@ __all__ = [
     # Model utils
     "full_model_dump",
 ]
+
+# Optional: resource tuning
+try:
+    from .resource_tuning import apply_tuning
+except Exception:
+    def apply_tuning() -> None:
+        pass

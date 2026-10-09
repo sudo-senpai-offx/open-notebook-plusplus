@@ -60,13 +60,23 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
             SystemMessage(content=system_prompt),
             HumanMessage(content=content_str),
         ]
+        from open_notebook.utils.job_control import (
+            get_current_command_id,
+            report_progress_record,
+        )
+
+        cmd_id = get_current_command_id()
+        await report_progress_record(cmd_id, progress=30, stage="loading_model")
+
         chain = await provision_langchain_model(
             str(payload),
             config.get("configurable", {}).get("model_id"),
             "transformation",
             max_tokens=8192,
         )
+        await report_progress_record(cmd_id, progress=50, stage="model_ready")
 
+        await report_progress_record(cmd_id, progress=60, stage="generating")
         response = await chain.ainvoke(payload)
 
         # Provider adapters use different keys for the termination reason.
@@ -80,6 +90,7 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
                     "transformation. Try a shorter transformation or a different model."
                 )
 
+        await report_progress_record(cmd_id, progress=80, stage="postprocessing")
         # Clean thinking content from the response
         response_content = extract_text_content(response.content)
         cleaned_content = clean_thinking_content(response_content)
@@ -93,6 +104,8 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
 
         if source:
             await source.add_insight(transformation.title, cleaned_content)
+
+        await report_progress_record(cmd_id, progress=95, stage="insight_saved")
 
         return {
             "output": cleaned_content,

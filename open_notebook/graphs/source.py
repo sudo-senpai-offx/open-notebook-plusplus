@@ -212,6 +212,12 @@ def _pdf_text_layer_present(file_path: str) -> bool:
 
 
 async def content_process(state: SourceState) -> dict:
+    from open_notebook.utils.job_control import (
+        get_current_command_id,
+        raise_if_cancelled,
+        report_progress_record,
+    )
+
     content_state: Dict[str, Any] = state["content_state"]
     cmd_id = get_current_command_id()
     await report_progress_record(cmd_id, progress=10, stage="extracting")
@@ -253,6 +259,7 @@ async def content_process(state: SourceState) -> dict:
         )
 
     try:
+        await report_progress_record(cmd_id, progress=15, stage="loading_models")
         model_manager = ModelManager()
         defaults = await model_manager.get_defaults()
         if defaults.default_speech_to_text_model:
@@ -263,10 +270,19 @@ async def content_process(state: SourceState) -> dict:
                 logger.debug(
                     f"Using speech-to-text model: {stt_model.provider}/{stt_model.name}"
                 )
+        await report_progress_record(cmd_id, progress=20, stage="models_ready")
     except Exception as e:
         logger.warning(f"Failed to retrieve speech-to-text model configuration: {e}")
         # Continue without custom audio model (content-core will use its default)
 
+    # Heartbeat early during potentially long config/model init
+    from open_notebook.utils.job_control import (
+        get_current_command_id,
+        report_progress_record,
+    )
+
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=12, stage="initializing")
     config = ContentCoreConfig(**config_kwargs) if config_kwargs else None
 
     # Log the effective extraction engines so operators can confirm which engine
@@ -304,6 +320,7 @@ async def content_process(state: SourceState) -> dict:
         raise ValueError(_SCANNED_PDF_MESSAGE)
 
     url = content_state.get("url") or ""
+    await report_progress_record(cmd_id, progress=25, stage="extracting_content")
     try:
         processed = await extract_content(
             url=content_state.get("url"),
@@ -311,6 +328,7 @@ async def content_process(state: SourceState) -> dict:
             content=content_state.get("content"),
             config=config,
         )
+        await report_progress_record(cmd_id, progress=35, stage="extraction_done")
     except cc.ContentCoreError as e:
         logger.warning(f"content-core extraction failed ({type(e).__name__}): {e}")
         raise _extraction_error(e, url) from e
