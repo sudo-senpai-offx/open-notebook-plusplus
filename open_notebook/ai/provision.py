@@ -20,18 +20,30 @@ async def provision_langchain_model(
     model = None
     selection_reason = ""
 
-    if tokens > 105_000:
+    from open_notebook.utils.model_router import FORCE_MINI, DEFAULT_MINI_MODELS
+
+    if tokens > 105_000 and not FORCE_MINI:
         selection_reason = f"large_context (content has {tokens} tokens)"
         logger.debug(
             f"Using large context model because the content has {tokens} tokens"
         )
         model = await model_manager.get_default_model("large_context", **kwargs)
-    elif model_id:
+    elif model_id and not FORCE_MINI:
         selection_reason = f"explicit model_id={model_id}"
         model = await model_manager.get_model(model_id, **kwargs)
     else:
         selection_reason = f"default for type={default_type}"
         model = await model_manager.get_default_model(default_type, **kwargs)
+        if FORCE_MINI and default_type in DEFAULT_MINI_MODELS:
+            try:
+                mini_id = DEFAULT_MINI_MODELS[default_type]
+                if mini_id:
+                    mini_model = await model_manager.get_model(mini_id, **kwargs)
+                    if mini_model:
+                        model = mini_model
+                        selection_reason = f"forced_mini for type={default_type}"
+            except Exception:
+                pass
 
     logger.debug(f"Using model: {model}")
 
