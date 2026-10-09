@@ -75,5 +75,6 @@ __all__ = [
 try:
     from .resource_tuning import apply_tuning
 except Exception:
+
     def apply_tuning() -> None:
         pass

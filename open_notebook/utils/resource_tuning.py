@@ -4,6 +4,7 @@ Applies conservative thread settings to avoid oversubscription on weak CPUs
 and sets tokenizer parallelism to avoid thread contention. Safe to call
 multiple times (idempotent).
 """
+
 import os
 
 _ENV_VARS = {

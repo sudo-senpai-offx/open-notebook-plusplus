@@ -168,3 +168,20 @@ class Heartbeat:
             asyncio.run(_do())
         except Exception as e:
             logger.debug(f"Heartbeat tick failed for {self._command_id}: {e}")
+
+
+def get_exit_code_from_exception(exc: Exception) -> int:
+    """Best effort to extract OOM/exit code from exception."""
+    try:
+        if isinstance(exc, BaseException) and hasattr(exc, "exit_code"):
+            try:
+                return int(getattr(exc, "exit_code"))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    msg = str(exc) or repr(exc)
+    low = msg.lower()
+    if "137" in msg or "oom" in low or "out of memory" in low or "killed" in low:
+        return 137
+    return 0

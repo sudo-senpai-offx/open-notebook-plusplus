@@ -13,6 +13,7 @@ from open_notebook.utils.proxy import ensure_internal_no_proxy
 ensure_internal_no_proxy()
 try:
     from open_notebook.utils.resource_tuning import apply_tuning
+
     apply_tuning()
 except Exception:
     pass

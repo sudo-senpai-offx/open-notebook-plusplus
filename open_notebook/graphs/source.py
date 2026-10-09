@@ -276,13 +276,10 @@ async def content_process(state: SourceState) -> dict:
         # Continue without custom audio model (content-core will use its default)
 
     # Heartbeat early during potentially long config/model init
-    from open_notebook.utils.job_control import (
-        get_current_command_id,
-        report_progress_record,
-    )
-
-    cmd_id = get_current_command_id()
     await report_progress_record(cmd_id, progress=12, stage="initializing")
+
+
+
     config = ContentCoreConfig(**config_kwargs) if config_kwargs else None
 
     # Log the effective extraction engines so operators can confirm which engine
@@ -322,6 +319,15 @@ async def content_process(state: SourceState) -> dict:
     url = content_state.get("url") or ""
     await report_progress_record(cmd_id, progress=25, stage="extracting_content")
     try:
+        # Apply fast profile if Docling is explicitly enabled/used; keep OCR only if missing
+        doc_engine = config_kwargs.get("document_engine", "auto")
+        if doc_engine == "docling" and os.getenv(
+            "OPEN_NOTEBOOK_DOCLING_FAST_PROFILE", "true"
+        ).lower() in ("1", "true", "yes", "on"):
+            if "docling_formulas" not in config_kwargs:
+                config_kwargs["docling_formulas"] = False
+            if "docling_vision" not in config_kwargs:
+                config_kwargs["docling_vision"] = False
         processed = await extract_content(
             url=content_state.get("url"),
             file_path=content_state.get("file_path"),
