@@ -71,3 +71,4 @@ services:
     volumes:
       - ~/piper_models:/app/models
     restart: always
+      - EMBED_BATCH_SIZE=8
