@@ -34,6 +34,61 @@ def _transformation_response(transformation: Transformation) -> TransformationRe
     )
 
 
+@router.get("/transformations/built-in")
+async def list_built_in_prompts():
+    """List built-in card-generation prompts (P2). Pure data, no database."""
+    from open_notebook.domain.card_prompts import BUILT_IN
+
+    return [
+        {
+            "key": entry["key"],
+            "name": entry["name"],
+            "title": entry["title"],
+            "description": entry["description"],
+            "format": entry["format"],
+            "prompt": entry["prompt"],
+        }
+        for entry in BUILT_IN
+    ]
+
+
+@router.post("/transformations/built-in/{key}", response_model=TransformationResponse)
+async def install_built_in_prompt(key: str):
+    """Install a built-in prompt as a regular transformation (editable after)."""
+    from open_notebook.domain.card_prompts import get_built_in
+
+    entry = get_built_in(key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Unknown built-in: {key}")
+    try:
+        existing = await Transformation.get_all(order_by="name asc")
+        if any(t.name == entry["name"] for t in existing):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Transformation '{entry['name']}' already installed",
+            )
+        transformation = Transformation(
+            name=entry["name"],
+            title=entry["title"],
+            description=entry["description"],
+            prompt=entry["prompt"],
+            apply_default=False,
+        )
+        await transformation.save()
+        return _transformation_response(transformation)
+    except HTTPException:
+        raise
+    except InvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error installing built-in prompt {key}: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error installing built-in prompt: {str(e)}"
+        )
+
+
 @router.get("/transformations", response_model=List[TransformationResponse])
 async def get_transformations():
     """Get all transformations."""
