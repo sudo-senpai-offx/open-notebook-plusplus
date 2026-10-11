@@ -2,12 +2,13 @@ import asyncio
 import time
 import tomllib
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from fastapi import APIRouter, Request
 from loguru import logger
 
 from open_notebook.database.repository import repo_query
+from open_notebook.domain.service_state import ServiceState
 from open_notebook.utils.version_utils import (
     compare_versions,
     get_version_from_github_async,
@@ -151,9 +152,21 @@ async def get_config(request: Request):
     if db_status == "offline":
         logger.warning(f"Database offline: {db_health.get('error', 'Unknown error')}")
 
+    # T3 governor: live draining signal for the UI's degraded-state handling.
+    # Fail-open False: an unreadable record must never present as draining,
+    # and DB-down is already carried by dbStatus.
+    draining = False
+    try:
+        draining = bool(
+            cast("ServiceState", await ServiceState.get_instance()).draining
+        )
+    except Exception as e:
+        logger.debug(f"draining flag unreadable, reporting False: {e}")
+
     return {
         "version": current_version,
         "latestVersion": latest_version,
         "hasUpdate": has_update,
         "dbStatus": db_status,
+        "draining": draining,
     }

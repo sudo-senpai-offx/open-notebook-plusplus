@@ -11,6 +11,9 @@ string does get put into check_database_health()'s internal return dict
 carries just `dbStatus` ("online"/"offline"). This test locks that
 contract in so a future edit can't reintroduce the leak by, e.g., adding
 `"error": db_health.get("error")` to the response dict.
+
+Contract extension (T3): the response also carries `draining` (bool, live
+hibernate signal, fail-open False). The key-set lock below includes it.
 """
 
 from unittest.mock import AsyncMock, patch
@@ -42,7 +45,13 @@ class TestConfigEndpointDoesNotLeakDbErrors:
         assert SENSITIVE_MESSAGE not in response.text
         assert "error" not in body
         assert body["dbStatus"] == "offline"
-        assert set(body.keys()) == {"version", "latestVersion", "hasUpdate", "dbStatus"}
+        assert set(body.keys()) == {
+            "version",
+            "latestVersion",
+            "hasUpdate",
+            "dbStatus",
+            "draining",
+        }
 
     def test_db_timeout_does_not_include_raw_error_in_response(self, client):
         import asyncio
