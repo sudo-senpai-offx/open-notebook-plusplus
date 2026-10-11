@@ -1,3 +1,6 @@
+import os
+from typing import Any
+
 from esperanto import LanguageModel
 from langchain_core.language_models.chat_models import BaseChatModel
 from loguru import logger
@@ -17,21 +20,60 @@ async def provision_langchain_model(
     Otherwise, returns the default model for the given type
     """
     tokens = token_count(content)
-    model = None
+    # Dynamic provisioning: manager + factory return several model kinds;
+    # the tail narrows via isinstance before use.
+    model: Any = None
     selection_reason = ""
 
     from open_notebook.utils.model_router import DEFAULT_MINI_MODELS, FORCE_MINI
 
-    if tokens > 105_000 and not FORCE_MINI:
+    if FORCE_MINI and default_type in ("chat", "transform"):
+        # T1 hook: sub-3GB tiers may offload to the opt-in no-AVX sidecar
+        # (OpenAI-compatible /v1) instead of loading a local model at all.
+        # Host Ollama stays the path when unset or when the tier fits.
+        from open_notebook.utils.capability_tier import tier_allows as _tier_allows
+
+        _sse2_allowed = os.getenv(
+            "OPEN_NOTEBOOK_ALLOW_LLAMACPP_SSE2", "false"
+        ).lower() in ("1", "true", "yes", "on")
+        _sse2_url = os.getenv("LLAMACPP_SSE2_URL", "").strip()
+        if _sse2_allowed and _sse2_url:
+            _tier_ok, _tier_reason = _tier_allows("lora")
+            if not _tier_ok:
+                try:
+                    from esperanto import AIFactory
+
+                    logger.debug(
+                        f"Routing to SSE2 sidecar ({_sse2_url}; tier: {_tier_reason})"
+                    )
+                    model = AIFactory.create_language(
+                        model_name=os.getenv("LLAMACPP_SSE2_MODEL", "qwen2.5-0.5b"),
+                        provider="openai-compatible",
+                        config={
+                            "base_url": _sse2_url,
+                            "api_key": os.getenv(
+                                "LLAMACPP_SSE2_API_KEY", "sk-no-key-required"
+                            ),
+                        },
+                    )
+                    selection_reason = "sse2_sidecar for type=" + default_type
+                except Exception as e:
+                    logger.warning(
+                        f"SSE2 sidecar routing failed ({e}); "
+                        "falling through to host minis."
+                    )
+                    model = None
+
+    if model is None and tokens > 105_000 and not FORCE_MINI:
         selection_reason = f"large_context (content has {tokens} tokens)"
         logger.debug(
             f"Using large context model because the content has {tokens} tokens"
         )
         model = await model_manager.get_default_model("large_context", **kwargs)
-    elif model_id and not FORCE_MINI:
+    elif model is None and model_id and not FORCE_MINI:
         selection_reason = f"explicit model_id={model_id}"
         model = await model_manager.get_model(model_id, **kwargs)
-    else:
+    elif model is None:
         selection_reason = f"default for type={default_type}"
         model = await model_manager.get_default_model(default_type, **kwargs)
         if FORCE_MINI and default_type in DEFAULT_MINI_MODELS:
