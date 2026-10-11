@@ -98,3 +98,47 @@ describe('Config Priority', () => {
     expect(url).toBe('')
   })
 })
+
+describe('getConfig draining flag', () => {
+  const originalFetch = global.fetch
+  const fetchMock = vi.fn()
+
+  beforeEach(() => {
+    vi.resetModules()
+    resetConfig()
+    global.fetch = fetchMock
+    fetchMock.mockReset()
+  })
+
+  afterEach(() => {
+    global.fetch = originalFetch
+  })
+
+  it('maps draining true from the backend', async () => {
+    const { getConfig } = await import('./config')
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({}),
+    } as Response)
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ version: '1.0.0', dbStatus: 'online', draining: true }),
+    } as Response)
+    const config = await getConfig()
+    expect(config.draining).toBe(true)
+  })
+
+  it('defaults draining to false when the backend omits it', async () => {
+    const { getConfig } = await import('./config')
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({}),
+    } as Response)
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ version: '1.0.0', dbStatus: 'online' }),
+    } as Response)
+    const config = await getConfig()
+    expect(config.draining).toBe(false)
+  })
+})

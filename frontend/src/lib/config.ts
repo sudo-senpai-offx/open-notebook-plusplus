@@ -126,6 +126,7 @@ async function fetchConfig(): Promise<AppConfig> {
         latestVersion: data.latestVersion || null,
         hasUpdate: data.hasUpdate || false,
         dbStatus: data.dbStatus, // Can be undefined for old backends
+        draining: data.draining ?? false, // T3 hibernate signal; old backends omit it
       }
       if (isDev) console.log('✅ [Config] Successfully loaded API config:', config)
       return config

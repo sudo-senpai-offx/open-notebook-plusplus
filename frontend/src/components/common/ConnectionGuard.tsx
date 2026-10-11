@@ -12,6 +12,8 @@ interface ConnectionGuardProps {
 export function ConnectionGuard({ children }: ConnectionGuardProps) {
   const [error, setError] = useState<ConnectionError | null>(null)
   const [isChecking, setIsChecking] = useState(true)
+  // Draining is advisory, never blocking: the backend is hibernating but alive.
+  const [draining, setDraining] = useState(false)
   // Use a ref to track checking status to avoid dependency cycles
   const isCheckingRef = useRef(false)
 
@@ -49,6 +51,8 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
 
       // If we got here, connection is good
       setError(null)
+      // T3 hibernate signal: banner only, children still render.
+      setDraining(config.draining ?? false)
       isCheckingRef.current = false
       setIsChecking(false)
     } catch (err) {
@@ -103,6 +107,18 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
     return null
   }
 
-  // Render children if connection is good
-  return <>{children}</>
+  // Render children if connection is good; draining shows a banner only.
+  return (
+    <>
+      {draining && (
+        <div
+          role="status"
+          className="w-full bg-amber-100 px-4 py-2 text-center text-sm text-amber-900 dark:bg-amber-900 dark:text-amber-100"
+        >
+          Backend is hibernating to save resources — responses may be slow until it wakes.
+        </div>
+      )}
+      {children}
+    </>
+  )
 }
