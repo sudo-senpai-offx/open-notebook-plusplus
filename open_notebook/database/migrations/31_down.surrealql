@@ -1,0 +1,4 @@
+-- Migration 31 rollback: remove flashcard bank.
+
+REMOVE INDEX IF EXISTS flashcard_guid ON TABLE flashcard;
+REMOVE TABLE IF EXISTS flashcard;

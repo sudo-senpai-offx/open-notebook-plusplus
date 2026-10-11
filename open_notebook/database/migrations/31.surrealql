@@ -1,0 +1,19 @@
+-- Migration 31: flashcard bank for the review system (P3).
+-- Single table, status-driven lifecycle: draft -> approved -> tombstoned.
+-- Tombstones exclude from reviews/exports; they are never hard-deleted here
+-- (Anki-side copies need manual deletion - see ticket P6).
+
+DEFINE TABLE IF NOT EXISTS flashcard SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS source_id ON TABLE flashcard TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS model ON TABLE flashcard TYPE string;
+DEFINE FIELD IF NOT EXISTS front ON TABLE flashcard TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS back ON TABLE flashcard TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS cloze_text ON TABLE flashcard TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS tags ON TABLE flashcard TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS guid ON TABLE flashcard TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE flashcard TYPE string DEFAULT "draft";
+DEFINE FIELD IF NOT EXISTS created ON flashcard DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON flashcard DEFAULT time::now() VALUE time::now();
+
+DEFINE INDEX IF NOT EXISTS flashcard_guid ON TABLE flashcard COLUMNS guid UNIQUE;
