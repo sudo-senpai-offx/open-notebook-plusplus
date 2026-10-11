@@ -5,6 +5,15 @@
 # baked into the image.
 
 services:
+  open_notebook:
+    # Hook env (see T1 ticket + .env.example). Defaults keep host Ollama;
+    # set OPEN_NOTEBOOK_ALLOW_LLAMACPP_SSE2=true to let sub-3GB tiers
+    # offload chat/transform inference to the sidecar over compose DNS.
+    environment:
+      - OPEN_NOTEBOOK_ALLOW_LLAMACPP_SSE2=${OPEN_NOTEBOOK_ALLOW_LLAMACPP_SSE2:-false}
+      - LLAMACPP_SSE2_URL=${LLAMACPP_SSE2_URL:-http://llamacpp-sse2:8080/v1}
+      - LLAMACPP_SSE2_MODEL=${LLAMACPP_SSE2_MODEL:-qwen2.5-0.5b}
+
   llamacpp-sse2:
     build:
       context: ./sidecars/llamacpp-sse2
