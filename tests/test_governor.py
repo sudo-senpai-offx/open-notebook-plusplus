@@ -2,12 +2,18 @@
 
 Idle is DB-visible only: no command created/active within the idle window
 and no blocking leases. Disabled flag means dormant, always.
+
+T7: the tick also notes self RSS pressure vs policy (warn-only, action
+unchanged).
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from api import governor as governor_module
 from api.governor import evaluate
 
 NOW = datetime(2026, 10, 11, 10, 0, 0, tzinfo=timezone.utc)
@@ -69,3 +75,56 @@ def test_stale_running_does_not_veto_but_counts_activity():
     rows = [_row("running", 400, hb_ago_s=400)]
     decision = evaluate(enabled=True, idle_seconds=600, rows=rows, now=NOW)
     assert decision["action"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_pressure_noted_above_warn_line(monkeypatch):
+    async def fake_query(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(governor_module, "repo_query", fake_query)
+    monkeypatch.setattr(governor_module, "hibernate_enabled", lambda: True)
+    monkeypatch.setattr(governor_module, "hibernate_idle_seconds", lambda: 600)
+    monkeypatch.setattr(
+        governor_module.resource_budget, "self_utilization_pct", lambda: 82
+    )
+    monkeypatch.setattr(
+        governor_module.model_policy, "resource_warn_rss_pct", lambda: 75
+    )
+    decision = await governor_module.Governor().run_once(now=NOW)
+    assert decision["action"] == "would_hibernate"
+    assert decision["pressure_pct"] == 82
+    assert "82%" in decision["reason"]
+
+
+@pytest.mark.asyncio
+async def test_no_pressure_note_when_below_line(monkeypatch):
+    async def fake_query(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(governor_module, "repo_query", fake_query)
+    monkeypatch.setattr(governor_module, "hibernate_enabled", lambda: True)
+    monkeypatch.setattr(governor_module, "hibernate_idle_seconds", lambda: 600)
+    monkeypatch.setattr(
+        governor_module.resource_budget, "self_utilization_pct", lambda: 40
+    )
+    monkeypatch.setattr(
+        governor_module.model_policy, "resource_warn_rss_pct", lambda: 75
+    )
+    decision = await governor_module.Governor().run_once(now=NOW)
+    assert "pressure_pct" not in decision
+
+
+@pytest.mark.asyncio
+async def test_no_pressure_note_when_undetectable(monkeypatch):
+    async def fake_query(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(governor_module, "repo_query", fake_query)
+    monkeypatch.setattr(governor_module, "hibernate_enabled", lambda: True)
+    monkeypatch.setattr(governor_module, "hibernate_idle_seconds", lambda: 600)
+    monkeypatch.setattr(
+        governor_module.resource_budget, "self_utilization_pct", lambda: None
+    )
+    decision = await governor_module.Governor().run_once(now=NOW)
+    assert "pressure_pct" not in decision

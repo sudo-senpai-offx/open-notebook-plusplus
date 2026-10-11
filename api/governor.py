@@ -19,8 +19,10 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from open_notebook.ai import model_policy
 from open_notebook.ai.model_policy import hibernate_enabled, hibernate_idle_seconds
 from open_notebook.database.repository import repo_query
+from open_notebook.utils import resource_budget
 from open_notebook.utils.lease_guard import blocking_leases
 
 _RECENT_LIMIT = 25
@@ -125,6 +127,16 @@ class Governor:
             now=now,
             stale_threshold=stale_threshold,
         )
+        # T7: warn-only pressure note. Never changes the action; enforcement
+        # stays out until triggers are proven.
+        pressure = resource_budget.self_utilization_pct()
+        warn_at = model_policy.resource_warn_rss_pct()
+        if pressure is not None and pressure >= warn_at:
+            decision["pressure_pct"] = pressure
+            decision["reason"] += (
+                f" | memory pressure {pressure}% >= warn line {warn_at}%"
+                " (warn-only, no action)"
+            )
         logger.info(
             f"governor: {decision['action']} — {decision['reason']} (observe-only)"
         )
