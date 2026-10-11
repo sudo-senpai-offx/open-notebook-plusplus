@@ -92,3 +92,40 @@ def tier_allows(feature: str) -> tuple[bool, str]:
         logger.debug(f"Tier gate open for lora: {mem} MB free, {cpus} threads.")
         return True, f"LoRA unlocked ({mem} MB free, {cpus} threads)."
     raise ValueError(f"unknown capability feature: {feature!r}")
+
+
+_FLAG_ENV = {
+    "tiny_train": "OPEN_NOTEBOOK_ALLOW_TINY_TRAIN",
+    "lora": "OPEN_NOTEBOOK_ALLOW_LORA",
+}
+
+_FLAG_KEY = {
+    "tiny_train": "ALLOW_TINY_TRAIN",
+    "lora": "ALLOW_LORA",
+}
+
+
+def gate_training(feature: str) -> tuple[bool, str]:
+    """Combined flag + tier verdict for a training feature.
+
+    The opt-in flag wins when off (explicit denial naming the flag, never a
+    silent admission); when on, the live tier verdict applies. There is no
+    auto-fallback routing here: a denial names the lighter alternative and
+    the caller (or a future T5/T6 entry point) decides.
+    """
+    if feature == "tabular":
+        # Tabular stays open on the 2GB tier; no opt-in flag.
+        return tier_allows(feature)
+    if feature not in _FLAG_ENV:
+        raise ValueError(f"unknown capability feature: {feature!r}")
+    from open_notebook.ai.model_policy import get_policy_config
+
+    if not get_policy_config()[_FLAG_KEY[feature]]:
+        alternative = "tiny/tabular training" if feature == "lora" else "tabular"
+        return (
+            False,
+            f"{feature} training is not enabled (set {_FLAG_ENV[feature]}=true "
+            f"to opt in; the tier gate still applies). Meanwhile, "
+            f"{alternative} remains available.",
+        )
+    return tier_allows(feature)

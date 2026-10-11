@@ -24,6 +24,15 @@ def get_policy_config() -> Dict[str, Any]:
             os.environ.get("MINI_ONLY", "true"),
         ).lower()
         in ("1", "true", "yes", "on"),
+        # Training capabilities are opt-in and tier-gated (T4). They default
+        # to false so a fresh checkout can never admit heavy training; the
+        # tier gate (capability_tier.gate_training) still applies when on.
+        "ALLOW_TINY_TRAIN": os.environ.get(
+            "OPEN_NOTEBOOK_ALLOW_TINY_TRAIN", "false"
+        ).lower()
+        in ("1", "true", "yes", "on"),
+        "ALLOW_LORA": os.environ.get("OPEN_NOTEBOOK_ALLOW_LORA", "false").lower()
+        in ("1", "true", "yes", "on"),
         "USE_ROUTER": os.environ.get("USE_ROUTER", "false").lower()
         in ("1", "true", "yes", "on"),
         "USE_MIXTURE": os.environ.get("USE_MIXTURE", "false").lower()
@@ -49,3 +58,11 @@ def use_mixture() -> bool:
 
 def use_reranker() -> bool:
     return get_policy_config()["USE_RERANKER_BEFORE_TRUNCATE"]
+
+
+def allow_tiny_train() -> bool:
+    return get_policy_config()["ALLOW_TINY_TRAIN"]
+
+
+def allow_lora() -> bool:
+    return get_policy_config()["ALLOW_LORA"]
