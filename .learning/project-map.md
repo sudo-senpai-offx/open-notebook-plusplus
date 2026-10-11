@@ -66,6 +66,7 @@ Training flow: ? (no trainer exists; tier gate → subprocess/sidecar → artifa
 - 2026-10-11 · chosen · UI draining banner: types + mapping + non-blocking ConnectionGuard banner, 180 frontend tests green, build clean (commit 9c22a4b). Next: training UI (b2), action governor+wake, sidecar, stabilisation.
 - 2026-10-11 · chosen · Training section UI: /training route + job submit/poll/denial, sidebar Create entry, all 14 locales keyed (English mirror), 182 frontend tests green, build clean (commit 8f64181). Next: action governor+wake, sidecar, stabilisation.
 - 2026-10-11 · stabilisation live: backend 1151 + mypy-207 clean, frontend 182 + tsc + build clean; live stack (surrealdb/API/worker) drains real backlog; train_tiny E2E submitted, completing via FIFO; launch script ~/bin/open-notebook.sh gains --sse2.
+- 2026-10-11 · closed out: sidecar hook live-fired, wake button shipped, 13-locale translations (pending native review), worker stopwaitsecs=30, train_tiny E2E completed (loss 2.43), final battery 1151 + mypy-207 + frontend 183 all green. 25+ local commits, none pushed.
 - 2026-10-11 · chosen · Governor sleep/wake: unix socket, draining-backed worker stop, rollback on failure, authed wake/state endpoints (commit 90aaebf). Next: sidecar build, stabilisation.
 
 ## Unknowns
