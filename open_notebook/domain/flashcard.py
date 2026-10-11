@@ -1,5 +1,5 @@
 import hashlib
-from typing import ClassVar, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from open_notebook.domain.base import ObjectModel
 
@@ -33,3 +33,6 @@ class Flashcard(ObjectModel):
     tags: List[str] = []
     guid: Optional[str] = None
     status: CardStatus = "draft"
+    # FSRS Card JSON (P4). Persisted once migration 32 adds the field +
+    # revlog table; until then only grade_card() pure logic is live.
+    fsrs_json: Optional[Dict[str, Any]] = None
