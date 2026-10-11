@@ -39,6 +39,7 @@ from api.routers import (
     embedding,
     embedding_rebuild,
     episode_profiles,
+    flashcards,
     focus,
     governor,
     insights,
@@ -426,6 +427,7 @@ app.include_router(
 )
 app.include_router(governor.router, prefix="/api", tags=["governor"])
 app.include_router(focus.router, prefix="/api", tags=["focus"])
+app.include_router(flashcards.router, prefix="/api", tags=["flashcards"])
 app.include_router(settings.router, prefix="/api", tags=["settings"])
 app.include_router(sources.router, prefix="/api", tags=["sources"])
 app.include_router(sites.router, prefix="/api", tags=["sites"])

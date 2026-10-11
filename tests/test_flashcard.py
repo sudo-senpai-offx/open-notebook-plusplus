@@ -5,17 +5,18 @@ from reviews/exports; Anki-side copies need manual deletion (honest copy).
 GUIDs are content-stable so .apkg re-exports dedupe.
 """
 
-from open_notebook.domain.flashcard import Flashcard, make_guid
+from open_notebook.domain.flashcard import Flashcard, content_guid
 
 
-def test_guid_stable_and_unique_per_index():
-    assert make_guid("source:a", "cloze", 3) == make_guid("source:a", "cloze", 3)
-    assert make_guid("source:a", "cloze", 3) != make_guid("source:a", "cloze", 4)
-    assert make_guid("source:a", "basic", 3) != make_guid("source:b", "basic", 3)
+def test_guid_stable_and_content_addressed():
+    a = content_guid("basic", "Q?", "A.")
+    assert a == content_guid("basic", "Q?", "A.")
+    assert a != content_guid("basic", "Q?", "B.")
+    assert a != content_guid("cloze", "Q?", "A.")
 
 
 def test_guid_is_compact_hex():
-    guid = make_guid("source:a", "basic", 0)
+    guid = content_guid("basic", "Q?", "A.")
     assert len(guid) == 16
     int(guid, 16)
 

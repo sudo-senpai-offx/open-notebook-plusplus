@@ -7,9 +7,17 @@ CardModel = Literal["basic", "cloze"]
 CardStatus = Literal["draft", "approved", "tombstoned"]
 
 
-def make_guid(source_id: str, kind: str, index: int) -> str:
-    """Content-stable 16-hex GUID so `.apkg` re-exports dedupe additively."""
-    digest = hashlib.sha256(f"{source_id}\0{kind}\0{index}".encode("utf-8"))
+def content_guid(
+    model: str,
+    front: Optional[str] = None,
+    back: Optional[str] = None,
+    cloze_text: Optional[str] = None,
+) -> str:
+    """GUID from card content: identical cards share an identity (dedupe by
+    construction, no counter query, no race)."""
+    digest = hashlib.sha256(
+        "\0".join([model, front or "", back or "", cloze_text or ""]).encode("utf-8")
+    )
     return digest.hexdigest()[:16]
 
 
