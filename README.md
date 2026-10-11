@@ -1,5 +1,10 @@
 <a id="readme-top"></a>
 
+> **open-notebook-plusplus:** this is a credited student-focused fork of
+> [lfnovo/open-notebook](https://github.com/lfnovo/open-notebook) — low-end
+> survival + learning utensils on top of upstream. See [FORK.md](FORK.md)
+> for what changed, the upstream pin, and the sync policy.
+
 <!-- [![Contributors][contributors-shield]][contributors-url] -->
 [![Forks][forks-shield]][forks-url]
 [![Stargazers][stars-shield]][stars-url]
