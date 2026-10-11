@@ -44,6 +44,15 @@ dependencies = [
     "podcast-creator>=0.13.1,<1",
     "surreal-commands>=1.3.1,<2",
     "numpy>=2.4.1",
+    # Tabular training (T6): LightGBM + sklearn direct. FLAML deliberately
+    # excluded — its automl extra hard-requires xgboost at import, and
+    # xgboost 2.x drags nvidia-nccl-cu12 on x86_64 Linux even URL-pinned.
+    # dGPU stays an optional future, never a base-dep. All four stay
+    # function-local at use sites (see tests/test_tabular_lazy.py).
+    "lightgbm==4.6.0",
+    "scikit-learn>=1.5",
+    "pandas>=2.2",
+    "scipy>=1.13",
     "pycountry>=26.2.16",
     "babel>=2.18.0",
     "beautifulsoup4>=4.13.0",
