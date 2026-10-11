@@ -232,10 +232,17 @@ async def lifespan(app: FastAPI):
     # Start job monitor
     _job_monitor = JobMonitor()
     _job_monitor.start()
+    # T3 governor (observe-only): evaluates hibernate verdicts and logs them.
+    # Stops nothing; stop-order execution and wake are later slices.
+    from api.governor import Governor
+
+    _governor = Governor()
+    _governor.start()
     # Yield control to the application
     yield
     # Shutdown: stop monitor
     await _job_monitor.stop()
+    await _governor.stop()
     logger.info("API shutdown complete")
 
 
