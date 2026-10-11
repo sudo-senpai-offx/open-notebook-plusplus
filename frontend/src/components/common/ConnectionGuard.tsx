@@ -4,16 +4,20 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { ConnectionError } from '@/lib/types/config'
 import { ConnectionErrorOverlay } from '@/components/errors/ConnectionErrorOverlay'
 import { getConfig, resetConfig } from '@/lib/config'
+import { useTranslation } from '@/lib/hooks/use-translation'
 
 interface ConnectionGuardProps {
   children: React.ReactNode
 }
 
 export function ConnectionGuard({ children }: ConnectionGuardProps) {
+  const { t } = useTranslation()
   const [error, setError] = useState<ConnectionError | null>(null)
   const [isChecking, setIsChecking] = useState(true)
   // Draining is advisory, never blocking: the backend is hibernating but alive.
   const [draining, setDraining] = useState(false)
+  const [waking, setWaking] = useState(false)
+  const [wakeError, setWakeError] = useState<string | null>(null)
   // Use a ref to track checking status to avoid dependency cycles
   const isCheckingRef = useRef(false)
 
@@ -108,14 +112,37 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
   }
 
   // Render children if connection is good; draining shows a banner only.
+  const handleWake = async () => {
+    setWaking(true)
+    setWakeError(null)
+    try {
+      const { governorApi } = await import('@/lib/api/governor')
+      await governorApi.wake()
+      await checkConnection()
+    } catch (err) {
+      setWakeError(err instanceof Error ? err.message : t('training.wakeFailed'))
+    } finally {
+      setWaking(false)
+    }
+  }
+
   return (
     <>
       {draining && (
         <div
           role="status"
-          className="w-full bg-amber-100 px-4 py-2 text-center text-sm text-amber-900 dark:bg-amber-900 dark:text-amber-100"
+          className="flex w-full items-center justify-center gap-3 bg-amber-100 px-4 py-2 text-center text-sm text-amber-900 dark:bg-amber-900 dark:text-amber-100"
         >
-          Backend is hibernating to save resources — responses may be slow until it wakes.
+          <span>{t('training.hibernating')}</span>
+          <button
+            type="button"
+            onClick={handleWake}
+            disabled={waking}
+            className="rounded border border-amber-700 px-2 py-0.5 text-xs font-medium disabled:opacity-50 dark:border-amber-200"
+          >
+            {waking ? t('training.waking') : t('training.wake')}
+          </button>
+          {wakeError && <span className="text-xs">{wakeError}</span>}
         </div>
       )}
       {children}

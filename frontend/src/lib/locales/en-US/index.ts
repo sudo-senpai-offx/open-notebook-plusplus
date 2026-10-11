@@ -1053,6 +1053,10 @@ export const enUS = {
     params: "Parameters",
     wallTime: "Wall time (s)",
     failed: "Training failed",
+    hibernating: "Backend is hibernating to save resources — responses may be slow until it wakes.",
+    wake: "Wake now",
+    waking: "Waking...",
+    wakeFailed: "Wake failed",
   },
   setupBanner: {
     encryptionRequired: "Encryption key not configured",
