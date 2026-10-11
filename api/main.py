@@ -221,6 +221,14 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"Failed to run database migrations: {str(e)}") from e
 
     logger.success("API initialization completed successfully")
+    # T3 governor: a draining=true persisted by a crashed run must not
+    # survive into this boot. Idempotent; safe to run on every startup.
+    try:
+        from open_notebook.domain.service_state import ServiceState
+
+        await ServiceState.clear_on_boot()
+    except Exception as e:
+        logger.debug(f"service-state boot-clear skipped: {e}")
     # Start job monitor
     _job_monitor = JobMonitor()
     _job_monitor.start()
