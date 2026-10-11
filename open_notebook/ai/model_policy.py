@@ -17,6 +17,17 @@ def _parse_hibernate_idle_seconds() -> int:
         return _HIBERNATE_IDLE_SECONDS_DEFAULT
 
 
+_RESOURCE_WARN_RSS_PCT_DEFAULT = 75
+
+
+def _parse_resource_warn_rss_pct() -> int:
+    try:
+        value = int(os.environ.get("OPEN_NOTEBOOK_RESOURCE_WARN_RSS_PCT", "75"))
+    except (TypeError, ValueError):
+        return _RESOURCE_WARN_RSS_PCT_DEFAULT
+    return max(1, min(100, value))
+
+
 def get_policy_config() -> Dict[str, Any]:
     return {
         "AUTO_MODEL_POLICY": os.environ.get("AUTO_MODEL_POLICY", "offline-first"),
@@ -51,6 +62,14 @@ def get_policy_config() -> Dict[str, Any]:
         "HIBERNATE_IDLE_SECONDS": _parse_hibernate_idle_seconds(),
         "HIBERNATE_STOP_MEDIA": os.environ.get(
             "OPEN_NOTEBOOK_HIBERNATE_STOP_MEDIA", "true"
+        ).lower()
+        in ("1", "true", "yes", "on"),
+        # Resource budgets (T7): percent of detected total system resources.
+        # Warn-only; hard caps are explicitly out until governor triggers
+        # are proven. Inert until wired.
+        "RESOURCE_WARN_RSS_PCT": _parse_resource_warn_rss_pct(),
+        "RESOURCE_WARN_ONLY": os.environ.get(
+            "OPEN_NOTEBOOK_RESOURCE_WARN_ONLY", "true"
         ).lower()
         in ("1", "true", "yes", "on"),
         "USE_ROUTER": os.environ.get("USE_ROUTER", "false").lower()
@@ -98,3 +117,11 @@ def hibernate_idle_seconds() -> int:
 
 def hibernate_stop_media() -> bool:
     return get_policy_config()["HIBERNATE_STOP_MEDIA"]
+
+
+def resource_warn_rss_pct() -> int:
+    return get_policy_config()["RESOURCE_WARN_RSS_PCT"]
+
+
+def resource_warn_only() -> bool:
+    return get_policy_config()["RESOURCE_WARN_ONLY"]
