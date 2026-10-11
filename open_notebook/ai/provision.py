@@ -20,7 +20,7 @@ async def provision_langchain_model(
     model = None
     selection_reason = ""
 
-    from open_notebook.utils.model_router import FORCE_MINI, DEFAULT_MINI_MODELS
+    from open_notebook.utils.model_router import DEFAULT_MINI_MODELS, FORCE_MINI
 
     if tokens > 105_000 and not FORCE_MINI:
         selection_reason = f"large_context (content has {tokens} tokens)"
@@ -38,6 +38,19 @@ async def provision_langchain_model(
             try:
                 mini_id = DEFAULT_MINI_MODELS[default_type]
                 if mini_id:
+                    # T1 correction: the transform mini (3B) does not fit the
+                    # 2GB tier, so route transform to the chat mini there.
+                    # Big tiers keep the transform mini.
+                    if default_type == "transform":
+                        from open_notebook.utils.capability_tier import tier_allows
+
+                        allowed, reason = tier_allows("lora")
+                        if not allowed:
+                            logger.debug(
+                                "Tier denies 3B transform model "
+                                f"({reason}); falling back to chat mini."
+                            )
+                            mini_id = DEFAULT_MINI_MODELS["chat"]
                     mini_model = await model_manager.get_model(mini_id, **kwargs)
                     if mini_model:
                         model = mini_model
