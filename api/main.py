@@ -39,6 +39,7 @@ from api.routers import (
     embedding,
     embedding_rebuild,
     episode_profiles,
+    governor,
     insights,
     languages,
     models,
@@ -238,6 +239,7 @@ async def lifespan(app: FastAPI):
 
     _governor = Governor()
     _governor.start()
+    app.state.governor = _governor
     # Yield control to the application
     yield
     # Shutdown: stop monitor
@@ -421,6 +423,7 @@ app.include_router(embedding.router, prefix="/api", tags=["embedding"])
 app.include_router(
     embedding_rebuild.router, prefix="/api/embeddings", tags=["embeddings"]
 )
+app.include_router(governor.router, prefix="/api", tags=["governor"])
 app.include_router(settings.router, prefix="/api", tags=["settings"])
 app.include_router(sources.router, prefix="/api", tags=["sources"])
 app.include_router(sites.router, prefix="/api", tags=["sites"])

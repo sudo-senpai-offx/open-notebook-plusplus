@@ -10,11 +10,33 @@ unchanged).
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from api import governor as governor_module
 from api.governor import evaluate
+
+
+class _NoopRunner:
+    async def stop(self, program="worker"):
+        raise AssertionError("must not stop in pressure tests")
+
+    async def start(self, program="worker"):
+        raise AssertionError("must not start in pressure tests")
+
+
+def _stub_state(monkeypatch):
+    state = SimpleNamespace(set_draining=AsyncMock())
+    monkeypatch.setattr(
+        governor_module.ServiceState, "get_instance", classmethod(lambda cls: _v(state))
+    )
+
+
+async def _v(value):
+    return value
+
 
 NOW = datetime(2026, 10, 11, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -80,7 +102,7 @@ def test_stale_running_does_not_veto_but_counts_activity():
 @pytest.mark.asyncio
 async def test_pressure_noted_above_warn_line(monkeypatch):
     async def fake_query(*args, **kwargs):
-        return []
+        return [_row("completed", 100, hb_ago_s=100)]
 
     monkeypatch.setattr(governor_module, "repo_query", fake_query)
     monkeypatch.setattr(governor_module, "hibernate_enabled", lambda: True)
@@ -91,8 +113,9 @@ async def test_pressure_noted_above_warn_line(monkeypatch):
     monkeypatch.setattr(
         governor_module.model_policy, "resource_warn_rss_pct", lambda: 75
     )
-    decision = await governor_module.Governor().run_once(now=NOW)
-    assert decision["action"] == "would_hibernate"
+    _stub_state(monkeypatch)
+    decision = await governor_module.Governor(runner=_NoopRunner()).run_once(now=NOW)
+    assert decision["action"] == "active"
     assert decision["pressure_pct"] == 82
     assert "82%" in decision["reason"]
 
@@ -100,7 +123,7 @@ async def test_pressure_noted_above_warn_line(monkeypatch):
 @pytest.mark.asyncio
 async def test_no_pressure_note_when_below_line(monkeypatch):
     async def fake_query(*args, **kwargs):
-        return []
+        return [_row("completed", 100, hb_ago_s=100)]
 
     monkeypatch.setattr(governor_module, "repo_query", fake_query)
     monkeypatch.setattr(governor_module, "hibernate_enabled", lambda: True)
@@ -111,14 +134,15 @@ async def test_no_pressure_note_when_below_line(monkeypatch):
     monkeypatch.setattr(
         governor_module.model_policy, "resource_warn_rss_pct", lambda: 75
     )
-    decision = await governor_module.Governor().run_once(now=NOW)
+    _stub_state(monkeypatch)
+    decision = await governor_module.Governor(runner=_NoopRunner()).run_once(now=NOW)
     assert "pressure_pct" not in decision
 
 
 @pytest.mark.asyncio
 async def test_no_pressure_note_when_undetectable(monkeypatch):
     async def fake_query(*args, **kwargs):
-        return []
+        return [_row("completed", 100, hb_ago_s=100)]
 
     monkeypatch.setattr(governor_module, "repo_query", fake_query)
     monkeypatch.setattr(governor_module, "hibernate_enabled", lambda: True)
@@ -126,5 +150,6 @@ async def test_no_pressure_note_when_undetectable(monkeypatch):
     monkeypatch.setattr(
         governor_module.resource_budget, "self_utilization_pct", lambda: None
     )
-    decision = await governor_module.Governor().run_once(now=NOW)
+    _stub_state(monkeypatch)
+    decision = await governor_module.Governor(runner=_NoopRunner()).run_once(now=NOW)
     assert "pressure_pct" not in decision

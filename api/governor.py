@@ -15,17 +15,20 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from loguru import logger
 
 from open_notebook.ai import model_policy
 from open_notebook.ai.model_policy import hibernate_enabled, hibernate_idle_seconds
 from open_notebook.database.repository import repo_query
+from open_notebook.domain.service_state import ServiceState
 from open_notebook.utils import resource_budget
 from open_notebook.utils.lease_guard import blocking_leases
 
 _RECENT_LIMIT = 25
+_SUPERVISOR_SOCKET = "/tmp/supervisor.sock"
+_SUPERVISOR_TIMEOUT_S = 30
 
 
 def _get_tick_seconds() -> int:
@@ -105,9 +108,59 @@ async def _fetch_recent() -> list:
         return []
 
 
+class SupervisorRunner:
+    """Stop/start supervisord programs. Injectable seam for tests."""
+
+    def __init__(
+        self, socket: str = _SUPERVISOR_SOCKET, program: str = "worker"
+    ) -> None:
+        self._socket = socket
+        self._program = program
+
+    async def _ctl(self, action: str) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            "supervisorctl",
+            "-s",
+            f"unix://{self._socket}",
+            action,
+            self._program,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(
+                proc.communicate(), timeout=_SUPERVISOR_TIMEOUT_S
+            )
+        except asyncio.TimeoutError as e:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise RuntimeError(f"supervisorctl {action} timed out") from e
+        if proc.returncode != 0:
+            raise RuntimeError(f"supervisorctl {action} failed: {err.decode().strip()}")
+        return out.decode().strip()
+
+    async def stop(self, program: str = "worker") -> str:
+        if program != self._program:
+            raise ValueError(f"runner scoped to {self._program!r}, got {program!r}")
+        return await self._ctl("stop")
+
+    async def start(self, program: str = "worker") -> str:
+        if program != self._program:
+            raise ValueError(f"runner scoped to {self._program!r}, got {program!r}")
+        return await self._ctl("start")
+
+
 class Governor:
-    def __init__(self, interval: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        interval: Optional[float] = None,
+        runner: Optional[SupervisorRunner] = None,
+    ) -> None:
         self._interval = interval if interval is not None else _get_tick_seconds()
+        self._runner = runner if runner is not None else SupervisorRunner()
+        self._asleep = False
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
@@ -140,7 +193,33 @@ class Governor:
         logger.info(
             f"governor: {decision['action']} — {decision['reason']} (observe-only)"
         )
+        if decision["action"] == "would_hibernate" and not self._asleep:
+            await self._sleep()
         return decision
+
+    async def _sleep(self) -> None:
+        """Set draining, then stop the worker. Rolls the flag back if the
+        stop fails so the flag never claims a sleep that did not happen."""
+        state = cast(ServiceState, await ServiceState.get_instance())
+        await state.set_draining(True)
+        try:
+            await self._runner.stop("worker")
+        except Exception:
+            try:
+                await state.set_draining(False)
+            except Exception as e:
+                logger.debug(f"governor: draining rollback failed: {e}")
+            raise
+        self._asleep = True
+        logger.info("governor: worker asleep (draining set)")
+
+    async def wake(self) -> None:
+        """Restart the worker and clear draining."""
+        await self._runner.start("worker")
+        state = cast(ServiceState, await ServiceState.get_instance())
+        await state.set_draining(False)
+        self._asleep = False
+        logger.info("governor: worker awake (draining cleared)")
 
     async def run(self) -> None:
         self._running = True
