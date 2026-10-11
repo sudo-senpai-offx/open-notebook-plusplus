@@ -18,6 +18,7 @@ from open_notebook.utils.capability_tier import gate_training
 DEFAULT_MAX_STEPS = 200
 HARD_MAX_STEPS = 2000
 DEFAULT_MAX_SECONDS = 300
+ISOLATION_TIMEOUT_MARGIN_S = 60
 BLOCK_SIZE = 128
 BATCH_SIZE = 16
 
@@ -130,3 +131,53 @@ def run_tiny_train(
         "params": params,
         "wall_s": round(time.time() - t0, 1),
     }
+
+
+async def run_tiny_train_isolated(
+    text: str,
+    *,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    max_seconds: int = DEFAULT_MAX_SECONDS,
+    timeout: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Run the gated core in a child process. A child crash/OOM never takes
+    the worker down; the parent heartbeat thread keeps writing throughout.
+    Timeouts propagate raw (transient: the worker may retry). No streaming
+    progress in v1 — callers bracket with stage reports instead.
+    """
+    import json
+    import os
+    import sys
+    import tempfile
+
+    from open_notebook.utils.subprocess_utils import run_heavy_operation
+
+    allowed, reason = gate_training("tiny_train")
+    if not allowed:
+        raise InvalidInputError(f"tiny_train denied by tier gate: {reason}")
+
+    payload = {"text": text, "max_steps": max_steps, "max_seconds": max_seconds}
+    fd, path = tempfile.mkstemp(suffix=".tiny-train.json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        res = await run_heavy_operation(
+            [sys.executable, "-m", "open_notebook.training.tiny_worker", path],
+            timeout=timeout or (int(max_seconds) + ISOLATION_TIMEOUT_MARGIN_S),
+        )
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if res["returncode"] != 0:
+        tail = (res.get("stderr") or "").strip().splitlines()[-1:]
+        raise RuntimeError(f"tiny worker failed: {' '.join(tail)}")
+    try:
+        lines = [ln for ln in (res.get("stdout") or "").splitlines() if ln.strip()]
+        parsed = json.loads(lines[-1])
+    except (IndexError, ValueError) as e:
+        raise RuntimeError(f"tiny worker returned bad output: {e}") from e
+    if not isinstance(parsed, dict):
+        raise RuntimeError("tiny worker returned bad output: not a dict")
+    return parsed
