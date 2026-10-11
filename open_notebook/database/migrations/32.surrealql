@@ -1,0 +1,15 @@
+-- Migration 32: FSRS persistence for the review system (P4).
+-- flashcard.fsrs_json holds the py-fsrs Card JSON (null until first review);
+-- revlog rows are minimal columns (optimizer input reconstructs from the
+-- rating sequence + timestamps later).
+
+DEFINE FIELD IF NOT EXISTS fsrs_json ON TABLE flashcard TYPE option<object>;
+
+DEFINE TABLE IF NOT EXISTS revlog SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS card_id ON TABLE revlog TYPE string;
+DEFINE FIELD IF NOT EXISTS rating ON TABLE revlog TYPE string;
+DEFINE FIELD IF NOT EXISTS reviewed_at ON TABLE revlog DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS duration_ms ON TABLE revlog TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS created ON revlog DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON revlog DEFAULT time::now() VALUE time::now();

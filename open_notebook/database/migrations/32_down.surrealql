@@ -1,0 +1,4 @@
+-- Migration 32 rollback: remove revlog table and the fsrs_json field.
+
+REMOVE TABLE IF EXISTS revlog;
+REMOVE FIELD IF EXISTS fsrs_json ON TABLE flashcard;
