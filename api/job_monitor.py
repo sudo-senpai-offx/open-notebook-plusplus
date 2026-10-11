@@ -7,9 +7,10 @@ from typing import Callable, Dict, Optional, Set
 from loguru import logger
 
 from open_notebook.database.repository import ensure_record_id, repo_query
+from open_notebook.utils.job_control import ACTIVE_STATUSES, is_stale
 from open_notebook.utils.notify import JobEvent, notify_job_event
 
-ACTIVE_STATUSES = ("new", "running")
+__all__ = ["ACTIVE_STATUSES", "is_stale", "JobMonitor"]
 
 
 def _get_stale_threshold() -> int:
@@ -24,19 +25,6 @@ def _get_monitor_interval() -> int:
         return int(os.getenv("OPEN_NOTEBOOK_JOB_MONITOR_SECONDS", "60"))
     except Exception:
         return 60
-
-
-def is_stale(row: Dict, threshold_seconds: int, now: datetime) -> bool:
-    hb = row.get("heartbeat_at")
-    if not hb:
-        return True
-    try:
-        ts = datetime.fromisoformat(str(hb))
-    except ValueError:
-        return True
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    return (now - ts).total_seconds() > threshold_seconds
 
 
 class JobMonitor:

@@ -189,3 +189,22 @@ def get_exit_code_from_exception(exc: Exception) -> int:
 
 def is_oom_exception(exc: Exception) -> bool:
     return get_exit_code_from_exception(exc) == 137
+
+
+#: Command statuses that hold the worker (shared by the API job monitor and
+#: the idle-hibernate lease guard so both agree on what "active" means).
+ACTIVE_STATUSES = ("new", "running")
+
+
+def is_stale(row: Dict, threshold_seconds: int, now: datetime) -> bool:
+    """Whether a command row's heartbeat is older than the stale threshold."""
+    hb = row.get("heartbeat_at")
+    if not hb:
+        return True
+    try:
+        ts = datetime.fromisoformat(str(hb))
+    except ValueError:
+        return True
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (now - ts).total_seconds() > threshold_seconds
