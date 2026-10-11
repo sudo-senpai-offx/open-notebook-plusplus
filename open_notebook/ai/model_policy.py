@@ -7,6 +7,15 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
+_HIBERNATE_IDLE_SECONDS_DEFAULT = 600
+
+
+def _parse_hibernate_idle_seconds() -> int:
+    try:
+        return int(os.environ.get("OPEN_NOTEBOOK_HIBERNATE_IDLE_SECONDS", "600"))
+    except (TypeError, ValueError):
+        return _HIBERNATE_IDLE_SECONDS_DEFAULT
+
 
 def get_policy_config() -> Dict[str, Any]:
     return {
@@ -32,6 +41,17 @@ def get_policy_config() -> Dict[str, Any]:
         ).lower()
         in ("1", "true", "yes", "on"),
         "ALLOW_LORA": os.environ.get("OPEN_NOTEBOOK_ALLOW_LORA", "false").lower()
+        in ("1", "true", "yes", "on"),
+        # Hibernate policy (T3): inert config until a governor reads it.
+        # Disabled by default so no existing deployment changes behavior.
+        "HIBERNATE_ENABLE": os.environ.get(
+            "OPEN_NOTEBOOK_HIBERNATE_ENABLE", "false"
+        ).lower()
+        in ("1", "true", "yes", "on"),
+        "HIBERNATE_IDLE_SECONDS": _parse_hibernate_idle_seconds(),
+        "HIBERNATE_STOP_MEDIA": os.environ.get(
+            "OPEN_NOTEBOOK_HIBERNATE_STOP_MEDIA", "true"
+        ).lower()
         in ("1", "true", "yes", "on"),
         "USE_ROUTER": os.environ.get("USE_ROUTER", "false").lower()
         in ("1", "true", "yes", "on"),
@@ -66,3 +86,15 @@ def allow_tiny_train() -> bool:
 
 def allow_lora() -> bool:
     return get_policy_config()["ALLOW_LORA"]
+
+
+def hibernate_enabled() -> bool:
+    return get_policy_config()["HIBERNATE_ENABLE"]
+
+
+def hibernate_idle_seconds() -> int:
+    return get_policy_config()["HIBERNATE_IDLE_SECONDS"]
+
+
+def hibernate_stop_media() -> bool:
+    return get_policy_config()["HIBERNATE_STOP_MEDIA"]
