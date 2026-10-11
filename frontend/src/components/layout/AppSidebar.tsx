@@ -32,6 +32,7 @@ import {
   Mic,
   Bot,
   Brain,
+  Timer,
   Shuffle,
   Settings,
   LogOut,
@@ -64,6 +65,7 @@ const getNavigation = (t: TFunction) => [
     items: [
       { name: t('navigation.podcasts'), href: '/podcasts', icon: Mic, iconClass: 'text-mauve' },
       { name: t('navigation.training'), href: '/training', icon: Brain, iconClass: undefined },
+      { name: t('navigation.focus'), href: '/focus', icon: Timer, iconClass: undefined },
     ],
   },
   {
