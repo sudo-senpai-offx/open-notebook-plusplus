@@ -65,6 +65,7 @@ Training flow: ? (no trainer exists; tier gate → subprocess/sidecar → artifa
 - 2026-10-11 · chosen · T5 worker command: train_tiny text-in/stats-out, heartbeats bracket isolation, permanent denials vs transient failures (commit 18d3005). Next: (b) UI draining banner.
 - 2026-10-11 · chosen · UI draining banner: types + mapping + non-blocking ConnectionGuard banner, 180 frontend tests green, build clean (commit 9c22a4b). Next: training UI (b2), action governor+wake, sidecar, stabilisation.
 - 2026-10-11 · chosen · Training section UI: /training route + job submit/poll/denial, sidebar Create entry, all 14 locales keyed (English mirror), 182 frontend tests green, build clean (commit 8f64181). Next: action governor+wake, sidecar, stabilisation.
+- 2026-10-11 · stabilisation live: backend 1151 + mypy-207 clean, frontend 182 + tsc + build clean; live stack (surrealdb/API/worker) drains real backlog; train_tiny E2E submitted, completing via FIFO; launch script ~/bin/open-notebook.sh gains --sse2.
 - 2026-10-11 · chosen · Governor sleep/wake: unix socket, draining-backed worker stop, rollback on failure, authed wake/state endpoints (commit 90aaebf). Next: sidecar build, stabilisation.
 
 ## Unknowns

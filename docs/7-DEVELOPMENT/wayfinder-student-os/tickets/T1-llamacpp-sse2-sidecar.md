@@ -30,6 +30,8 @@ Sidecar build is a later implementation slice, not this ticket.
   uses zero apt (prebaked toolchain + pip cmake + git clone). Main-image
   rebuilds may hit the same filter; stabilisation must use cached layers.
 - Routing hook (`ALLOW_LLAMACPP_SSE2`) still unwired — next slice.
+- Routing hook WIRED (2026-10-11, commit efa233e): sub-3GB tiers route
+  chat/transform via openai-compatible to LLAMACPP_SSE2_URL, host fallback.
 
 ## Question
 
