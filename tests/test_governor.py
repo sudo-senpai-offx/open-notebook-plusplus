@@ -20,10 +20,10 @@ from api.governor import evaluate
 
 
 class _NoopRunner:
-    async def stop(self, program="worker"):
+    async def stop(self, program="worker") -> str:
         raise AssertionError("must not stop in pressure tests")
 
-    async def start(self, program="worker"):
+    async def start(self, program="worker") -> str:
         raise AssertionError("must not start in pressure tests")
 
 

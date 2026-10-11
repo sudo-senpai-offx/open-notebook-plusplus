@@ -22,13 +22,15 @@ class FakeRunner:
         self.actions = []
         self.fail_stop = fail_stop
 
-    async def stop(self, program="worker"):
+    async def stop(self, program="worker") -> str:
         self.actions.append(("stop", program))
         if self.fail_stop:
             raise RuntimeError("supervisor unreachable")
+        return "ok"
 
-    async def start(self, program="worker"):
+    async def start(self, program="worker") -> str:
         self.actions.append(("start", program))
+        return "ok"
 
 
 def _idle_rows():

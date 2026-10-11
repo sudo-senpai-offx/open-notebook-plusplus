@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Protocol, cast
 
 from loguru import logger
 
@@ -108,6 +108,13 @@ async def _fetch_recent() -> list:
         return []
 
 
+class Runner(Protocol):
+    """Control seam for supervisord programs. Doubles match structurally."""
+
+    async def stop(self, program: str = "worker") -> str: ...
+    async def start(self, program: str = "worker") -> str: ...
+
+
 class SupervisorRunner:
     """Stop/start supervisord programs. Injectable seam for tests."""
 
@@ -156,7 +163,7 @@ class Governor:
     def __init__(
         self,
         interval: Optional[float] = None,
-        runner: Optional[SupervisorRunner] = None,
+        runner: Optional[Runner] = None,
     ) -> None:
         self._interval = interval if interval is not None else _get_tick_seconds()
         self._runner = runner if runner is not None else SupervisorRunner()
