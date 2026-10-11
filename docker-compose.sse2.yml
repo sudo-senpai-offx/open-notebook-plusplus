@@ -1,0 +1,25 @@
+# Opt-in no-AVX inference sidecar (T1). Never in the default up path:
+#   docker compose -f docker-compose.yml -f docker-compose.sse2.yml --profile sse2 up -d
+# Host Ollama stays the default backend; the ALLOW_LLAMACPP_SSE2 routing hook
+# is a later slice. Models live in ./models (or a portable-drive mount), never
+# baked into the image.
+
+services:
+  llamacpp-sse2:
+    build:
+      context: ./sidecars/llamacpp-sse2
+      dockerfile: Dockerfile.sse2
+    image: llamacpp-sse2:local
+    profiles: ["sse2"]
+    ports:
+      - "127.0.0.1:8099:8080"
+    environment:
+      - LLAMA_ARG_MODEL=/models/qwen2.5-0.5b-instruct-q2_k.gguf
+      - LLAMA_ARG_HOST=0.0.0.0
+      - LLAMA_ARG_CTX_SIZE=1024
+      - LLAMA_ARG_THREADS=2
+      - LLAMA_ARG_THREADS_BATCH=2
+      - LLAMA_ARG_USE_MMAP=true
+    volumes:
+      - ./sidecars/llamacpp-sse2/models:/models:ro
+    restart: "no"

@@ -9,6 +9,7 @@ docker.env
 notebook_data/
 ollama_data/
 whisper_models/
+sidecars/llamacpp-sse2/models/
 # Python-specific
 *.py[cod]
 __pycache__/
