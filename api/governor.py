@@ -67,6 +67,7 @@ def evaluate(
     rows: List[Dict[str, Any]],
     now: datetime,
     stale_threshold: int = 300,
+    focus_open: int = 0,
 ) -> Dict[str, Any]:
     """Decide what the governor would do. Never acts; returns the verdict."""
     if not enabled:
@@ -78,6 +79,12 @@ def evaluate(
             "action": "vetoed",
             "reason": f"{len(blocking)} active job(s): {', '.join(names)}",
             "blocking": len(blocking),
+        }
+    if focus_open > 0:
+        return {
+            "action": "vetoed",
+            "reason": f"{focus_open} open focus session(s) hold the machine",
+            "blocking": focus_open,
         }
     last = _last_activity(rows)
     if last is None:
@@ -106,6 +113,21 @@ async def _fetch_recent() -> list:
     except Exception as e:
         logger.debug(f"governor: fetch_recent failed: {e}")
         return []
+
+
+async def _count_open_sessions() -> int:
+    """Open focus sessions (P5 lease). Fail-closed to 0 with a debug log:
+    an unreadable table must not veto hibernate forever."""
+    try:
+        rows = await repo_query(
+            "SELECT count() FROM focus_session WHERE status = 'running' GROUP ALL"
+        )
+        if rows and isinstance(rows[0].get("count"), int):
+            return rows[0]["count"]
+        return 0
+    except Exception as e:
+        logger.debug(f"governor: focus count failed: {e}")
+        return 0
 
 
 class Runner(Protocol):
@@ -180,12 +202,14 @@ class Governor:
         except Exception:
             stale_threshold = 300
         rows = await _fetch_recent()
+        focus_open = await _count_open_sessions()
         decision = evaluate(
             enabled=hibernate_enabled(),
             idle_seconds=hibernate_idle_seconds(),
             rows=rows or [],
             now=now,
             stale_threshold=stale_threshold,
+            focus_open=focus_open,
         )
         # T7: warn-only pressure note. Never changes the action; enforcement
         # stays out until triggers are proven.

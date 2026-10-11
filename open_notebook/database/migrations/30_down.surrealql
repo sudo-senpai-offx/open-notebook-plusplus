@@ -1,0 +1,3 @@
+-- Migration 30 rollback: remove focus_session table.
+
+REMOVE TABLE IF EXISTS focus_session;

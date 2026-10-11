@@ -1,0 +1,14 @@
+-- Migration 30: focus_session table for pomodoro session leases (P5).
+-- A running focus session vetoes hibernate like a leased worker job.
+-- Sessions are immutable once ended (done/cancelled); history is append-only.
+
+DEFINE TABLE IF NOT EXISTS focus_session SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS notebook_id ON TABLE focus_session TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS preset ON TABLE focus_session TYPE string;
+DEFINE FIELD IF NOT EXISTS planned_seconds ON TABLE focus_session TYPE int;
+DEFINE FIELD IF NOT EXISTS status ON TABLE focus_session TYPE string;
+DEFINE FIELD IF NOT EXISTS started_at ON TABLE focus_session TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS ended_at ON TABLE focus_session TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON focus_session DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON focus_session DEFAULT time::now() VALUE time::now();
