@@ -9,6 +9,16 @@ services:
       - ./surreal_data:/mydata
     environment:
       - SURREAL_EXPERIMENTAL_GRAPHQL=true
+      # B4 low-memory envelope (512MiB/1c): raw byte counts only — v2
+      # silently ignores MiB suffixes. HNSW default alone is 256MiB.
+      - SURREAL_ROCKSDB_BLOCK_CACHE_SIZE=33554432
+      - SURREAL_ROCKSDB_MAX_OPEN_FILES=256
+      - SURREAL_HNSW_CACHE_SIZE=33554432
+      - SURREAL_ROCKSDB_WRITE_BUFFER_SIZE=16777216
+      - SURREAL_ROCKSDB_MAX_WRITE_BUFFER_NUMBER=2
+      - SURREAL_ROCKSDB_MIN_WRITE_BUFFER_NUMBER_TO_MERGE=2
+      - SURREAL_ROCKSDB_JOBS_COUNT=2
+      - SURREAL_ROCKSDB_THREAD_COUNT=1
     restart: always
     pull_policy: always
 
