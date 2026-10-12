@@ -32,6 +32,7 @@ from .podcast_commands import generate_podcast_command
 from .site_commands import crawl_site_command
 from .source_commands import process_source_command
 from .training_commands import train_tiny_command
+from .vault_commands import ingest_vault_command
 
 __all__ = [
     # Embedding commands
@@ -44,4 +45,5 @@ __all__ = [
     "process_source_command",
     "crawl_site_command",
     "train_tiny_command",
+    "ingest_vault_command",
 ]
