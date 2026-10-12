@@ -162,3 +162,22 @@ async def notify_job_event(event: JobEvent, job: Dict) -> None:
         return
     _PENDING.add(task)
     task.add_done_callback(_PENDING.discard)
+
+
+async def notify_digest(text: str) -> None:
+    """Log a digest line always; push to ntfy only when configured.
+
+    Same zero-footprint contract as job events: unset URL means no client,
+    no task, no network.
+    """
+    logger.info(f"digest: {text}")
+    url = _notify_url()
+    if not url:
+        return
+    try:
+        task = asyncio.create_task(_post(url, {"message": text}, "digest"))
+    except RuntimeError as e:  # no running loop — cannot fire-and-forget
+        logger.warning(f"notify: no event loop to deliver digest: {e}")
+        return
+    _PENDING.add(task)
+    task.add_done_callback(_PENDING.discard)

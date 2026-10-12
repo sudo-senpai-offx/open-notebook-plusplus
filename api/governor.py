@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Protocol, cast
 
 from loguru import logger
@@ -23,8 +23,10 @@ from open_notebook.ai import model_policy
 from open_notebook.ai.model_policy import hibernate_enabled, hibernate_idle_seconds
 from open_notebook.database.repository import repo_query
 from open_notebook.domain.service_state import ServiceState
+from open_notebook.review import store as review_store
 from open_notebook.utils import resource_budget
 from open_notebook.utils.lease_guard import blocking_leases
+from open_notebook.utils.notify import notify_digest
 
 _RECENT_LIMIT = 25
 _SUPERVISOR_SOCKET = "/tmp/supervisor.sock"
@@ -190,6 +192,7 @@ class Governor:
         self._interval = interval if interval is not None else _get_tick_seconds()
         self._runner = runner if runner is not None else SupervisorRunner()
         self._asleep = False
+        self._last_digest: Optional[date] = None
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
@@ -221,12 +224,26 @@ class Governor:
                 f" | memory pressure {pressure}% >= warn line {warn_at}%"
                 " (warn-only, no action)"
             )
-        logger.info(
-            f"governor: {decision['action']} — {decision['reason']} (observe-only)"
-        )
+        logger.info(f"governor: {decision['action']} — {decision['reason']}")
+        await self._maybe_digest(now)
         if decision["action"] == "would_hibernate" and not self._asleep:
             await self._sleep()
         return decision
+
+    async def _maybe_digest(self, now: datetime) -> None:
+        """One due-digest per UTC day, only when cards are due. Independent
+        of the hibernate flag: the digest is about reviews, not sleeping."""
+        today = now.astimezone(timezone.utc).date()
+        if self._last_digest == today:
+            return
+        try:
+            due = await review_store.list_due_cards(limit=1000)
+        except Exception as e:
+            logger.debug(f"governor: digest due-query failed: {e}")
+            return
+        self._last_digest = today
+        if due:
+            await notify_digest(f"{len(due)} card(s) due for review")
 
     async def _sleep(self) -> None:
         """Set draining, then stop the worker. Rolls the flag back if the
