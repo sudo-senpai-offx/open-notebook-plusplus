@@ -363,3 +363,81 @@ missing aarch64 wheel (needs a decision) or installing
 `build-essential`/`cmake` (~400 MB). Do not let it silently fall back to
 a Rust build the way pip did with `surrealdb`.
 
+
+## 9. Boot the API on-device
+
+**Confirmed:** `uv sync --frozen --no-dev` installed **195 packages into
+864 MB** of `.venv` in 53 s, all with aarch64 wheels except two trivial
+pure-Python sdists (`langdetect`, `odfpy`). No torch, transformers or
+sentence-transformers — no local embedding model to carry. Imports of
+`fastapi`, `surrealdb`, `fsrs`, `genanki` verified.
+
+Two proot/gotchas that cost time, both recurring themes:
+
+- **uv hardlinks fail under proot** (`Operation not permitted`). Export
+  `UV_LINK_MODE=copy` in every shell that runs uv, or every sync dies on
+  `error: Failed to install: ... Operation not permitted (os error 1)`.
+- **Do not `rm -rf .venv` to "clean" a failed sync.** The venv's
+  interpreter is the only thing satisfying `.python-version` 3.12; delete
+  it and uv cannot find a 3.12 (guest has 3.14, Termux has 3.13, and
+  `uv python install` fails — see below). Re-point instead:
+  `export UV_PYTHON=/opt/python/bin/python3.12`.
+
+**`uv python install` does not work inside proot.** It reports
+`No download found for request: cpython-3.12-linux-aarch64-none` — the
+`-none` means uv classified the target as having no libc, i.e. it read
+the Android environment rather than the guest's glibc. Same misdetection
+makes it list Termux's interpreters as `linux-aarch64-none`. Workaround
+(worked): fetch python-build-standalone directly. Verified current asset
+(2026-10-13): `cpython-3.12.15+20261009-aarch64-unknown-linux-gnu-install_only.tar.gz`,
+49.9 MB. Extract to `/opt/python`, then symlink
+`/usr/local/bin/python3.12`. `uv venv`/`uv sync` then accept it fine —
+only the download-URL construction was broken.
+
+### 9a. `.env`
+
+Not committed (gitignored). Generate a **fresh** encryption key
+on-device — never copy the dev box's, which is a live secret:
+
+```sh
+cd /root/app/open-notebook-plusplus
+umask 077
+OPEN_NOTEBOOK_ENCRYPTION_KEY=$(/opt/python/bin/python3.12 -c 'import secrets;print(secrets.token_urlsafe(32))')
+printf '%s\n' \
+  "OPEN_NOTEBOOK_ENCRYPTION_KEY=$OPEN_NOTEBOOK_ENCRYPTION_KEY" \
+  'SURREAL_URL=ws://127.0.0.1:8000/rpc' \
+  'SURREAL_USER=root' \
+  'SURREAL_PASSWORD=root' \
+  'SURREAL_NAMESPACE=open_notebook' \
+  'SURREAL_DATABASE=open_notebook' \
+  'AUTO_MODEL_POLICY=offline-first' \
+  'CLOUD_ALLOWED=false' \
+  'PREFER_LOCAL=true' \
+  'DEGRADE_GRACEFULLY=true' \
+  'TIME_BUDGETS_ENFORCED=true' \
+  'API_HOST=0.0.0.0' \
+  'MINI_ONLY=true' \
+  'OPEN_NOTEBOOK_WORKER_MAX_TASKS=1' \
+  'OPEN_NOTEBOOK_EMBEDDING_BATCH_SIZE=8' > .env
+chmod 600 .env
+```
+
+`MINI_ONLY` already defaults to true (`open_notebook/ai/model_policy.py:42`);
+stated explicitly so the phone's intent is visible in one place. Batch
+size 8 matches the B1 compose alignment (the code default is 50).
+
+### 9b. Run API + worker
+
+`supervisor` is **not** in the venv (the Dockerfile pip-installs it
+separately), so run the two programs directly — matching
+`supervisord.conf`'s commands minus the `uv run` wrapper:
+
+```sh
+nohup .venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 5055 > /root/api.log 2>&1 &
+nohup .venv/bin/surreal-commands-worker --import-modules commands --max-tasks 1 > /root/worker.log 2>&1 &
+sleep 20
+curl -s http://127.0.0.1:5055/health; echo
+```
+
+`--host 0.0.0.0` so the phone browser (and later the LAN PWA) can reach
+it, not just loopback.
