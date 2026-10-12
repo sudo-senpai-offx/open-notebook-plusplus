@@ -208,3 +208,34 @@ RSS + possibly deferring index build to job end.
   `https://github.com/surrealdb/surrealdb/issues/7337`
 - Block-cache configurability precedent (`SURREAL_ROCKSDB_BLOCK_CACHE_SIZE`, 32MiB example)
   (secondary — GitHub issue): `https://github.com/surrealdb/surrealdb/issues/5541`
+
+## Appendix — SD680 on-device boot (2026-10-13, proot Ubuntu)
+
+`surreal` v3.3.3 linux/arm64 (the official installer serves v3; the
+compose stack pins `surrealdb/surrealdb:v2`). RocksDB store starts on
+phone flash storage inside proot with the same raw-byte B4 envelope as
+`docker-compose.yml`: 64 MB total memory limit, 32 MB block cache, 1
+background thread, 2 jobs. Measured RAM cost ~90 MB (available 2905 →
+2822 MB on a 7618 MB device) while a 390 MB Qwen2.5-0.5B-Q2_K was also
+mappable. v3's *defaults* are the hazard: 3.0 GB total limit / 2.9 GB
+block cache = ~92% of RAM, unshippable alongside a local model.
+
+Route compatibility: `/rpc` is unchanged in v3 (WebSocket RPC still
+served at `/rpc`, plus `POST /rpc` and gRPC since 3.3.0), so our
+`SURREAL_URL=ws://host:8000/rpc` shape survives. `/health` returns
+`200` with `content-length: 0` — a bare `curl -s` prints nothing and
+looks like a failure; docs examples use `curl -I`. Client/server
+wire compatibility (python `surrealdb==2.0.0` vs server 3.3.3) is
+still being probed; `/health` and `/status` differ in v3 semantics
+(status = process/listener liveness, health = storage reachability),
+which matters if the compose healthcheck is ever ported.
+
+Delivery note: the proot Ubuntu userland needed `ca-certificates`, whose
+`.deb` filename contains `~`. apt percent-escapes it to `%7e`, which
+this network 403s; curl does not escape it. That asymmetry is the
+general escape hatch for apt on this network. SurrealDB will not start
+at all without a TLS trust store, so this is not cosmetic. Separately,
+proot-distro exposes the entire Termux prefix inside the guest
+(`/data/data/com.termux/files/usr/...` resolves from inside proot),
+which makes host-side bundles reachable without any path arithmetic on
+the guest rootfs.
