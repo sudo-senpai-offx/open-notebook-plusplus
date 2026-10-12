@@ -552,3 +552,66 @@ wheel directly:
 person to configure a Redis checkpointer would have hit an unexplained
 `ImportError`. Import smoke tests cannot detect this class of damage —
 the RECORD sweep is the only complete check, and it costs ~20 s.
+
+## 10. CORRECTION — v3 speaks the protocol but cannot run our schema
+
+Section 5 above concluded "no server pin is required". **That was
+over-generalised and is now falsified.** The `PROBE_OK` probe covered
+`signin` / `use` / `CREATE` / `SELECT` — plain CRUD. The app's first
+real statement is a *migration*, and v3 rejects our SurrealQL:
+
+```
+RuntimeError: Failed to run database migrations:
+Parse error: FLEXIBLE must be specified after TYPE
+1 | ...LE source FLEXIBLE TYPE option<object>; DEFINE FIELD IF NOT EXISTS title O...
+```
+
+SurrealDB **v3 changed the grammar**: `FLEXIBLE` must now follow `TYPE`.
+Our migrations are v2-era, so the API dies at startup (`main.py:226`)
+and the worker then reports `NotFoundError: The table 'command' does not
+exist` — a symptom, not a cause.
+
+Distinguish the two layers, which a single probe conflated:
+
+| Layer | v3.3.3 + client 2.0.0 |
+|---|---|
+| RPC transport (`/rpc`, auth, `use`, CRUD) | works — `PROBE_OK` |
+| SurrealQL dialect (schema DDL) | **breaks** — migrations unrunnable |
+
+So the v3 question is settled in the opposite direction: **pin v2.**
+This is a stronger reason than the data-directory migration argument
+recorded in `research-surreal-lowmem.md` — that one was "unsafe to
+upgrade", this one is "cannot run at all". Porting the migrations to v3
+syntax is a real project, not a config flip.
+
+### 10a. Install the v2 server on-device
+
+Release verified on GitHub: `v2.7.0` (2026-09-28), asset
+`surreal-v2.7.0.linux-arm64.tgz`, 23.2 MB (note `arm64`, not
+`aarch64`, in the asset name).
+
+```sh
+# stop the v3 server first (Ctrl+C in its Termux session) — it holds :8000
+mv /usr/local/bin/surreal /usr/local/bin/surreal-v3
+cd /tmp
+curl -fSL --retry 5 --retry-all-errors -o s2.tgz \
+  'https://github.com/surrealdb/surrealdb/releases/download/v2.7.0/surreal-v2.7.0.linux-arm64.tgz'
+tar xzf s2.tgz && mv surreal /usr/local/bin/surreal
+surreal version   # expect 2.7.0 for linux on aarch64
+```
+
+Start on a **fresh** data dir — the existing store was written by v3 and
+records `version=3.3.3` in its metadata:
+
+```sh
+mv ~/snb-data ~/snb-data-v3      # keeps the v3 store; only holds snb_probe
+mkdir -p ~/snb-data
+SURREAL_ROCKSDB_BLOCK_CACHE_SIZE=33554432 SURREAL_HNSW_CACHE_SIZE=33554432 \
+SURREAL_ROCKSDB_WRITE_BUFFER_SIZE=16777216 SURREAL_ROCKSDB_MAX_WRITE_BUFFER_NUMBER=2 \
+SURREAL_ROCKSDB_JOBS_COUNT=2 SURREAL_ROCKSDB_THREAD_COUNT=1 \
+surreal start --user root --pass root rocksdb:~/snb-data/test.db
+```
+
+Then restart the API and worker. Both the v2 and v3 binaries stay on the
+device (`surreal`, `surreal-v3`) so the dialect difference can be
+re-tested later without another download.

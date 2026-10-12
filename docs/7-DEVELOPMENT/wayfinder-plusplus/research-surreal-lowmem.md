@@ -268,3 +268,33 @@ quietly rejects every wheel, falls back to the sdist, and tries to
 build Rust via maturin against `aarch64-unknown-linux-android` — not a
 rustup target. The symptom reads like an ARM/Rust problem; the cause is
 PATH. Always `/usr/bin/python3 -m pip --only-binary :all:` in the guest.
+
+### Falsified: SurrealDB v3 cannot run this schema
+
+The SDK/server probe above (`PROBE_OK`) is real but narrow. It covered
+signin, `use`, `CREATE`, `SELECT` — wire protocol only. The first
+statement the app actually issues is a migration, and v3 rejects it:
+
+```
+Parse error: FLEXIBLE must be specified after TYPE
+...LE source FLEXIBLE TYPE option<object>; ...
+```
+
+v3 reordered the grammar: `FLEXIBLE` now follows `TYPE`. Every
+`DEFINE FIELD ... FLEXIBLE TYPE ...` in the migration set is invalid
+under v3, so `main.py:226` raises and the API never starts; the worker
+then reports `NotFoundError: The table 'command' does not exist`, which
+is downstream of the failed migration, not an independent fault.
+
+Conclusion, corrected: **protocol compatibility and dialect
+compatibility are separate claims, and only the first was tested.** A
+CRUD probe cannot establish the second. This raises the bar for any
+future "is vN compatible?" question in this project — probe the actual
+migration statements, or run the migration set against the candidate
+server, not a toy `CREATE`.
+
+It also strengthens the existing recommendation to keep compose on v2:
+previously "upgrading the data directory is risky", now "v3 cannot
+execute our schema at all". Supporting v3 is a porting project
+(rewrite every `FLEXIBLE TYPE` DDL statement and re-test), not a tag
+bump.
