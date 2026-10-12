@@ -1,0 +1,5 @@
+{
+  "_instructions": "Add 10-20 entries from vault notes you know well. Each entry: the question as you'd ask it, the source record id(s) that MUST answer it (copy from the source URL or API), and the search type to run. Entries with \"sample\": true are skipped by the runner. Run: python scripts/retrieval_qc.py evals/quality_fixture.json [--api http://localhost:5055] [--k 5]",
+  "_how_to_find_source_ids": "Open the source in the UI; the id is the last path segment (source:<...>) or GET /api/sources and read ids.",
+  "pairs": []
+}
