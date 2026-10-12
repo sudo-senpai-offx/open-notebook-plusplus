@@ -29,12 +29,8 @@ def _card(**over):
 
 
 def test_inbox_lists_drafts():
-    rows = [
-        {"id": "flashcard:a", "status": "draft", "model": "basic", "front": "Q?"}
-    ]
-    with patch(
-        "api.routers.flashcards.repo_query", new=AsyncMock(return_value=rows)
-    ):
+    rows = [{"id": "flashcard:a", "status": "draft", "model": "basic", "front": "Q?"}]
+    with patch("api.routers.flashcards.repo_query", new=AsyncMock(return_value=rows)):
         response = _client().get("/api/flashcards?status=draft")
     assert response.status_code == 200
     assert response.json()[0]["id"] == "flashcard:a"
@@ -62,7 +58,9 @@ def test_approve_stamps_guid_and_flips():
 
 def test_approve_non_draft_conflicts():
     card = _card(status="approved")
-    with patch("api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)):
+    with patch(
+        "api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)
+    ):
         response = _client().post("/api/flashcards/flashcard:t1/approve")
     assert response.status_code == 409
 
@@ -70,7 +68,9 @@ def test_approve_non_draft_conflicts():
 def test_edit_draft_fields():
     card = _card()
     card.save = AsyncMock()
-    with patch("api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)):
+    with patch(
+        "api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)
+    ):
         response = _client().put(
             "/api/flashcards/flashcard:t1", json={"front": "Better Q?"}
         )
@@ -80,17 +80,19 @@ def test_edit_draft_fields():
 
 def test_edit_approved_conflicts():
     card = _card(status="approved")
-    with patch("api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)):
-        response = _client().put(
-            "/api/flashcards/flashcard:t1", json={"front": "X"}
-        )
+    with patch(
+        "api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)
+    ):
+        response = _client().put("/api/flashcards/flashcard:t1", json={"front": "X"})
     assert response.status_code == 409
 
 
 def test_reject_hard_deletes_draft():
     card = _card()
     card.delete = AsyncMock(return_value=True)
-    with patch("api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)):
+    with patch(
+        "api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)
+    ):
         response = _client().post("/api/flashcards/flashcard:t1/reject")
     assert response.status_code == 200
     assert response.json()["deleted"] is True
@@ -98,7 +100,9 @@ def test_reject_hard_deletes_draft():
 
 def test_reject_approved_points_to_tombstone():
     card = _card(status="approved")
-    with patch("api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)):
+    with patch(
+        "api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)
+    ):
         response = _client().post("/api/flashcards/flashcard:t1/reject")
     assert response.status_code == 409
     assert "tombstone" in response.json()["detail"].lower()
@@ -107,7 +111,44 @@ def test_reject_approved_points_to_tombstone():
 def test_tombstone_approved():
     card = _card(status="approved")
     card.save = AsyncMock()
-    with patch("api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)):
+    with patch(
+        "api.routers.flashcards.Flashcard.get", new=AsyncMock(return_value=card)
+    ):
         response = _client().post("/api/flashcards/flashcard:t1/tombstone")
     assert response.status_code == 200
     assert response.json()["status"] == "tombstoned"
+
+
+def test_create_basic_draft():
+    saved = {}
+
+    async def fake_save(self):
+        saved["model"] = self.model
+        self.id = "flashcard:new"
+
+    with patch("api.routers.flashcards.Flashcard.save", new=fake_save):
+        response = _client().post(
+            "/api/flashcards",
+            json={"model": "basic", "front": "Q?", "back": "A."},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "draft"
+    assert saved["model"] == "basic"
+
+
+def test_create_cloze_needs_text():
+    response = _client().post("/api/flashcards", json={"model": "cloze"})
+    assert response.status_code == 400
+
+
+def test_create_basic_needs_front():
+    response = _client().post("/api/flashcards", json={"model": "basic", "back": "A."})
+    assert response.status_code == 400
+
+
+def test_create_rejects_unknown_model():
+    response = _client().post(
+        "/api/flashcards", json={"model": "image-occlusion", "front": "Q"}
+    )
+    assert response.status_code == 422

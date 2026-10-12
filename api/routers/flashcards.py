@@ -2,7 +2,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from open_notebook.database.repository import repo_query
 from open_notebook.domain.flashcard import Flashcard, content_guid
@@ -20,6 +20,15 @@ class FlashcardEdit(BaseModel):
     back: Optional[str] = None
     cloze_text: Optional[str] = None
     tags: Optional[List[str]] = None
+
+
+class FlashcardCreate(BaseModel):
+    model: str = Field(pattern="^(basic|cloze)$")
+    front: Optional[str] = None
+    back: Optional[str] = None
+    cloze_text: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    source_id: Optional[str] = None
 
 
 def _response(card) -> dict:
@@ -69,6 +78,34 @@ async def list_cards(
     except Exception as e:
         logger.warning(f"flashcard list failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to list cards")
+
+
+@router.post("/flashcards")
+async def create_card(body: FlashcardCreate):
+    """Author a card manually. Always lands as a draft for the approval gate."""
+    if body.model == "basic" and not (body.front or "").strip():
+        raise HTTPException(status_code=400, detail="Basic cards need a front")
+    if body.model == "cloze" and not (body.cloze_text or "").strip():
+        raise HTTPException(status_code=400, detail="Cloze cards need cloze_text")
+    try:
+        card = Flashcard(
+            model=body.model,  # type: ignore[arg-type]
+            front=body.front,
+            back=body.back,
+            cloze_text=body.cloze_text,
+            tags=list(body.tags or []),
+            source_id=body.source_id,
+            status="draft",
+        )
+        await card.save()
+        return _response(card)
+    except InvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.warning(f"flashcard create failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create card")
 
 
 @router.post("/flashcards/{card_id}/approve")
