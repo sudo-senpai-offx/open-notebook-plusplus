@@ -304,3 +304,19 @@ Remaining matrix: Qwen2.5-0.5B in IQ4_XS/IQ3_M (same-arch quant comparison).
 3. Winner goes to a quality gate (fixed prompt set, repetition/degradation
    check) before changing the default; IQ_K only enters via an ik_llama.cpp
    commit-pinned side build, never the Ollama path.
+
+## Appendix B — SD680 on-device bench (2026-10-13, Termux native build)
+
+Snapdragon 680 (Kryo 265), Termux Clang 21, v0.6.0, Qwen2.5-0.5B-Q2_K.
+Feature probes: DOTPROD/SVE/MATMUL_INT8 failed, FMA ok (plain NEON).
+
+| Threads | pp | tg |
+|---|---|---|
+| 2 (pp64/tg16) | 20.55 | 13.59 |
+| 8 (pp512/tg128) | 47.18 | 15.42 |
+
+Reads: 2t phone ≈ 2.6x the Ryzen dev box (SSE2 floor is the bottleneck
+there, not the silicon). SD439 extrapolation (A53, weaker IPC): roughly
+1/3 → mid-single-digit tok/s @8t — above the planning figure. Vehicle 2
+(all-on-device experiment) PROCEEDS to the FastAPI+SurrealDB proot step;
+companion-server+PWA remains the default product.
