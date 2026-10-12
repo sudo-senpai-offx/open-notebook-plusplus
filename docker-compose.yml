@@ -59,7 +59,8 @@ services:
     ports:
       - "9000:9000"
     volumes:
-      - ../whisper_models:/app/models
+      # Overridable for SD-card bulk storage (hot models stay internal).
+      - ${WHISPER_MODELS_DIR:-../whisper_models}:/app/models
     profiles: ["media"]
     restart: always
 

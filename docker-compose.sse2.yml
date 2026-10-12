@@ -30,5 +30,6 @@ services:
       - LLAMA_ARG_THREADS_BATCH=2
       - LLAMA_ARG_USE_MMAP=true
     volumes:
-      - ./sidecars/llamacpp-sse2/models:/models:ro
+      # Overridable: hot GGUFs on internal flash, bulk/archive on SD bind-mount.
+      - ${LLAMACPP_MODELS_DIR:-./sidecars/llamacpp-sse2/models}:/models:ro
     restart: "no"
