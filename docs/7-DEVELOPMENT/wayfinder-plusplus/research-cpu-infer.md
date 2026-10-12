@@ -320,3 +320,12 @@ there, not the silicon). SD439 extrapolation (A53, weaker IPC): roughly
 1/3 → mid-single-digit tok/s @8t — above the planning figure. Vehicle 2
 (all-on-device experiment) PROCEEDS to the FastAPI+SurrealDB proot step;
 companion-server+PWA remains the default product.
+
+### Thermal/RAM verdict (operator report, same device/day)
+
+`free -m`: 7618 total / 2905 available (+3105 buff/cache reclaimable),
+5GB swap; model runs caused no UI smoothness defects, no abnormal heat,
+no sustained-performance decay (6nm big.LITTLE behaves to spec). Verdict:
+RAM and thermals clear vehicle 2 on SD680-class hardware with margin —
+proot stack (~200–400MB API+DB) + 415MB model fits inside available RAM
+without touching swap.
