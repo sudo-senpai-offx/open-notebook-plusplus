@@ -32,7 +32,7 @@ services:
       - OPEN_NOTEBOOK_MINI_MODEL_EMBED=nomic-embed-text:latest
       - OPEN_NOTEBOOK_MINI_MODEL_TRANSFORM=llama3.2:3b-instruct-q4_0
       - OPEN_NOTEBOOK_DOCLING_FAST_PROFILE=true
-      - EMBED_BATCH_SIZE=8
+      - OPEN_NOTEBOOK_EMBEDDING_BATCH_SIZE=8
     volumes:
       - ./notebook_data:/app/data
     extra_hosts:

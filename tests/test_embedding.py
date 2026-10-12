@@ -242,6 +242,22 @@ class TestGenerateEmbedding:
             assert len(result) == 3
 
     @pytest.mark.asyncio
+    async def test_batch_size_env_override(self, monkeypatch):
+        """The compose-tuned variable is honored; garbage falls back to 50."""
+        import importlib
+
+        import open_notebook.utils.embedding as embedding_module
+
+        monkeypatch.setenv("OPEN_NOTEBOOK_EMBEDDING_BATCH_SIZE", "8")
+        importlib.reload(embedding_module)
+        assert embedding_module.EMBEDDING_BATCH_SIZE == 8
+        monkeypatch.setenv("OPEN_NOTEBOOK_EMBEDDING_BATCH_SIZE", "junk")
+        importlib.reload(embedding_module)
+        assert embedding_module.EMBEDDING_BATCH_SIZE == 50
+        monkeypatch.delenv("OPEN_NOTEBOOK_EMBEDDING_BATCH_SIZE", raising=False)
+        importlib.reload(embedding_module)
+
+    @pytest.mark.asyncio
     async def test_batching(self):
         """Test that large input is split into batches of EMBEDDING_BATCH_SIZE."""
         from unittest.mock import AsyncMock, MagicMock, patch
