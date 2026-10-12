@@ -441,3 +441,33 @@ curl -s http://127.0.0.1:5055/health; echo
 
 `--host 0.0.0.0` so the phone browser (and later the LAN PWA) can reach
 it, not just loopback.
+
+### 9c. A failed `uv sync` is not atomic
+
+Observed: the hardlink failure left
+`.venv/lib/python3.12/site-packages/surreal_commands/` containing only
+`cli/`, `core/`, `decorators.py`, `repository/` and **no `__init__.py`**.
+The next sync reported `Installed 195 packages in 53.25s` without
+repairing it. At import time Python resolves such a directory as a
+*namespace package* and reports the misleading:
+
+```
+ImportError: cannot import name 'submit_command' from 'surreal_commands' (unknown location)
+```
+
+`unknown location` is the tell — it means "directory found, no
+`__init__.py`", not "package missing". Verify with
+`ls .venv/lib/python3.12/site-packages/<pkg>/ | head`.
+
+**Do not trust a green "Installed N packages" line after a failed run.**
+Either rebuild (`rm -rf .venv` then sync, safe *only* with
+`UV_PYTHON` re-exported) or repair surgically with
+`uv pip install --python .venv/bin/python --reinstall-package <pkg> <pkg>==<ver>`.
+
+Cheap guard after any sync: import the heavy top-level modules
+explicitly before booting, rather than meeting the first partial at
+runtime.
+
+Note the cost asymmetry: `rm -rf .venv` is only safe because
+`UV_PYTHON` is set. Without it, deleting the venv removes the only
+3.12 interpreter and uv cannot find a replacement (see 9).
