@@ -636,3 +636,60 @@ Vehicle 2 backend status: SurrealDB v2.7.0 + worker + FastAPI in proot,
 `llama-server` native in Termux. Remaining: no UI (the Next.js
 standalone bundle is a separate step, and there is no browser-facing
 surface without it).
+
+## 11. UI access — dev-box frontend, phone as client (route A)
+
+Network topology confirmed: dev box `10.7.105.213` (wlo1, `10.7.96.0/19`)
+and phone `10.7.112.85` — same subnet. Dev box → phone API answered
+`/health` in 155 ms.
+
+**Getting the phone's IP on Android is not a one-liner.** `ifconfig` fails
+(`/proc/net/dev: Permission denied`, blocked since Android 10),
+`iproute2` fails (`Cannot bind netlink socket: Permission denied`), and
+`getprop dhcp.wlan0.ipaddress` is empty on modern Android. What works:
+
+```sh
+.venv/bin/python -c "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(3);s.connect(('10.7.96.1',80));print(s.getsockname()[0])"
+```
+
+A UDP `connect()` sends nothing; the kernel just answers "which local
+address would I use for this route". No `/proc`, no netlink, no root.
+
+### 11a. `INTERNAL_API_URL` is a BUILD-time variable for standalone
+
+`next.config.ts` reads `process.env.INTERNAL_API_URL` inside
+`rewrites()`. For `output: "standalone"` that function is evaluated
+during `next build` and serialised into the routes manifest — setting it
+when `server.js` starts has **no effect**. Symptom when you get it wrong:
+
+```
+Error: connect ECONNREFUSED ::1:5055 ... 127.0.0.1:5055
+```
+
+i.e. HTTP 500 on `/api/*` while the pages themselves render fine.
+Invisible in Docker because the default `http://localhost:5055` is
+correct for a single container — only cross-host setups hit it.
+
+```sh
+cd frontend && INTERNAL_API_URL=http://<phone-ip>:5055 npm run build
+```
+
+### 11b. Assemble and run
+
+Standalone output alone does not serve assets. Mirror the Dockerfile
+(`Dockerfile:117-120`): copy `standalone/` to a run dir, then place
+`.next/static` and `public/` as its siblings.
+
+```sh
+rm -rf /tmp/next-run && mkdir -p /tmp/next-run
+cp -r frontend/.next/standalone/. /tmp/next-run/
+mkdir -p /tmp/next-run/.next
+cp -r frontend/.next/static /tmp/next-run/.next/static
+cp -r frontend/public /tmp/next-run/public
+cd /tmp/next-run && PORT=8502 HOSTNAME=0.0.0.0 node server.js
+```
+
+`HOSTNAME=0.0.0.0` is required — standalone binds loopback by default,
+so the phone cannot reach it. Artifact total **65 MB** (59 MB standalone
++ 6.1 MB static + public), which is also what route B transfers to the
+phone.
