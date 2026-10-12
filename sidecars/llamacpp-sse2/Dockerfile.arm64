@@ -1,0 +1,52 @@
+# ARM64 sidecar: plain-NEON llama-server (Cortex-A53 floor, no dotprod expectations).
+#
+# Portable ARMv8-A build (NEON baseline; KleidiAI dispatches at runtime,
+# the binary runs even on the earliest SSE2-only Athlon 64 steppings. The
+# ALL_VARIANTS=ON alternative (one image, runtime dispatch) is recorded in
+# research-T1-findings.md §3/§6 but not used: floor-first proves the bottom.
+#
+# Pinned revision: v0.6.0 (>= 2025-04-21, includes PR #12871 — GGML_NATIVE=OFF
+# alone is NOT sufficient before it). Verify pin:
+#   https://api.github.com/repos/ggml-org/llama.cpp/tags
+#
+# ZERO APT anywhere: this build environment 403s URLs with %-escapes (half
+# the Debian archive). Build tools come prebaked (python:bookworm image),
+# cmake via pip wheel, sources via git clone. Runtime is bare slim + the
+# one .so the static binary still needs (libgomp), copied from the build.
+#
+# Models are NOT baked in: mount ./models (or a portable drive) at /models.
+# Server args come from LLAMA_ARG_* env (see docker-compose.sse2.yml).
+
+ARG LLAMA_CPP_REF=v0.6.0
+
+FROM python:3.12-bookworm AS build
+ARG LLAMA_CPP_REF
+RUN pip install --no-cache-dir "cmake==3.30.2" && cmake --version
+WORKDIR /src
+RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" \
+        https://github.com/ggml-org/llama.cpp.git . \
+    && git rev-parse --short HEAD
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DGGML_NATIVE=OFF \
+        -DGGML_BACKEND_DL=OFF \
+        -DLLAMA_CURL=OFF \
+        -DLLAMA_BUILD_TESTS=OFF \
+        -DLLAMA_BUILD_EXAMPLES=OFF \
+        -DLLAMA_BUILD_SERVER=ON \
+    && cmake --build build --config Release -j"$(nproc)" --target llama-server \
+    && strip build/bin/llama-server \
+    && ls -la build/bin/llama-server
+
+FROM debian:bookworm-slim AS runtime
+COPY --from=build /src/build/bin/llama-server /usr/local/bin/llama-server
+# Still needed despite LLAMA_CURL=OFF. Same-bookworm userland: ABI-safe.
+COPY --from=build /usr/lib/x86_64-linux-gnu/libgomp.so.1 /usr/lib/x86_64-linux-gnu/libgomp.so.1
+COPY --from=build /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/libssl.so.3
+COPY --from=build /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3
+# Rendered from LLAMA_ARG_* at container start so one image serves any model.
+ENTRYPOINT ["llama-server"]
+# Port-open probe: no curl in slim and apt is unusable here; the server's own
+# /health is the richer check when curl exists alongside the container.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/8080' || exit 1
