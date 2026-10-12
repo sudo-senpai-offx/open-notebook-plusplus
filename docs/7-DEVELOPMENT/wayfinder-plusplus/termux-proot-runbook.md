@@ -292,3 +292,74 @@ there. Verify with `find "$PREFIX/var/lib/proot-distro/ubuntu" -type f`
 — if it lists only `usr/local/share/ca-certificates/`, it is safe to
 remove that `ubuntu` directory.
 
+## 8. API install step — Python 3.12 via uv
+
+**Why uv and not apt.** `pyproject.toml` declares
+`requires-python = ">=3.11,<3.13"` (the upper bound exists because
+langchain/langgraph 1.x, pydantic 2.9 and numpy 2.4 predate 3.13).
+Ubuntu 26.04 resolute — the only Ubuntu proot-distro currently ships —
+has **no 3.11/3.12/3.13 in the archive at all** (verified against
+`ubuntu:26.04` on the dev box: only `3.14.4-1ubuntu0.2`). So there is no
+apt route to a compatible interpreter. Options rejected:
+
+- deadsnakes PPA for resolute — may not carry 3.12 yet, and needs a GPG
+  key over a network that already fights apt.
+- Re-prooting to Ubuntu 24.04 / Debian 12 (which do carry 3.12 / 3.11) —
+  costs a second proot distro and redoing the SurrealDB + client install.
+- Widening `requires-python` to allow 3.14 — changes the fork's support
+  matrix and would need the full test battery re-run on 3.14 first.
+
+uv is already this project's package manager (`.python-version` = `3.12`,
+`Dockerfile` line 62 runs `uv sync --frozen --no-dev`), and
+`uv python install` fetches a python-build-standalone CPython for
+aarch64. No support-matrix change, and the install path matches CI
+exactly.
+
+### 8a. Prerequisites (git is not installed yet)
+
+```sh
+apt-get install -y --no-install-recommends git curl
+git --version
+/usr/bin/python3 -m pip install --break-system-packages uv
+uv --version
+```
+
+The `uv` binary is standalone, so installing it with Python 3.14 is fine —
+it is only used to *fetch* 3.12.
+
+### 8b. Fetch CPython 3.12
+
+```sh
+uv python install 3.12
+uv python list | head -5
+```
+
+Expect a `cpython-3.12.x-aarch64-unknown-linux-gnu` entry. This is the
+step most likely to fail (new download source); stop and paste the error
+if it does.
+
+### 8c. Clone and sync (only after 8b succeeds)
+
+```sh
+mkdir -p /root/app
+cd /root/app
+git clone https://github.com/sudo-senpai-offx/open-notebook-plusplus.git
+cd open-notebook-plusplus
+uv sync --frozen --no-dev
+```
+
+`.python-version` (3.12) makes uv select the right interpreter and create
+`.venv` on its own. `--frozen` installs exactly `uv.lock`, `--no-dev`
+skips pytest/mypy/ruff — same as the Docker build.
+
+Note: the public fork may lag local commits until they are pushed (see
+`plusplus/main`). Everything up to N2b is published; model-dir
+decoupling, the arm64 Dockerfile and docs may not be. Re-clone or
+`git pull` once the push backlog clears.
+
+**If `uv sync` starts compiling something**, stop and paste the package
+name — the guest has no compiler toolchain, and the fix is either a
+missing aarch64 wheel (needs a decision) or installing
+`build-essential`/`cmake` (~400 MB). Do not let it silently fall back to
+a Rust build the way pip did with `surrealdb`.
+
