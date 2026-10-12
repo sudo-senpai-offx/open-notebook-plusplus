@@ -118,6 +118,48 @@ async def create_note(note_data: NoteCreate):
         raise HTTPException(status_code=500, detail=f"Error creating note: {str(e)}")
 
 
+@router.post("/notes/{note_id}/export")
+async def export_note(note_id: str):
+    """Export one note as vault-ready markdown (frontmatter + content).
+
+    On-demand only: no save hook. Filename embeds the stable note id so
+    multi-device exports stay additive-safe.
+    """
+    import os
+    import re
+
+    try:
+        note = await Note.get(note_id)
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="Note not found")
+    except OpenNotebookError:
+        raise
+    try:
+        slug = (
+            re.sub(r"[^A-Za-z0-9]+", "-", note.title or "untitled").strip("-").lower()
+        )
+        short_id = str(note.id).replace(":", "-") if note.id else "noid"
+        filename = f"{slug or 'untitled'}--{short_id}.md"
+        frontmatter = (
+            "---\n"
+            f"title: {note.title or ''}\n"
+            f"note_type: {note.note_type or ''}\n"
+            f"open_notebook_id: '{note.id}'\n"
+            "---\n\n"
+        )
+        base = os.getenv("OPEN_NOTEBOOK_EXPORT_DIR", "./notebook_export")
+        os.makedirs(base, exist_ok=True)
+        path = os.path.join(base, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(frontmatter + (note.content or ""))
+        return {"id": str(note.id), "filename": filename}
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.warning(f"note export failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to export note")
+
+
 @router.get("/notes/{note_id}", response_model=NoteResponse)
 async def get_note(note_id: str):
     """Get a specific note by ID."""
