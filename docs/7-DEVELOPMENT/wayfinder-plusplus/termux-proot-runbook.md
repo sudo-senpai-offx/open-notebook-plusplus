@@ -500,3 +500,55 @@ No output means all 195 packages are intact.
 Note the `rm -rf .venv` cleanup below is only safe *with*
 `UV_PYTHON` re-exported; without it, deleting the venv also removes the
 only 3.12 interpreter (see 9).
+
+### 9d. Repair loop: derive owners from RECORD, never from a hand-written list
+
+The truncated-hardlink casualties are the files that were *in flight*
+when uv aborted — always `__init__.py` in sub-directories, because those
+are the small files being linked at that moment. Confirmed set on
+SD680: `surreal_commands` (its root `__init__.py`), then
+`cyclopts/docs`, `esperanto/providers`, `langgraph/cache/redis`,
+`numpy/_pyinstaller`, `openai/types/beta/chat`,
+`podcast_creator/resources/streamlit_app/utils`.
+
+**A missing file's owning distribution is not guessable from its path.**
+`langgraph/cache/redis/__init__.py` belongs to `langgraph-checkpoint`,
+not `langgraph` — four distributions share the `langgraph/` namespace
+tree (`grep -l "^langgraph/" *.dist-info/RECORD` on the dev box returns
+four). Repairing by a list of package names written from filenames left
+this one broken across two attempts.
+
+Derive the owners, then clean and reinstall exactly those:
+
+```sh
+cd /root/app/open-notebook-plusplus/.venv/lib/python3.12/site-packages
+DISTRO=$(for r in *.dist-info/RECORD; do
+  while IFS=, read -r f _; do
+    case "$f" in ../../../*) continue;; esac
+    [ -e "$f" ] || echo "${r%%.dist-info/RECORD}"
+  done < "$r"
+done | sort -u)
+echo "dists owning missing files: $DISTRO"
+cd /root/app/open-notebook-plusplus
+export UV_LINK_MODE=copy UV_PYTHON=/opt/python/bin/python3.12
+uv cache clean $DISTRO
+for p in $DISTRO; do uv sync --frozen --no-dev --reinstall-package "$p"; done
+```
+
+Run it as **one pasted block** — `$DISTRO` assigned in one command and
+consumed in another silently expands to nothing when a paste is split,
+which looks like "the repair ran and did nothing".
+
+To settle "install dropped it" vs "RECORD over-reports", inspect the
+wheel directly:
+
+```sh
+.venv/bin/python -m pip download --no-deps -d /tmp/w langgraph-checkpoint==4.2.0
+.venv/bin/python -c "import glob,zipfile;w=glob.glob('/tmp/w/*.whl')[0];print([n for n in zipfile.ZipFile(w).namelist() if 'cache/redis' in n] or 'NOT IN WHEEL')"
+```
+
+**Every affected package imported cleanly the whole time.** `langgraph`'s
+5 KB Redis cache module was simply absent and nothing noticed; the first
+person to configure a Redis checkpointer would have hit an unexplained
+`ImportError`. Import smoke tests cannot detect this class of damage —
+the RECORD sweep is the only complete check, and it costs ~20 s.
