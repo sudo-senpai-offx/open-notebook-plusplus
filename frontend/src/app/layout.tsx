@@ -11,6 +11,7 @@ import { QueryProvider } from "@/components/providers/QueryProvider";
 import { ThemeProvider } from "@/components/providers/ThemeProvider";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { ConnectionGuard } from "@/components/common/ConnectionGuard";
+import { ServiceWorkerRegister } from "@/components/common/ServiceWorkerRegister";
 import { themeScript } from "@/lib/theme-script";
 import { I18nProvider } from "@/components/providers/I18nProvider";
 
@@ -53,6 +54,7 @@ export default function RootLayout({
             <QueryProvider>
               <I18nProvider>
                 <ConnectionGuard>
+                  <ServiceWorkerRegister />
                   {children}
                   <Toaster />
                 </ConnectionGuard>
