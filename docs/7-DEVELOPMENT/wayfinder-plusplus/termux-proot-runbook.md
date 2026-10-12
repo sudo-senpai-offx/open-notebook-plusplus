@@ -693,3 +693,85 @@ cd /tmp/next-run && PORT=8502 HOSTNAME=0.0.0.0 node server.js
 so the phone cannot reach it. Artifact total **65 MB** (59 MB standalone
 + 6.1 MB static + public), which is also what route B transfers to the
 phone.
+
+## 12. Route B — all-on-device UI (COMPLETE)
+
+Route A is dead on this network: phone -> dev-box TCP is blocked while
+ICMP is permitted.
+
+| Test from phone (Termux) | Result |
+|---|---|
+| `ping -c2 10.7.105.213` | 2/2 replies, 60-82 ms, TTL 64 |
+| `curl http://10.7.105.213:8502/` | `code=000`, `remote=` empty, **0.04 s** |
+| arrivals seen by dev box | **zero** connections |
+
+A 40 ms failure with no SYN received is an immediate `EHOSTUNREACH`,
+not a timeout — the kernel has no route for TCP while ICMP goes via the
+gateway. Same `/19` on paper, different forwarding policy. Do not assume
+same-subnet implies mutual reachability.
+
+### 12a. Transfer over USB adb (works regardless of network policy)
+
+Dev box already had `adb 1.0.41` and the phone enumerated
+(`CPH2333T2`). Push to shared storage, then copy into Termux:
+
+```sh
+# dev box
+adb push /tmp/next-run.tar.gz /sdcard/Download/
+adb shell 'md5sum /sdcard/Download/next-run.tar.gz'   # verify before copying
+# phone (Termux)
+termux-setup-storage      # answer y, then grant the permission dialog
+cp /sdcard/Download/next-run.tar.gz ~/
+md5sum ~/next-run.tar.gz
+```
+
+Artifact `21,992,680` bytes compressed, md5
+`315d4667c30f8b1ec4dfa242badcd527`. **Verify on both sides** — the first
+attempt left a 0-byte file (`d41d8cd9...`) from an aborted `nc -l`
+redirect, which looked like a transfer failure but was a stale artifact.
+
+### 12b. Node without installing Node
+
+`nodejs-wheel-binaries==24.19.0` (a transitive dep of `nodeenv`) ships a
+`manylinux_2_28_aarch64` wheel containing a real Node **24.19.0**, already
+installed by `uv sync`. No `apt install nodejs` (~50 MB) required:
+
+```sh
+NODE=/root/app/open-notebook-plusplus/.venv/lib/python3.12/site-packages/nodejs_wheel/bin/node
+$NODE -v    # v24.19.0 on aarch64
+```
+
+### 12c. Run
+
+```sh
+tar xzf /data/data/com.termux/files/home/next-run.tar.gz -C /root/frontend --strip-components=1
+cd /root/frontend
+PORT=8502 HOSTNAME=0.0.0.0 $NODE server.js &
+```
+
+Verified on-device: `GET /` -> 307 -> `/notebooks`, and
+`GET /api/metrics/summary` returns real plusplus schema data through
+Next -> rewrite proxy -> FastAPI -> SurrealDB, all on the phone. The
+build-time `INTERNAL_API_URL=http://10.7.112.85:5055` resolves to the
+phone itself (uvicorn binds `0.0.0.0`), so no rebuild was needed.
+
+### 12d. Vehicle 2 process inventory (SD680)
+
+| Process | Where | RSS |
+|---|---|---|
+| SurrealDB 2.7.0 | proot | 107 MB |
+| FastAPI (uvicorn) | proot | 161 MB |
+| surreal-commands-worker | proot | 139 MB |
+| llama-server | Termux native | 93 MB |
+| Next.js 16.2.6 | proot (venv Node) | not yet measured |
+| **subtotal** | | **~500 MB** |
+
+Against a 2 GB floor this leaves genuine headroom, which is the real
+finding: **a complete notebook OS — LLM server, database, API, worker and
+UI — runs in ~500 MB resident on an 8 GB phone.** The 3 GB SD439 class
+is therefore not obviously excluded, though the llama.cpp figure there
+was extrapolated, never measured.
+
+Remaining gap: no LLM provider is registered in the app, so chat does
+not work yet. llama-server is up on `:8080` but the app needs an
+OpenAI-compatible provider entry pointing at `http://127.0.0.1:8080/v1`.
