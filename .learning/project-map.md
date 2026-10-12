@@ -72,6 +72,7 @@ Training flow: ? (no trainer exists; tier gate → subprocess/sidecar → artifa
 - 2026-10-11 · P5 lease shipped: migration 30 focus_session + endpoints + governor veto (commit 0170c4f, pushed).
 - 2026-10-11 · P5 timer UI shipped: /focus route + countdown/presets/log, static i18n key maps, 195 frontend green (commit 06c169c, pushed).
 - 2026-10-12 · P4 storage shipped: migration 32 live at v32, image rebuilt and verified current (imports ok, train_tiny registered, 30-32 registered), pushed.
+- 2026-10-12 · P8 closed: prune job + daily digest shipped; full-tree sweep green (backend 1227, mypy-245, ruff; frontend 214 + tsc/lint/build); all pushed. Plusplus v1 ticket set complete.
 
 ## Unknowns
 - Lease-state query fields for the governor's lease guard (T3).
