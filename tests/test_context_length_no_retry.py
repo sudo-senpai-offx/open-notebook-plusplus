@@ -107,12 +107,14 @@ class TestRetryBehaviour:
         )
 
     @pytest.mark.asyncio
-    async def test_transient_error_still_uses_full_budget(self, command_id):
-        """Proves the fix narrows retries rather than disabling them."""
+    async def test_transient_error_single_library_attempt(self, command_id):
+        """The library runs one attempt for process_source (B5 budgets live
+        in execute_with_budgets); run_transformation keeps its 5."""
         config = _retry_config(command_id)
 
         attempts = await _count_attempts(
             config, RuntimeError("Failed to commit transaction due to a conflict")
         )
 
-        assert attempts == config.max_attempts
+        expected = 1 if command_id == "open_notebook.process_source" else 5
+        assert attempts == expected

@@ -24,6 +24,7 @@ from open_notebook.utils.job_control import (
     reset_current_command_id,
     set_current_command_id,
 )
+from open_notebook.utils.retry_budgets import execute_with_budgets
 
 try:
     from open_notebook.graphs.source import source_graph
@@ -54,7 +55,10 @@ class SourceProcessingOutput(CommandOutput):
     "process_source",
     app="open_notebook",
     retry={
-        "max_attempts": 15,  # Handle deep queues (workaround for SurrealDB v2 transaction conflicts)
+        # Single library attempt: per-error budgets live in
+        # execute_with_budgets (15x DB conflicts, 3x other transients).
+        # The library keeps logging, visibility, and final-status marking.
+        "max_attempts": 1,
         "wait_strategy": "exponential_jitter",
         "wait_min": 1,
         "wait_max": 120,  # Allow queue to drain
@@ -136,55 +140,72 @@ async def process_source_command(
 
         logger.info(f"Updated source {source.id} with command reference")
 
-        # 3. Process source with all notebooks
-        logger.info(f"Processing source with {len(input_data.notebook_ids)} notebooks")
-
-        await report_progress_record(cmd_id, progress=10, stage="extracting")
-        await raise_if_cancelled(cmd_id)
-        # Execute source_graph with all notebooks.
-        # LangGraph accepts a partial state dict at runtime, but its typed
-        # overloads require the full state type (langgraph typing limitation).
-        # Set the command-id contextvar so graph nodes can report progress /
-        # check for cancellation without threading cmd_id through state.
-        _cmd_token = set_current_command_id(cmd_id)
-        try:
-            result = await source_graph.ainvoke(  # type: ignore[call-overload]
-                {
-                    "content_state": input_data.content_state,
-                    "notebook_ids": input_data.notebook_ids,  # Use notebook_ids (plural) as expected by SourceState
-                    "apply_transformations": transformations,
-                    "embed": input_data.embed,
-                    "source_id": input_data.source_id,  # Add the source_id to the state
-                }
+        # 3. Process source with all notebooks (retry-budgeted attempt).
+        async def _attempt() -> "SourceProcessingOutput":
+            logger.info(
+                f"Processing source with {len(input_data.notebook_ids)} notebooks"
             )
-        finally:
-            reset_current_command_id(_cmd_token)
 
-        processed_source = result["source"]
-        await report_progress_record(cmd_id, progress=90, stage="finalizing")
-        await raise_if_cancelled(cmd_id)
+            await report_progress_record(cmd_id, progress=10, stage="extracting")
+            await raise_if_cancelled(cmd_id)
+            # Execute source_graph with all notebooks.
+            # LangGraph accepts a partial state dict at runtime, but its typed
+            # overloads require the full state type (langgraph typing limitation).
+            # Set the command-id contextvar so graph nodes can report progress /
+            # check for cancellation without threading cmd_id through state.
+            _cmd_token = set_current_command_id(cmd_id)
+            try:
+                result = await source_graph.ainvoke(  # type: ignore[call-overload]
+                    {
+                        "content_state": input_data.content_state,
+                        "notebook_ids": input_data.notebook_ids,  # Use notebook_ids (plural) as expected by SourceState
+                        "apply_transformations": transformations,
+                        "embed": input_data.embed,
+                        "source_id": input_data.source_id,  # Add the source_id to the state
+                    }
+                )
+            finally:
+                reset_current_command_id(_cmd_token)
 
-        # 4. Gather processing results (notebook associations handled by source_graph)
-        # Note: embedding is fire-and-forget (async job), so we can't query the
-        # count here — it hasn't completed yet. The embed_source_command logs
-        # the actual count when it finishes.
-        insights_list = await processed_source.get_insights()
-        insights_created = len(insights_list)
+            processed_source = result["source"]
+            await report_progress_record(cmd_id, progress=90, stage="finalizing")
+            await raise_if_cancelled(cmd_id)
 
-        processing_time = time.time() - start_time
-        embed_status = "submitted" if input_data.embed else "skipped"
-        logger.info(
-            f"Successfully processed source: {processed_source.id} in {processing_time:.2f}s"
-        )
-        logger.info(f"Created {insights_created} insights, embedding {embed_status}")
+            # 4. Gather processing results (notebook associations handled by source_graph)
+            # Note: embedding is fire-and-forget (async job), so we can't query the
+            # count here — it hasn't completed yet. The embed_source_command logs
+            # the actual count when it finishes.
+            insights_list = await processed_source.get_insights()
+            insights_created = len(insights_list)
 
-        await report_progress_record(cmd_id, progress=100, stage="completed")
-        return SourceProcessingOutput(
-            success=True,
-            source_id=str(processed_source.id),
-            embedded_chunks=0,
-            insights_created=insights_created,
-            processing_time=processing_time,
+            processing_time = time.time() - start_time
+            embed_status = "submitted" if input_data.embed else "skipped"
+            logger.info(
+                f"Successfully processed source: {processed_source.id} in {processing_time:.2f}s"
+            )
+            logger.info(
+                f"Created {insights_created} insights, embedding {embed_status}"
+            )
+
+            await report_progress_record(cmd_id, progress=100, stage="completed")
+            return SourceProcessingOutput(
+                success=True,
+                source_id=str(processed_source.id),
+                embedded_chunks=0,
+                insights_created=insights_created,
+                processing_time=processing_time,
+            )
+
+        return await execute_with_budgets(
+            _attempt,
+            stop_on=(
+                JobCancelledError,
+                ValueError,
+                ConfigurationError,
+                ContextLengthExceededError,
+                IncompleteGenerationError,
+                NotFoundError,
+            ),
         )
 
     except IncompleteGenerationError as e:

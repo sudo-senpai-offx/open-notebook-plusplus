@@ -1,11 +1,16 @@
 """Deep command-retry visibility (B2).
 
-``process_source`` retries up to 15 times to ride out SurrealDB v2 transaction
-conflicts and logs every attempt at DEBUG so a conflict storm does not flood
-the worker log (see its ``retry_log_level``). The worker runs at INFO
-(``surreal_commands.core.worker.configure_logging``), so those attempts are
-normally invisible: a command stuck at attempt 12/15 looks identical to a
-command that is merely slow.
+Library retries (e.g. ``run_transformation``'s 5 attempts) log every attempt
+at DEBUG so a conflict storm does not flood the worker log. The worker runs
+at INFO (``surreal_commands.core.worker.configure_logging``), so those
+attempts are normally invisible: a command stuck at attempt 4/5 looks
+identical to a command that is merely slow.
+
+``process_source`` runs a single library attempt since B5; its per-error
+budgets (15x DB conflicts, 3x other transients) log at DEBUG directly from
+``execute_with_budgets``. This handler watches the library's retry records
+and prints only *milestone* attempts (default every 5th) together with
+the running retry distribution.
 
 This module adds one extra loguru handler that watches the library's retry
 records and prints only *milestone* attempts (default every 5th) together with
