@@ -260,3 +260,13 @@ def test_process_source_stops_heartbeat_on_failure(monkeypatch):
 
     assert len(started) == 1
     assert len(stopped) == 1
+
+
+def test_heartbeat_interval_defaults_quiet(monkeypatch):
+    """B3: 120s default cuts write amplification; override still honored."""
+    monkeypatch.delenv("OPEN_NOTEBOOK_HEARTBEAT_SECONDS", raising=False)
+    assert job_control._get_heartbeat_interval() == 120
+    monkeypatch.setenv("OPEN_NOTEBOOK_HEARTBEAT_SECONDS", "30")
+    assert job_control._get_heartbeat_interval() == 30
+    monkeypatch.setenv("OPEN_NOTEBOOK_HEARTBEAT_SECONDS", "junk")
+    assert job_control._get_heartbeat_interval() == 120

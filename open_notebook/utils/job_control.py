@@ -114,10 +114,13 @@ async def raise_if_cancelled(command_id: Optional[str]) -> None:
 
 
 def _get_heartbeat_interval() -> int:
+    # B3: 120s default cuts heartbeat write-amplification ~4x vs 30s. The
+    # 300s stale threshold keeps a 2.5-beat margin, and the monitor still
+    # requires two consecutive stale sightings before marking failed.
     try:
-        return int(os.getenv("OPEN_NOTEBOOK_HEARTBEAT_SECONDS", "30"))
+        return int(os.getenv("OPEN_NOTEBOOK_HEARTBEAT_SECONDS", "120"))
     except Exception:
-        return 30
+        return 120
 
 
 class Heartbeat:
