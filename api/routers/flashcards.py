@@ -31,6 +31,18 @@ class FlashcardCreate(BaseModel):
     source_id: Optional[str] = None
 
 
+class FlashcardImport(BaseModel):
+    """Anki-compatible TSV import. Basic rows: front<TAB>back[<TAB>tags,].
+    Cloze rows: one cloze text per line. Extras travel as tags."""
+
+    format: str = Field(pattern="^(basic|cloze)$")
+    text: str = Field(max_length=200_000)
+    delimiter: str = Field(default="\t", max_length=1)
+
+
+MAX_IMPORT_ROWS = 500
+
+
 def _response(card) -> dict:
     return {
         "id": str(card.id),
@@ -106,6 +118,53 @@ async def create_card(body: FlashcardCreate):
     except Exception as e:
         logger.warning(f"flashcard create failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to create card")
+
+
+@router.post("/flashcards/import")
+async def import_cards(body: FlashcardImport):
+    """Bulk-create drafts from TSV text. Returns per-row report; drafts only."""
+    try:
+        lines = [ln for ln in body.text.splitlines() if ln.strip()]
+        if len(lines) > MAX_IMPORT_ROWS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many rows ({len(lines)} > {MAX_IMPORT_ROWS})",
+            )
+        created = 0
+        skipped = []
+        for index, line in enumerate(lines):
+            try:
+                if body.format == "basic":
+                    parts = line.split(body.delimiter)
+                    front = parts[0].strip() if len(parts) > 0 else ""
+                    back = parts[1].strip() if len(parts) > 1 else ""
+                    tags = (
+                        [t.strip() for t in parts[2].split(",") if t.strip()]
+                        if len(parts) > 2
+                        else []
+                    )
+                    if not front:
+                        raise ValueError("missing front")
+                    card = Flashcard(
+                        model="basic", front=front, back=back or None, tags=tags
+                    )
+                else:
+                    text = line.strip()
+                    if not text:
+                        raise ValueError("empty line")
+                    card = Flashcard(model="cloze", cloze_text=text)
+                await card.save()
+                created += 1
+            except (ValueError, InvalidInputError) as e:
+                skipped.append({"row": index + 1, "reason": str(e)})
+        return {"created": created, "skipped": skipped}
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.warning(f"flashcard import failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to import cards")
 
 
 @router.post("/flashcards/{card_id}/approve")

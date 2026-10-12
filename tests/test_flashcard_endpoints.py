@@ -152,3 +152,61 @@ def test_create_rejects_unknown_model():
         "/api/flashcards", json={"model": "image-occlusion", "front": "Q"}
     )
     assert response.status_code == 422
+
+
+def test_import_basic_with_report():
+    saved = []
+
+    async def fake_save(self):
+        saved.append((self.front, self.back, tuple(self.tags)))
+
+    with patch("api.routers.flashcards.Flashcard.save", new=fake_save):
+        response = _client().post(
+            "/api/flashcards/import",
+            json={
+                "format": "basic",
+                "text": "Q1?\tA1\ttag1, tag2\n\t\nQ2?\tA2",
+            },
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["created"] == 2
+    assert body["skipped"] == []
+    assert saved[0] == ("Q1?", "A1", ("tag1", "tag2"))
+
+
+def test_import_reports_bad_rows():
+    async def fake_save(self):
+        pass
+
+    with patch("api.routers.flashcards.Flashcard.save", new=fake_save):
+        response = _client().post(
+            "/api/flashcards/import",
+            json={"format": "basic", "text": "\tNoFront\nQ?\tA"},
+        )
+    body = response.json()
+    assert body["created"] == 1
+    assert body["skipped"] == [{"row": 1, "reason": "missing front"}]
+
+
+def test_import_cloze_lines():
+    async def fake_save(self):
+        pass
+
+    with patch("api.routers.flashcards.Flashcard.save", new=fake_save):
+        response = _client().post(
+            "/api/flashcards/import",
+            json={
+                "format": "cloze",
+                "text": "Canberra {{c1::1913}}\nParis {{c1::1789}}",
+            },
+        )
+    assert response.json()["created"] == 2
+
+
+def test_import_rejects_over_cap():
+    big = "\n".join(f"Q{i}?\tA{i}" for i in range(501))
+    response = _client().post(
+        "/api/flashcards/import", json={"format": "basic", "text": big}
+    )
+    assert response.status_code == 400
