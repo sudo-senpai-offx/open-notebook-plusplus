@@ -212,6 +212,7 @@ export const zhTW = {
     connectErrorHint: "無法連線至伺服器。請檢查 API 是否正在運行。",
   },
   navigation: {
+    openMenu: "開啟導覽",
     collect: "採集",
     process: "處理",
     create: "創作",

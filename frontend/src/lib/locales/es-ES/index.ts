@@ -212,6 +212,7 @@ export const esES = {
     connectErrorHint: "No se puede conectar al servidor. Por favor, verifica si la API está funcionando.",
   },
   navigation: {
+    openMenu: "Abrir navegación",
     collect: "Recopilar",
     process: "Procesar",
     create: "Crear",

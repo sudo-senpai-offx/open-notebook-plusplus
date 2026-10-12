@@ -96,12 +96,22 @@ function LogoPebbles({ className }: { className?: string }) {
 
 type CreateTarget = 'source' | 'notebook' | 'podcast'
 
-export function AppSidebar() {
+interface AppSidebarProps {
+  /** Render at full width even when the desktop preference is collapsed. */
+  alwaysExpanded?: boolean
+  /** Called after a nav link is activated — lets the mobile drawer close. */
+  onNavigate?: () => void
+}
+
+export function AppSidebar({ alwaysExpanded = false, onNavigate }: AppSidebarProps = {}) {
   const { t } = useTranslation()
   const navigation = getNavigation(t)
   const pathname = usePathname()
   const { logout } = useAuth()
-  const { isCollapsed, toggleCollapse } = useSidebarStore()
+  const { isCollapsed: persistedCollapsed, toggleCollapse } = useSidebarStore()
+  // A slide-over drawer at w-16 is a column of icons with no labels and no
+  // room for a close affordance, so the drawer forces the full width.
+  const isCollapsed = alwaysExpanded ? false : persistedCollapsed
   const { openSourceDialog, openNotebookDialog, openPodcastDialog } = useCreateDialogs()
 
   // The active item is the longest href that prefixes the current path.
@@ -182,7 +192,7 @@ export function AppSidebar() {
 
         <nav
           className={cn(
-            'flex-1 space-y-1 py-4',
+            'flex-1 space-y-1 py-4 overflow-y-auto min-h-0',
             isCollapsed ? 'px-2' : 'px-3'
           )}
         >
@@ -296,7 +306,7 @@ export function AppSidebar() {
                     return (
                       <Tooltip key={item.name}>
                         <TooltipTrigger asChild>
-                          <Link href={item.href}>
+                          <Link href={item.href} onClick={onNavigate}>
                             {button}
                           </Link>
                         </TooltipTrigger>
@@ -306,7 +316,7 @@ export function AppSidebar() {
                   }
 
                   return (
-                    <Link key={item.name} href={item.href}>
+                    <Link key={item.name} href={item.href} onClick={onNavigate}>
                       {button}
                     </Link>
                   )

@@ -210,6 +210,7 @@ export const enUS = {
     connectErrorHint: "Unable to connect to server. Please check if the API is running.",
   },
   navigation: {
+    openMenu: "Open navigation",
     collect: "Collect",
     process: "Process",
     create: "Create",

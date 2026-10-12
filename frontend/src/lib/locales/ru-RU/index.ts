@@ -212,6 +212,7 @@ export const ruRU = {
     connectErrorHint: "Не удаётся подключиться к серверу. Проверьте, запущен ли API.",
   },
   navigation: {
+    openMenu: "Открыть навигацию",
     collect: "Собрать",
     process: "Обработать",
     create: "Создать",

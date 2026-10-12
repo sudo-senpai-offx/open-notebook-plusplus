@@ -212,6 +212,7 @@ export const itIT = {
     connectErrorHint: "Impossibile connettersi al server. Verifica che l'API sia in esecuzione.",
   },
   navigation: {
+    openMenu: "Apri la navigazione",
     collect: "Raccogli",
     process: "Elabora",
     create: "Crea",

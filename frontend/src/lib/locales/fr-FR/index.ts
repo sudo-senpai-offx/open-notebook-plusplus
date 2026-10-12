@@ -212,6 +212,7 @@ export const frFR = {
     connectErrorHint: "Impossible de se connecter au serveur. Veuillez vérifier si l'API est lancée.",
   },
   navigation: {
+    openMenu: "Ouvrir la navigation",
     collect: "Collecter",
     process: "Traiter",
     create: "Créer",

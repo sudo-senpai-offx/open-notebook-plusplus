@@ -212,6 +212,7 @@ export const caES = {
     connectErrorHint: "No es pot connectar al servidor. Comprova si l'API s'està executant.",
   },
   navigation: {
+    openMenu: "Obre la navegació",
     collect: "Recull",
     process: "Processa",
     create: "Crea",

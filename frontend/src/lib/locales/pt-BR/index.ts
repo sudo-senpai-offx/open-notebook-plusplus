@@ -212,6 +212,7 @@ export const ptBR = {
     connectErrorHint: "Não foi possível conectar ao servidor. Verifique se a API está rodando.",
   },
   navigation: {
+    openMenu: "Abrir navegação",
     collect: "Coletar",
     process: "Processar",
     create: "Criar",

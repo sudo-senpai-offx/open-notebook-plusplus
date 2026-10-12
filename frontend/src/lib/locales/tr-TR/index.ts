@@ -212,6 +212,7 @@ export const trTR = {
     connectErrorHint: "Sunucuya bağlanılamıyor. API'nin çalışıp çalışmadığını kontrol edin.",
   },
   navigation: {
+    openMenu: "Gezinmeyi aç",
     collect: "Topla",
     process: "İşle",
     create: "Oluştur",
