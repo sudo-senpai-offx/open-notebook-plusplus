@@ -1050,6 +1050,7 @@ export const enUS = {
     maxSteps: "Max steps",
     start: "Start training",
     running: "Training...",
+    jobsAhead: "{{count}} job(s) ahead of you in the worker queue",
     result: "Result",
     loss: "Final loss",
     steps: "Steps",

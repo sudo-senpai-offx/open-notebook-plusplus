@@ -27,6 +27,7 @@ export default function TrainingPage() {
   const [phase, setPhase] = useState<Phase>('idle')
   const [result, setResult] = useState<TrainResult | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [ahead, setAhead] = useState<number | null>(null)
   const pollRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
@@ -42,12 +43,15 @@ export default function TrainingPage() {
     setPhase('running')
     setResult(null)
     setError(null)
+    setAhead(null)
     try {
       const submitted = await trainingApi.submitTinyTrain({
         text,
         name: name || 'tiny-run',
         maxSteps,
       })
+      const { commandsApi } = await import('@/lib/api/commands')
+      if (!controller.signal.aborted) setAhead(await commandsApi.queueDepth())
       const status = await trainingApi.waitForCommand(submitted.job_id, {
         intervalMs: 2000,
         signal: controller.signal,
@@ -111,6 +115,11 @@ export default function TrainingPage() {
                   {running && <Loader2 className="h-4 w-4 animate-spin" />}
                   {running ? t('training.running') : t('training.start')}
                 </Button>
+                {running && ahead !== null && ahead > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('training.jobsAhead', { count: ahead })}
+                  </p>
+                )}
               </CardContent>
             </Card>
             {phase === 'done' && result && (
