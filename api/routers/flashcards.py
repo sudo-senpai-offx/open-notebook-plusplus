@@ -229,6 +229,45 @@ async def reject_card(card_id: str):
         raise HTTPException(status_code=500, detail="Failed to reject card")
 
 
+@router.get("/flashcards/export")
+async def export_apkg(deck: str = Query(default="OpenNotebook")):
+    """Export approved cards as .apkg (tombstones excluded). The file lands
+    in the data exports dir for re-download/sharing."""
+    import os
+    import re
+    import time
+
+    from fastapi.responses import FileResponse
+
+    from open_notebook.export.apkg import build_package_bytes
+
+    safe_deck = re.sub(r"[^A-Za-z0-9_-]+", "_", deck).strip("_") or "OpenNotebook"
+    try:
+        rows = await repo_query(
+            "SELECT model, front, back, cloze_text, tags, guid FROM flashcard "
+            "WHERE status = 'approved' ORDER BY created ASC LIMIT 5000"
+        )
+        cards = [dict(r) for r in (rows or [])]
+        data = build_package_bytes(cards, deck_name=safe_deck)
+        base = os.getenv("OPEN_NOTEBOOK_DATA_DIR", "./notebook_data")
+        out_dir = os.path.join(base, "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        filename = f"{safe_deck}-{int(time.time())}.apkg"
+        path = os.path.join(out_dir, filename)
+        with open(path, "wb") as f:
+            f.write(data)
+        return FileResponse(
+            path,
+            media_type="application/octet-stream",
+            filename=filename,
+        )
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.warning(f"flashcard export failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to export deck")
+
+
 @router.post("/flashcards/{card_id}/tombstone")
 async def tombstone_card(card_id: str):
     """Exclude an approved card from reviews/exports. Anki-side copies must

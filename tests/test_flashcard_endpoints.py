@@ -210,3 +210,33 @@ def test_import_rejects_over_cap():
         "/api/flashcards/import", json={"format": "basic", "text": big}
     )
     assert response.status_code == 400
+
+
+def test_export_returns_apkg_with_approved_only(tmp_path, monkeypatch):
+    from open_notebook.export import apkg as apkg_module
+
+    rows = [
+        {
+            "model": "basic",
+            "front": "Q?",
+            "back": "A.",
+            "cloze_text": None,
+            "tags": [],
+            "guid": "c" * 16,
+        }
+    ]
+    monkeypatch.setenv("OPEN_NOTEBOOK_DATA_DIR", str(tmp_path))
+    with patch("api.routers.flashcards.repo_query", new=AsyncMock(return_value=rows)):
+        response = _client().get("/api/flashcards/export?deck=Study")
+    assert response.status_code == 200
+    assert response.content[:2] == b"PK"
+    assert "Study" in response.headers["content-disposition"]
+    assert apkg_module.DECK_ID > 0
+
+
+def test_export_empty_bank_still_valid(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPEN_NOTEBOOK_DATA_DIR", str(tmp_path))
+    with patch("api.routers.flashcards.repo_query", new=AsyncMock(return_value=[])):
+        response = _client().get("/api/flashcards/export")
+    assert response.status_code == 200
+    assert response.content[:2] == b"PK"

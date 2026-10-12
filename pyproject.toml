@@ -56,6 +56,8 @@ dependencies = [
     # Spaced repetition (P4): base runtime is typing-extensions only; the
     # optimizer extra (torch) stays out. Imported lazily at review time.
     "fsrs==6.3.2",
+    # Anki export (P6): pure-python .apkg writer, no native code.
+    "genanki==0.13.1",
     "pycountry>=26.2.16",
     "babel>=2.18.0",
     "beautifulsoup4>=4.13.0",
