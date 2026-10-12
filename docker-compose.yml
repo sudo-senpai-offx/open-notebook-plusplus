@@ -45,7 +45,7 @@ services:
   whisper:
     build: ../whisper.cpp
     image: whisper.cpp:local
-    command: ["./build/bin/whisper-server", "--model", "/app/models/ggml-large-v3-turbo-q5_0.bin", "--host", "0.0.0.0", "--port", "9000", "--inference-path", "/v1/audio/transcriptions"]
+    command: ["./build/bin/whisper-server", "--model", "/app/models/${WHISPER_MODEL_FILE:-ggml-base.en-q5_1.bin}", "--host", "0.0.0.0", "--port", "9000", "--inference-path", "/v1/audio/transcriptions"]
     ports:
       - "9000:9000"
     volumes:
