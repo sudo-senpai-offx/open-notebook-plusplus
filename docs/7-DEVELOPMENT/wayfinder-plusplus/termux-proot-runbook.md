@@ -615,3 +615,24 @@ surreal start --user root --pass root rocksdb:~/snb-data/test.db
 Then restart the API and worker. Both the v2 and v3 binaries stay on the
 device (`surreal`, `surreal-v3`) so the dialect difference can be
 re-tested later without another download.
+
+### 10b. Confirmed: API healthy on v2.7.0
+
+```
+$ curl -s http://127.0.0.1:5055/health
+{"status":"healthy"}
+```
+
+Migrations ran clean on the v2.7.0 server — the v3 `FLEXIBLE must be
+specified after TYPE` error is gone, which is the positive
+confirmation that the failure was dialect, not transport. Envelope
+honoured on v2: `Block cache size: 33554432`, `Background thread count:
+1`, `Maximum background jobs count: 2`, `Write buffer size: 16777216`.
+Note v2 prints `Block cache size` where v3 printed a `Memory manager:
+total memory limit` pair — don't read the absence of v3's line as the
+knob being ignored.
+
+Vehicle 2 backend status: SurrealDB v2.7.0 + worker + FastAPI in proot,
+`llama-server` native in Termux. Remaining: no UI (the Next.js
+standalone bundle is a separate step, and there is no browser-facing
+surface without it).
