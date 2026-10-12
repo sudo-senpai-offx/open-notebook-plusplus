@@ -442,32 +442,61 @@ curl -s http://127.0.0.1:5055/health; echo
 `--host 0.0.0.0` so the phone browser (and later the LAN PWA) can reach
 it, not just loopback.
 
-### 9c. A failed `uv sync` is not atomic
+### 9c. A failed `uv sync` poisons the uv cache (root cause)
 
-Observed: the hardlink failure left
-`.venv/lib/python3.12/site-packages/surreal_commands/` containing only
-`cli/`, `core/`, `decorators.py`, `repository/` and **no `__init__.py`**.
-The next sync reported `Installed 195 packages in 53.25s` without
-repairing it. At import time Python resolves such a directory as a
-*namespace package* and reports the misleading:
+Symptom: a package directory exists but has no `__init__.py`, so imports
+fail with the misleading
 
 ```
 ImportError: cannot import name 'submit_command' from 'surreal_commands' (unknown location)
 ```
 
 `unknown location` is the tell — it means "directory found, no
-`__init__.py`", not "package missing". Verify with
-`ls .venv/lib/python3.12/site-packages/<pkg>/ | head`.
+`__init__.py`" (namespace package), not "package missing".
 
-**Do not trust a green "Installed N packages" line after a failed run.**
-Either rebuild (`rm -rf .venv` then sync, safe *only* with
-`UV_PYTHON` re-exported) or repair surgically with
-`uv pip install --python .venv/bin/python --reinstall-package <pkg> <pkg>==<ver>`.
+**Mechanism (confirmed 2026-10-13).** uv unpacks a wheel once into
+`~/.cache/uv/archive-v0/<hash>/`, then links/copies from that cache into
+each venv. The first sync died on the proot hardlink failure *while
+populating that cache*, leaving a permanently incomplete cache entry.
+Every later sync re-copied the same truncated tree — `rm -rf .venv` plus
+a full re-sync reproduced the identical partial install, which is what
+ruled out a one-off interruption.
 
-Cheap guard after any sync: import the heavy top-level modules
-explicitly before booting, rather than meeting the first partial at
-runtime.
+Observed: `surreal_commands/` held 4 entries (`cli`, `core`,
+`decorators.py`, `repository/`) instead of 19 files. Fix:
 
-Note the cost asymmetry: `rm -rf .venv` is only safe because
-`UV_PYTHON` is set. Without it, deleting the venv removes the only
-3.12 interpreter and uv cannot find a replacement (see 9).
+```sh
+uv cache clean surreal-commands
+UV_LINK_MODE=copy UV_PYTHON=/opt/python/bin/python3.12 \
+  uv pip install --python .venv/bin/python \
+  --reinstall-package surreal-commands surreal-commands==1.3.1
+find .venv/lib/python3.12/site-packages/surreal_commands -type f | wc -l
+```
+
+Expect the real file count (19, excluding `__pycache__`). Escalate to
+`uv cache clean` (whole cache, re-downloads everything) if a targeted
+clean does not change the number.
+
+**Deleting `.venv` alone never fixes this** — it was a wasted ~2 min
+rebuild here. Reach for the cache.
+
+**Verify completeness authoritatively**, not by importing. Each wheel
+ships a `dist-info/RECORD` listing exactly what it installed, so a
+missing file is proof of a partial unpack even for packages nothing
+imports:
+
+```sh
+cd .venv/lib/python3.12/site-packages
+for r in *.dist-info/RECORD; do
+  while IFS=, read -r f _; do
+    case "$f" in ../../../*) continue;; esac
+    [ -e "$f" ] || echo "MISSING $f"
+  done < "$r"
+done | head -30
+```
+
+No output means all 195 packages are intact.
+
+Note the `rm -rf .venv` cleanup below is only safe *with*
+`UV_PYTHON` re-exported; without it, deleting the venv also removes the
+only 3.12 interpreter (see 9).
