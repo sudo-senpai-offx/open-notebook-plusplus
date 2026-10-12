@@ -250,3 +250,29 @@ Do NOT install the API yet. Report:
 2. `free -m` with surreal running
 3. `PROBE_OK`, or the exception verbatim
 4. Any `WARN`/`ERROR` from the surreal side (env-var renames surface here)
+## 7. Storage layout (decided 2026-10-13)
+
+Vehicle 2 keeps everything on **internal storage** — repo, SurrealDB files
+and GGUF models all under Termux's prefix. RocksDB write latency and model
+mmapping both favour fast storage; SD cards and external drives are
+deferred (operator decision).
+
+**Desktop ↔ phone sync** is a stated later goal, via adb over USB or
+wireless. Do not build new sync machinery for it — the project already
+has file-shaped boundaries that cover most of it:
+
+- `notebook_export/` (notes → files, frontmatter) and the vault watcher
+  (files → sources) for note round-trips
+- `.apkg` export for deck sharing
+- SurrealDB is a single RocksDB directory, so `adb pull`/`adb push` of
+  that directory (server stopped) is a whole-database transport
+
+The one prerequisite still open: the **real** proot rootfs path. The
+guessed `$PREFIX/var/lib/proot-distro/ubuntu/rootfs` does not exist — an
+earlier `mkdir -p` created it as a phantom tree. Locate it from Termux
+before relying on any path:
+
+```sh
+find "$PREFIX/var/lib/proot-distro" -maxdepth 4 -name "snb-data" 2>/dev/null
+```
+

@@ -57,6 +57,10 @@ is clear when the v1 ticket set below is resolved in order and the done-list
   tombstone + honest copy (R4Q8-C); CSV = Anki TSV strict subset, extras as
   tags (R5Q8-C); streaks only, no gamification (R4Q5-A); no exam mode (R4Q1-A).
 - i18n per-slice mirrored keys (R4Q6-C); text-first cards, media lazy (R4Q7-A).
+- Vehicle 2 (all-on-device Termux) storage: **internal** (repo + SurrealDB
+  files + GGUF all under Termux's prefix). Fastest I/O, which is what RocksDB
+  writes and model mmapping need; SD cards / external drives deferred.
+  Operator goal: eventual desktop↔phone sync over adb/wireless.
 
 ## Not yet specified
 
