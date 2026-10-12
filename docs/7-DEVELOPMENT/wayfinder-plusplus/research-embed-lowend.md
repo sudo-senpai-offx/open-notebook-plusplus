@@ -167,3 +167,17 @@ quality-upgrade experiment; `bge-m3` stays out.
 5. Hybrid gate: labeled query set, dense vs full-text-BM25 vs app-fused RRF
    nDCG@10 + p50/p95 latency — adopt only on a positive delta
    ([Qdrant tuning guide](https://qdrant.tech/documentation/search-tuning/how-to-tune-hybrid-search/index.md)).
+
+## Appendix A — chunk shape/cost (2026-10-12, N2a)
+
+19 repo docs, same corpus, overlap 15%:
+
+| Size | Chunks | Tokens | Max |
+|---|---|---|---|
+| 256 | 459 | 60,955 | 253 |
+| 400 | 400 | 60,859 | 395 |
+| 800 | 339 | 60,424 | 780 |
+
+800 costs ~15% fewer embed calls than 400; 256 costs ~15% more. Quality
+(retrieval relevance) still needs judged vault Q/A pairs — requested from
+the operator. No default change until then.

@@ -18,7 +18,7 @@ import os
 import re
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_text_splitters import (
     HTMLHeaderTextSplitter,
@@ -492,3 +492,17 @@ def chunk_text(
 
     logger.debug(f"Created {len(chunks)} chunks from {text_tokens} tokens")
     return chunks
+
+
+def describe_chunks(chunks: List[str]) -> Dict[str, Any]:
+    """Shape/cost stats for one chunking (N2a). Quality needs judged data."""
+    if not chunks:
+        return {"chunks": 0, "avg_tokens": 0, "max_tokens": 0, "total_tokens": 0}
+    sizes = [token_count(c) for c in chunks]
+    total = sum(sizes)
+    return {
+        "chunks": len(chunks),
+        "avg_tokens": total // len(chunks),
+        "max_tokens": max(sizes),
+        "total_tokens": total,
+    }
