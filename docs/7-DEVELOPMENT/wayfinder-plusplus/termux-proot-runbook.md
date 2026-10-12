@@ -164,8 +164,25 @@ v3 returns `HTTP 200` with `content-length: 0` (docs example uses
 | Envelope honoured | 64 MB total limit, 32 MB block cache, 1 thread, 2 jobs |
 | RAM cost | `used` 4344 → 4435 MB, `available` 2905 → 2822 MB (~90 MB) |
 | `/rpc` route | unchanged in v3 (WebSocket RPC still served at `/rpc`) |
+| CA store | apt over **HTTPS** (see 3a); Python 3.14.4 + client 2.0.0 installed |
+| **SDK 2.0.0 → server 3.3.3** | **`PROBE_OK`** — auth, `use`, `CREATE`, `SELECT` all round-trip |
 
-## 5. Client/server compatibility probe (decides v2-vs-v3 pin)
+## 5. Client/server compatibility probe — RESULT: compatible
+
+Outcome (SD680, 2026-10-13): client `surrealdb==2.0.0` (pinned in
+`uv.lock`) speaks server `3.3.3` correctly over WebSocket `/rpc`.
+Sign-in, namespace/database selection, `CREATE` and `SELECT` all
+round-trip. **No server pin is required for vehicle 2** — the official
+installer ships v3 and it works with our client as-is.
+
+`docker-compose.yml` keeps `surrealdb/surrealdb:v2` for the Docker path
+regardless: bumping the primary deployment's database major is a
+data-directory migration decision (existing `surreal_data/` RocksDB
+files), not a compatibility question. Verified-compatible ≠
+safe-to-upgrade-in-place. Revisit when someone is willing to test the
+upgrade against a copy of real data.
+
+The commands below are kept for reproducibility.
 
 Client is pinned `surrealdb==2.0.0` (`uv.lock`). The v3 server is a newer
 major; the RPC path is unchanged but the protocol has evolved. One

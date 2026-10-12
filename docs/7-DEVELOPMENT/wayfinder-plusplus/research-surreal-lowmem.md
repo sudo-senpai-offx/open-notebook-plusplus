@@ -239,3 +239,32 @@ proot-distro exposes the entire Termux prefix inside the guest
 (`/data/data/com.termux/files/usr/...` resolves from inside proot),
 which makes host-side bundles reachable without any path arithmetic on
 the guest rootfs.
+
+### Client/server compatibility verdict (SD680 probe, 2026-10-13)
+
+`PROBE_OK`: python client `surrealdb==2.0.0` (the `uv.lock` pin) against
+server `3.3.3` over WebSocket `/rpc`, on-device in proot glibc. Sign-in,
+`use(ns, db)`, `CREATE` and `SELECT` all round-trip. So the v3 server
+needs no client-side accommodation; the official installer only ever
+ships v3, which is what makes vehicle 2 viable without a private build.
+
+This closes the compatibility question that the `v2` compose pin left
+open. It does **not** justify bumping the Docker path: that is a
+data-directory migration question (existing `surreal_data/` RocksDB
+files under a new major), not a protocol one. Keep compose on v2 until
+someone tests the upgrade against a copy of real data.
+
+Client availability on aarch64 (PyPI metadata, checked directly): 1.0.7+
+publish `cp39-abi3-manylinux_2_17_aarch64`; the `3.0.0b*` betas are
+sdist-only with zero wheels. `surrealdb` depends on `aiohttp` and
+`pydantic-core`, which ship per-minor wheels — cp314 builds exist for
+both (aiohttp 3.14.5, pydantic-core 2.50.1), so Python 3.14 is fine, but
+the margin is thin and a pinned Ubuntu upgrade could strand it.
+
+Install inside proot needs the absolute guest path: Termux's `bin`
+precedes `/usr/bin` on PATH, and Termux's Python is tagged
+`aarch64-linux-android`, which matches no wheel platform. pip then
+quietly rejects every wheel, falls back to the sdist, and tries to
+build Rust via maturin against `aarch64-unknown-linux-android` — not a
+rustup target. The symptom reads like an ARM/Rust problem; the cause is
+PATH. Always `/usr/bin/python3 -m pip --only-binary :all:` in the guest.
