@@ -43,4 +43,23 @@ describe('flashcardsApi', () => {
     await flashcardsApi.update('flashcard:x', { front: 'Q!' })
     expect(mockPut).toHaveBeenCalledWith('/flashcards/flashcard%3Ax', { front: 'Q!' })
   })
+
+  it('creates a basic card as a draft', async () => {
+    mockPost.mockResolvedValue({ data: { id: 'flashcard:9', status: 'draft' } })
+    await flashcardsApi.create({ model: 'basic', front: 'Q?', back: 'A.' })
+    expect(mockPost).toHaveBeenCalledWith('/flashcards', {
+      model: 'basic',
+      front: 'Q?',
+      back: 'A.',
+    })
+  })
+
+  it('creates a cloze card', async () => {
+    mockPost.mockResolvedValue({ data: { id: 'flashcard:9', status: 'draft' } })
+    await flashcardsApi.create({ model: 'cloze', cloze_text: 'x {{c1::y}}' })
+    expect(mockPost).toHaveBeenCalledWith('/flashcards', {
+      model: 'cloze',
+      cloze_text: 'x {{c1::y}}',
+    })
+  })
 })

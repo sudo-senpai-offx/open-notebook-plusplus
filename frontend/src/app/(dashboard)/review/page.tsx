@@ -5,13 +5,15 @@ import { AppShell } from '@/components/layout/AppShell'
 import { Button } from '@/components/ui/button'
 import { ReviewInbox } from '@/components/review/ReviewInbox'
 import { ReviewQueue } from '@/components/review/ReviewQueue'
+import { AuthorCard } from '@/components/review/AuthorCard'
 import { useTranslation } from '@/lib/hooks/use-translation'
 
-type Tab = 'inbox' | 'queue'
+type Tab = 'inbox' | 'queue' | 'author'
 
 export default function ReviewPage() {
   const { t } = useTranslation()
   const [tab, setTab] = useState<Tab>('queue')
+  const [authorKey, setAuthorKey] = useState(0)
 
   return (
     <AppShell>
@@ -38,8 +40,23 @@ export default function ReviewPage() {
             >
               {t('review.inbox')}
             </Button>
+            <Button
+              role="tab"
+              aria-selected={tab === 'author'}
+              variant={tab === 'author' ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setTab('author')}
+            >
+              {t('review.author')}
+            </Button>
           </div>
-          {tab === 'queue' ? <ReviewQueue /> : <ReviewInbox />}
+          {tab === 'queue' ? (
+            <ReviewQueue />
+          ) : tab === 'inbox' ? (
+            <ReviewInbox />
+          ) : (
+            <AuthorCard key={authorKey} onCreated={() => setAuthorKey(k => k + 1)} />
+          )}
         </div>
       </div>
     </AppShell>

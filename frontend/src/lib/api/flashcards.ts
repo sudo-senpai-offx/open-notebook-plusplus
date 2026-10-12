@@ -14,6 +14,15 @@ export interface Flashcard {
   status: FlashcardStatus
 }
 
+export interface FlashcardCreate {
+  model: 'basic' | 'cloze'
+  front?: string
+  back?: string
+  cloze_text?: string
+  tags?: string[]
+  source_id?: string
+}
+
 export interface FlashcardEdit {
   front?: string
   back?: string
@@ -42,6 +51,16 @@ export const flashcardsApi = {
 
   update: async (cardId: string, fields: FlashcardEdit) => {
     const response = await apiClient.put<Flashcard>(`/flashcards/${id(cardId)}`, fields)
+    return response.data
+  },
+
+  create: async (fields: FlashcardCreate): Promise<Flashcard> => {
+    const body: Record<string, unknown> = { model: fields.model }
+    for (const key of ['front', 'back', 'cloze_text', 'tags', 'source_id'] as const) {
+      const value = fields[key]
+      if (value !== undefined) body[key] = value
+    }
+    const response = await apiClient.post<Flashcard>('/flashcards', body)
     return response.data
   },
 
