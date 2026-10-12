@@ -13,7 +13,7 @@ def _client():
 
 
 def _card(**over):
-    base = {
+    base: dict = {
         "id": "flashcard:t1",
         "source_id": "source:s1",
         "model": "basic",
@@ -215,7 +215,7 @@ def test_import_rejects_over_cap():
 def test_export_returns_apkg_with_approved_only(tmp_path, monkeypatch):
     from open_notebook.export import apkg as apkg_module
 
-    rows = [
+    rows: list = [
         {
             "model": "basic",
             "front": "Q?",

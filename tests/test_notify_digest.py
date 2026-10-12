@@ -38,7 +38,7 @@ def test_digest_disabled_is_zero_footprint(monkeypatch):
 
 def test_digest_posts_text(monkeypatch):
     monkeypatch.setenv("OPEN_NOTEBOOK_NOTIFY_URL", "https://ntfy.example/topic")
-    captured = {}
+    captured: dict = {}
 
     async def post(url, json=None, headers=None):
         captured.update(url=url, json=json)

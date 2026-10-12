@@ -26,5 +26,7 @@ def test_prompts_declare_machine_format():
 
 
 def test_get_built_in_lookup():
-    assert get_built_in("cloze")["key"] == "cloze"
+    entry = get_built_in("cloze")
+    assert entry is not None
+    assert entry["key"] == "cloze"
     assert get_built_in("nope") is None

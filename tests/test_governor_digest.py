@@ -35,6 +35,7 @@ async def test_digest_fires_once_per_day(monkeypatch):
         await gov.run_once(now=NOW)
         await gov.run_once(now=NOW + timedelta(minutes=5))
     assert digest.await_count == 1
+    assert digest.await_args is not None
     assert "1" in digest.await_args[0][0]
 
 

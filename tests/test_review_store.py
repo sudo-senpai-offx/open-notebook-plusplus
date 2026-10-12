@@ -10,9 +10,7 @@ from open_notebook.review import store
 
 @pytest.mark.asyncio
 async def test_record_grade_saves_state_and_logs():
-    card = SimpleNamespace(
-        status="approved", fsrs_json=None, save=AsyncMock()
-    )
+    card = SimpleNamespace(status="approved", fsrs_json=None, save=AsyncMock())
     queries = []
 
     async def fake_query(q, vars=None):

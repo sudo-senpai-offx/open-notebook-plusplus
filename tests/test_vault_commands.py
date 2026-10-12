@@ -22,7 +22,7 @@ async def test_ingest_submits_one_job_per_file(tmp_path, monkeypatch):
     monkeypatch.setenv("OPEN_NOTEBOOK_VAULT_DIR", str(vault))
     monkeypatch.setenv("OPEN_NOTEBOOK_DATA_DIR", str(tmp_path / "data"))
 
-    saved_sources = []
+    saved_sources: list = []
 
     class FakeSource:
         def __init__(self, **kwargs):
