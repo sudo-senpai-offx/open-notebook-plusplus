@@ -34,6 +34,7 @@ import {
   Brain,
   Timer,
   GraduationCap,
+  BarChart3,
   Shuffle,
   Settings,
   LogOut,
@@ -68,6 +69,7 @@ const getNavigation = (t: TFunction) => [
       { name: t('navigation.training'), href: '/training', icon: Brain, iconClass: undefined },
       { name: t('navigation.focus'), href: '/focus', icon: Timer, iconClass: undefined },
       { name: t('navigation.review'), href: '/review', icon: GraduationCap, iconClass: undefined },
+      { name: t('navigation.study'), href: '/study', icon: BarChart3, iconClass: undefined },
     ],
   },
   {
