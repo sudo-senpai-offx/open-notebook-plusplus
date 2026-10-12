@@ -284,7 +284,14 @@ ceiling-side for the floor class):
 | Qwen2.5-0.5B-Q2_K (415MB) | 7.83 ± 0.02 | 6.84 ± 0.01 |
 
 Cross-checks server-side timings (8.5 prompt / 6.4 predicted @2t, same box).
-N1b (Qwen3-0.6B + IQ4_XS/IQ3_M/IQ2_M matrix) pending contender downloads.
+N1b result (2026-10-12): Qwen3-0.6B-Q4_K_M @2t pp64 2.62 / tg16 2.34 —
+~3x SLOWER than Qwen2.5-0.5B on the same path. NOT a speed upgrade;
+quality edge unmeasurable here. Qwen2.5 stays default; Qwen3 opt-in only.
+Remaining matrix: Qwen2.5-0.5B in IQ4_XS/IQ3_M (same-arch quant comparison).
+- 2026-10-12 · IQ matrix @2t (pp64/tg16): IQ4_XS 7.12/6.07 (328MB),
+  IQ3_M 5.95/5.22 (321MB) vs Q2_K 7.83/6.84 (415MB). Verdict: Q2_K stays
+  speed default; IQ4_XS is the quality pick (better perplexity/byte,
+  smaller file, ~10% slower). Quality axis per literature, unmeasured here.
   https://docs.ollama.com/import ; community IQ models proving runtime IQ support:
   https://ollama.com/vanilj/llama3.1-70b-iquants
 
