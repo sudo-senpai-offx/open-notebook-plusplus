@@ -272,6 +272,19 @@ upstream changes are free gains on a version bump (pin ≥ b9885, 2026-07-06):
 - SmolLM2 family + Ollama tags + QuantFactory GGUF:
   https://ollama.com/library/smollm2 , https://huggingface.co/QuantFactory/SmolLM2-135M-GGUF
 - Ollama GGUF import (FROM any GGUF; -q limited to K/legacy):
+
+## Appendix A — measured baseline (2026-10-12, N1a)
+
+Floor-flags `llama-bench` (v0.6.0, SSE2-only, same flags as the sidecar),
+Ryzen 12-thread box pinned `-t 2` (this box far outruns Pentium D — treat as
+ceiling-side for the floor class):
+
+| Model | pp512 (tok/s) | tg128 (tok/s) |
+|---|---|---|
+| Qwen2.5-0.5B-Q2_K (415MB) | 7.83 ± 0.02 | 6.84 ± 0.01 |
+
+Cross-checks server-side timings (8.5 prompt / 6.4 predicted @2t, same box).
+N1b (Qwen3-0.6B + IQ4_XS/IQ3_M/IQ2_M matrix) pending contender downloads.
   https://docs.ollama.com/import ; community IQ models proving runtime IQ support:
   https://ollama.com/vanilj/llama3.1-70b-iquants
 

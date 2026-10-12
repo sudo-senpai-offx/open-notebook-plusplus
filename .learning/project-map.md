@@ -73,6 +73,7 @@ Training flow: ? (no trainer exists; tier gate → subprocess/sidecar → artifa
 - 2026-10-11 · P5 timer UI shipped: /focus route + countdown/presets/log, static i18n key maps, 195 frontend green (commit 06c169c, pushed).
 - 2026-10-12 · P4 storage shipped: migration 32 live at v32, image rebuilt and verified current (imports ok, train_tiny registered, 30-32 registered), pushed.
 - 2026-10-12 · P8 closed: prune job + daily digest shipped; full-tree sweep green (backend 1227, mypy-245, ruff; frontend 214 + tsc/lint/build); all pushed. Plusplus v1 ticket set complete.
+- 2026-10-12 · N1a baseline: floor-flags llama-bench pp512 7.83 / tg128 6.84 @2t (Qwen-0.5B-Q2_K), recorded in research appendix. Next: N1b contenders.
 - 2026-10-12 · B5 shipped: own-budget retry loop (15x DB conflicts, 3x transients, permanent immediate), library at 1 attempt; parametrized context-length test split per command (commit 764e701, unpushed — keyring).
 
 ## Unknowns
