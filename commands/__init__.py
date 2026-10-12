@@ -28,6 +28,7 @@ from .embedding_commands import (
     embed_source_command,
     rebuild_embeddings_command,
 )
+from .maintenance_commands import prune_event_logs_command
 from .podcast_commands import generate_podcast_command
 from .site_commands import crawl_site_command
 from .source_commands import process_source_command
@@ -42,6 +43,7 @@ __all__ = [
     "rebuild_embeddings_command",
     # Other commands
     "generate_podcast_command",
+    "prune_event_logs_command",
     "process_source_command",
     "crawl_site_command",
     "train_tiny_command",
