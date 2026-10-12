@@ -329,3 +329,35 @@ no sustained-performance decay (6nm big.LITTLE behaves to spec). Verdict:
 RAM and thermals clear vehicle 2 on SD680-class hardware with margin —
 proot stack (~200–400MB API+DB) + 415MB model fits inside available RAM
 without touching swap.
+
+## Appendix C — native llama-server on SD680 (2026-10-13, Termux)
+
+Built `llama-server` natively (same flags as the bench, `LLAMA_BUILD_SERVER=ON`):
+17.7 MB static binary, model load 2.67 s, `/health` -> `{"status":"ok"}`.
+
+**Default context is a RAM trap.** The server announces
+`n_slots = 4, n_ctx_slot = 32768, kv_unified = true` = 131 072 tokens of
+KV cache. For this model (24 layers, 2 KV heads, head_dim 64, f16) that
+is 2 x 24 x 2 x 64 x 2 = 12 288 B/token, i.e. ~1.6 GB — against a 390 MB
+model. Measured cost of the *constrained* config instead:
+
+| Config | VmRSS | pp t/s | tg t/s |
+|---|---|---|---|
+| `-c 4096 -np 1 -t 2` | **492 MB** | 20.31 | 13.13 |
+
+Cross-check: `llama-bench` measured 20.55 / 13.59 for the same model at
+`-t 2`, so the server's slot scheduling overhead is negligible. Always
+pass `-c` and `-np` on a phone; never inherit the defaults.
+
+Note: the *default* config's real RSS was never captured (the process was
+killed while still loading), so the ~1.6 GB figure is arithmetic, not
+measurement. Do not cite it as measured.
+
+**Android `free` is not a memory metric.** Its `used`/`available` swing
+because the kernel reclaims aggressively and other apps cycle; readings
+taken seconds apart disagreed by hundreds of MB regardless of load.
+Budget from `/proc/<pid>/status` VmRSS per process instead.
+
+Combined resident cost so far: llama-server 492 MB + SurrealDB ~90 MB =
+~580 MB, against ~3 GB available. Room remains for the API process and
+an embedding model.

@@ -276,3 +276,19 @@ before relying on any path:
 find "$PREFIX/var/lib/proot-distro" -maxdepth 4 -name "snb-data" 2>/dev/null
 ```
 
+**Resolved (2026-10-13):** the real guest root is
+
+```
+$PREFIX/var/lib/proot-distro/containers/ubuntu/rootfs
+```
+
+— note the `containers/` level, which is what defeated an earlier
+`-maxdepth 4` search. Confirmed via RocksDB's `CURRENT` and
+`MANIFEST-000009` markers at `…/rootfs/root/snb-data/test.db/`.
+
+An earlier `mkdir -p` created a **phantom** sibling tree at
+`…/proot-distro/ubuntu/rootfs/` (no `containers/`). Nothing real lives
+there. Verify with `find "$PREFIX/var/lib/proot-distro/ubuntu" -type f`
+— if it lists only `usr/local/share/ca-certificates/`, it is safe to
+remove that `ubuntu` directory.
+
