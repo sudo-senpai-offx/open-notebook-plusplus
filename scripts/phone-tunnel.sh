@@ -30,13 +30,15 @@ EMBED_LOCAL=18081
 
 check() {
   local ok=0
-  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${LLAMA_LOCAL}/health" 2>/dev/null || echo 000)
+  # Assign then override: `$(... || echo 000)` yields curl's own 000 plus
+  # the fallback, so a refused connection printed as 000000.
+  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${LLAMA_LOCAL}/health" 2>/dev/null) || code=000
   [ "$code" = "200" ] && echo "llama  127.0.0.1:${LLAMA_LOCAL} -> phone :8080   OK" || { echo "llama  tunnel DOWN (HTTP $code)"; ok=1; }
-  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${API_LOCAL}/health" 2>/dev/null || echo 000)
+  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${API_LOCAL}/health" 2>/dev/null) || code=000
   [ "$code" = "200" ] && echo "api    127.0.0.1:${API_LOCAL} -> phone :5055   OK" || { echo "api    tunnel DOWN (HTTP $code)"; ok=1; }
-  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${DB_LOCAL}/version" 2>/dev/null || echo 000)
+  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${DB_LOCAL}/version" 2>/dev/null) || code=000
   [ "$code" = "200" ] && echo "db     127.0.0.1:${DB_LOCAL} -> phone :8000   OK" || { echo "db     tunnel DOWN (HTTP $code)"; ok=1; }
-  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${EMBED_LOCAL}/health" 2>/dev/null || echo 000)
+  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${EMBED_LOCAL}/health" 2>/dev/null) || code=000
   [ "$code" = "200" ] && echo "embed  127.0.0.1:${EMBED_LOCAL} -> phone :8081   OK" || echo "embed  not running (optional)"
   return $ok
 }
