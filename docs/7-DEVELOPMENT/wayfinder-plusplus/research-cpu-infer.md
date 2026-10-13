@@ -361,3 +361,38 @@ Budget from `/proc/<pid>/status` VmRSS per process instead.
 Combined resident cost so far: llama-server 492 MB + SurrealDB ~90 MB =
 ~580 MB, against ~3 GB available. Room remains for the API process and
 an embedding model.
+
+## Appendix D — H2 ladder, first two points (SD680, 2026-10-13)
+
+| Model | size | pp512 | tg128 | mean s/prompt | coverage (n=10) |
+|---|---|---|---|---|---|
+| Qwen2.5-0.5B-Instruct Q2_K | 390 MB | 20.31 | 13.13 | 6.6 | **0.80** |
+| Qwen2.5-1.5B-Instruct Q4_K_M | 1.04 GiB | 6.63 | 4.21 | 16.7 | **0.70** |
+
+**The 3x latency gap is solid. The quality ordering is not.** The bigger
+model scored lower, and inspecting the answers shows why that is an
+artefact, not a verdict:
+
+- `srs-01` — 1.5B said "should grow... deeper understanding", scored 0.5
+  for never writing "longer". Semantically correct; scored as half-wrong
+  by a fixture that matches one literal token.
+- `extract-01` — 1.5B replied literally `author, year`, echoing the
+  requested format instead of extracting. Genuine instruction-following
+  failure.
+- `multi-01` — 1.5B answered "vector search" where full-text is correct.
+  Genuine domain-reasoning error, and the only unambiguous miss.
+- `refuse-01` — 1.5B: *"The capital city of Wakanda is Dambrik. However
+  ... Wakanda is a fictional country"*. Correctly flagged fiction, but
+  **confidently invented a capital first**. Scored 0.5, which is
+  generous. Confabulation-then-hedge is the worst failure mode for a
+  study tool, and worth weighting explicitly rather than averaging away.
+
+n=10 cannot rank models: a single flipped prompt is 0.10, and two of the
+four disagreements above are fixture defects. **The instrument is the
+bottleneck, not the models.** Fix the brittle `must_contain` values, widen
+to ~25 prompts, then re-run both.
+
+Chat latency, separately: a cold `/api/chat/execute` turn measured 62 s,
+warm turns 2.3-2.4 s (and 4.6 s for a substantive answer). The 62 s was
+first-call warm-up, not steady-state cost. Do not budget from a cold
+measurement.
