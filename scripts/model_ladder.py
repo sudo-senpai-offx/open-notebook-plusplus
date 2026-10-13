@@ -18,6 +18,10 @@ The point is the PAIR. A model that scores higher but takes 4x longer may
 still be the wrong default; only the curve decides that, and the curve
 needs both axes measured on the same prompt set.
 
+Known limitation: substring/stem matching cannot detect NEGATION. An
+answer of "not Darwin" would satisfy must_contain=["Darwin"]. The prompts
+here do not invite that, but do not read a 1.0 as proof of nuance.
+
 Deliberately does NOT touch the app's model registry - it talks to
 llama-server directly, so a ladder run cannot leave the phone configured
 for a model you rejected.
@@ -35,14 +39,43 @@ import urllib.request
 
 
 def normalise(text: str) -> str:
-    """Lowercase, collapse whitespace, drop punctuation-adjacent noise.
-
-    Comparison has to survive markdown, punctuation and casing without
-    being so loose that any answer 'contains' the fact.
-    """
+    """Lowercase, collapse whitespace, drop punctuation-adjacent noise."""
     text = text.lower()
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+# Crude but sufficient stemming. Literal matching scored CORRECT answers
+# as failures: the 1.5B answered "a good cloze card REMOVES words from a
+# text" (fixture wanted 'removed') and "applied multiple times WITHOUT
+# CHANGING its result" (wanted 'same result'). Two of five apparent
+# failures were the grader, not the model.
+_SUFFIXES = ("ing", "ed", "es", "s")
+
+
+def _stem(word: str) -> str:
+    for suffix in _SUFFIXES:
+        if len(word) > len(suffix) + 2 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def _stem_set(text: str) -> set[str]:
+    return {_stem(w) for w in normalise(text).split() if w}
+
+
+def _phrase_present(phrase: str, haystack: set[str]) -> bool:
+    """Every word of `phrase` must prefix-match some word in the answer.
+
+    Prefix rather than equality so 'remov' matches both 'removes' and
+    'removing', while 'result' still fails against 'restated'.
+    """
+    stems = [_stem(w) for w in normalise(phrase).split() if w]
+    if not stems:
+        return False
+    return all(
+        any(h.startswith(s) or s.startswith(h) for h in haystack) for s in stems
+    )
 
 
 def coverage(
@@ -68,15 +101,18 @@ def coverage(
 
     Returns (score, missing, hallucinated).
     """
-    haystack = normalise(answer)
+    haystack = _stem_set(answer)
 
-    hallucinated = [f for f in entry.get("must_not_contain", []) if normalise(f) in haystack]
+    def present(phrase: str) -> bool:
+        return _phrase_present(phrase, haystack)
+
+    hallucinated = [f for f in entry.get("must_not_contain", []) if present(f)]
     if hallucinated:
         return 0.0, list(entry.get("must_contain", [])), hallucinated
 
     required = entry.get("must_contain", [])
     alts = entry.get("must_contain_any", [])
-    missing = [f for f in required if normalise(f) not in haystack]
+    missing = [f for f in required if not present(f)]
 
     if required:
         score = (len(required) - len(missing)) / len(required)
@@ -85,7 +121,7 @@ def coverage(
         score = 0.0
 
     if alts:
-        matched = any(normalise(a) in haystack for a in alts)
+        matched = any(present(a) for a in alts)
         if not required:
             score = 1.0 if matched else 0.0
         elif not matched:
