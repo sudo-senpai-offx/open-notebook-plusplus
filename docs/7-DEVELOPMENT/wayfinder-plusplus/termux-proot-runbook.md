@@ -775,3 +775,53 @@ was extrapolated, never measured.
 Remaining gap: no LLM provider is registered in the app, so chat does
 not work yet. llama-server is up on `:8080` but the app needs an
 OpenAI-compatible provider entry pointing at `http://127.0.0.1:8080/v1`.
+
+## 13. Chat on-device — WORKING (verified end to end)
+
+All of this was driven from the dev box over LAN (`10.7.112.85:5055`);
+only the stack start was manual.
+
+| Step | Result |
+|---|---|
+| `openai_compatible` provider | `available` — env vars reached the process |
+| `POST /api/models/sync/openai_compatible` | `{"discovered":1,"new":1}` |
+| Discovered model | `qwen2.5-0.5b-instruct-q2_k.gguf`, auto-classified `language` |
+| `PUT /api/models/defaults` | `default_chat_model=model:vvrisguqo85lhcsv4ous` |
+| `POST /api/models/{id}/test` | `{"success":true,"message":"Response: Hello!..."}` |
+| `POST /api/chat/execute` | coherent answer on spaced repetition |
+
+Chat response, via the app's own langgraph pipeline:
+
+> **Q** In one sentence, what is spaced repetition?
+> **A** Spaced repetition is a learning technique that involves spaced out
+> the presentation of information over a longer time period, rather than
+> cramming it all into a single session.
+
+**Latency: 62 s per turn** at `-t 2` with a 0.5B model. That is the real
+cost of phone-local chat, not a defect. Thread count and model size are the
+levers.
+
+### 13a. Configuration facts worth not rediscovering
+
+- `default_chat_model` takes a **record id** (`model:…`), not the model
+  name — `ModelManager.get_model()` calls `Model.get(model_id)`.
+- Model name is the **full GGUF path**, and `/v1/models` is the only source
+  of that string.
+- `POST /api/credentials` stores provider config in the DB (encrypted).
+  `provision_provider_keys` copies DB → env at boot, so DB config survives
+  a lost `.env`. This clears the "API key migration available" banner.
+- Linking a model to a credential is **UI-only**: there is no `PUT
+  /api/models/{id}` (405). An unlinked model falls back to env config,
+  which is why the test still passed.
+- **`openai_compatible` supports only `["language"]`** per the app's own
+  provider registry. So llama-server cannot serve embeddings here, and
+  `default_embedding_model` stays null. Consequence: **sources cannot be
+  ingested on the phone yet** — chat works, RAG does not.
+
+### 13b. What works in the UI now
+
+Verified by screenshot: responsive hamburger drawer, notebooks list, the
+API-created notebook visible in the UI, notebook page with
+Sources/Notes/Chat tabs, and **Chrome offering the PWA install prompt**
+(`Open Notebook PlusPlus をインストールします`) — the manifest + service
+worker slice is doing its job.
