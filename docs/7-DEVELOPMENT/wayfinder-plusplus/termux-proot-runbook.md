@@ -929,3 +929,62 @@ All three were invisible to CI because the tests fake the database boundary.
 Two now have static guards that need no database. The third needed real
 SQLite and real rows. Running the actual feature on the actual engine found
 three bugs in one sitting; the test suite had found none.
+
+---
+
+## 15. Startup race — `sleep 6` was standing in for a readiness probe
+
+After the first deploy that pulled 20 commits (§14), the API stopped
+booting on the phone:
+
+```
+RuntimeError: Failed to run database migrations: timed out during opening handshake
+```
+
+Misleading on its face — it reads like a network fault. It was not. The
+script's own comment had predicted the failure mode:
+
+> SurrealDB first and alone: the API dials it during startup, so a missing
+> database surfaces as a confusing migration error instead.
+
+...and then guarded it with `sleep 6`, sized for the dev box.
+
+### How it was actually diagnosed
+
+`adb forward tcp:18000 tcp:8000` puts SurrealDB's HTTP port on the dev box,
+which separates "database is broken" from "database was not ready yet":
+
+| Probe | Result |
+|---|---|
+| `GET :8000/version` | 200 — server healthy |
+| WS upgrade to `/rpc` | `101 Switching Protocols`, immediately |
+| 5 repeats | all `101` in ~0 s (the 10.001 s each showed was curl holding the upgraded socket open until `-m 10`) |
+
+So the WebSocket endpoint the app dials was fast and healthy. The API had
+simply given up earlier.
+
+Timing arithmetic from the log: the worker's first successful DB contact
+(`Checking for existing commands...`) was at **15:54:21**. When SurrealDB
+is not yet listening, each readiness probe fails *fast* rather than hanging,
+so the app's budget is backoff only — `1,2,4,5×8` = **47 s**, not the ~107 s
+worst case that assumes every probe consumes its full 5 s timeout. From a
+~15:53:05 start that is exhaustion at ~15:53:52, roughly 30 s before the
+database was actually serving.
+
+**Fix:** replace `sleep 6` with a real readiness poll on
+`http://127.0.0.1:8000/health`, defaulting to a 180 s budget and overridable
+via `SURREAL_READY_TIMEOUT`. It warns and continues on timeout rather than
+refusing to start, leaving the API's own retry loop to cover the residual
+window.
+
+Implementation note: the poll lives *inside* one python process. A
+poll-per-process loop pays the interpreter's import cost on every attempt,
+which on this hardware costs more than the wait it is waiting for. The
+heredoc is bound to an `if ... then`, not to `cmd <<EOF || fallback` — the
+latter is ambiguous in POSIX shells and failed `sh -n`.
+
+### What this cost, and the rule
+
+A guessed sleep is a hidden assumption about someone else's startup time.
+It passes on fast storage and fails only on slow storage, which is to say it
+fails only on the device this fork exists for.

@@ -77,8 +77,43 @@ cmd_up() {
       nohup surreal start --user root --pass root "rocksdb:$DATA/test.db" \
       >>"$LOG" 2>&1 &
     echo "surreal  started"
-    sleep 6
   fi
+
+  # Wait for SurrealDB to actually answer, rather than guessing with a
+  # fixed sleep. The sleep 6 this replaces was sized for the dev box and
+  # was far too short here: the API dialled the WebSocket endpoint during
+  # startup, exhausted its whole retry budget while the server was still
+  # binding, and died with "timed out during opening handshake" - which
+  # reads like a network fault rather than "you started me too early".
+  #
+  # Polled inside one python process so the interpreter's import cost is
+  # paid once instead of on every attempt; a poll-per-process loop costs
+  # more than the wait it is waiting for on this hardware.
+  #
+  # Best-effort by design: on timeout it warns and continues, leaving the
+  # API's own retry loop to cover the residual window rather than refusing
+  # to start at all.
+  wait_for_surreal() {
+    if "$APP/.venv/bin/python" - "${SURREAL_READY_TIMEOUT:-180}" <<'PY'
+import sys, time, urllib.request
+
+deadline = time.time() + int(sys.argv[1])
+while time.time() < deadline:
+    try:
+        urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3).read()
+        sys.exit(0)
+    except Exception:
+        time.sleep(1)
+sys.exit(1)
+PY
+    then
+      return 0
+    fi
+    echo "[stack] WARNING: surreal not ready after ${SURREAL_READY_TIMEOUT:-180}s - starting anyway"
+  }
+
+  wait_for_surreal
+  echo "surreal  ready"
 
   cd "$APP" || exit 1
 
