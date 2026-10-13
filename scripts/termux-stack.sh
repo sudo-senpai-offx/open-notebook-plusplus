@@ -42,6 +42,22 @@ kill_of() {
   kill "$pid" 2>/dev/null && echo "stopped $1 (pid $pid)"
 }
 
+# Wait for a process to actually disappear. `down` immediately followed by
+# `up` used to race: SIGTERM is asynchronous, so the old uvicorn still held
+# :5055 when the replacement tried to bind, and the replacement died with
+# EADDRINUSE — which surfaced as "API did not come back up".
+wait_gone() {
+  i=0
+  while [ "$i" -lt 20 ]; do
+    # A zombie's cmdline is empty, so a killed process stops matching here
+    # even before its parent reaps it.
+    pid_of "$1" >/dev/null 2>&1 || return 0
+    i=$((i + 1))
+    sleep 1
+  done
+  echo "[stack] warning: $1 still present after 20s"
+}
+
 cmd_up() {
   mkdir -p "$DATA"
 
@@ -115,9 +131,13 @@ cmd_status() {
 
 cmd_down() {
   kill_of "next-server"
+  wait_gone "next-server"
   kill_of "surreal-commands-worker"
+  wait_gone "surreal-commands-worker"
   kill_of "uvicorn api.main:app"
+  wait_gone "uvicorn api.main:app"
   kill_of "surreal start"
+  wait_gone "surreal start"
 }
 
 case "${1:-up}" in
