@@ -111,6 +111,18 @@ case "${1:-up}" in
     start_llama || exit 1
     wait_for_llama
 
+    # Embedding server. Started here rather than left to the operator
+    # because the app's default_embedding_model now points at :8081 - if
+    # that server is absent after a reboot, source ingestion stops
+    # embedding while still reporting success, which is the worst kind of
+    # failure to debug. Best-effort: a device without the model still
+    # boots, just without vector search.
+    if [ -f "${EMBED_MODEL:-$HOME/gguf/bge-small-en-v1.5-q8_0.gguf}" ]; then
+      sh "$HOME/bin/onb-embed" up || echo "[onb] embedding server failed - vector search off"
+    else
+      echo "[onb] no embedding model - skipping (vector search off)"
+    fi
+
     # Bring up the guest stack, then block so --kill-on-exit has something
     # to reap when Ctrl+C arrives.
     proot-distro login ubuntu -- bash -c '
@@ -125,6 +137,9 @@ case "${1:-up}" in
     status=$?
     echo "[onb] guest session ended (status $status)"
     stop_llama
+    # The embedding server runs in Termux like the chat server, so
+    # --kill-on-exit does not reap it either.
+    sh "$HOME/bin/onb-embed" down >/dev/null 2>&1 || true
     ;;
   *)
     echo "usage: $0 [up|stop]"

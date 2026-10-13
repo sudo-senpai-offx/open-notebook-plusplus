@@ -988,3 +988,88 @@ latter is ambiguous in POSIX shells and failed `sh -n`.
 A guessed sleep is a hidden assumption about someone else's startup time.
 It passes on fast storage and fails only on slow storage, which is to say it
 fails only on the device this fork exists for.
+
+---
+
+## 16. Embeddings on-device — RAG works (COMPLETE)
+
+### The blocker was not where it was recorded
+
+The runbook said embeddings were unavailable because "`openai_compatible`
+supports only `["language"]`". **That was wrong.** Re-checked rather than
+repeated:
+
+- Esperanto already lists `openai-compatible` under `embedding`
+- `GET /api/models/providers` on the phone returns
+  `['language','embedding','speech_to_text','text_to_speech']`
+- `Credential.to_esperanto_config()` sets `config["base_url"]` per
+  credential, so a second endpoint needs **no app change at all**
+
+The actual gap was a server:
+
+```
+501 "This server does not support embeddings. Start it with `--embeddings`"
+```
+
+and that flag makes a server embedding-**only**. One process cannot serve
+both chat and embeddings, hence a second one.
+
+### Setup
+
+| Piece | Value |
+|---|---|
+| Model | `bge-small-en-v1.5-q8_0.gguf`, 35 MB, 384 dims, 33M params, from `ggml-org` |
+| Server | second `llama-server --embeddings -t 2 -c 512 --port 8081` |
+| Credential | `openai_compatible`, base_url `http://127.0.0.1:8081/v1` |
+| Default | `default_embedding_model` set; `default_chat_model` preserved |
+
+Small was chosen deliberately: embeddings are computed **once at ingest**
+and then only compared, so a small model costs almost nothing at query
+time. The 0.6B Qwen3-Embedding would have cost more RAM than the entire
+rest of the stack for retrieval gains invisible on a phone.
+`-c 512` because `CHUNK_SIZE=400` chars is ~100 tokens — 512 never
+truncates a chunk and keeps the session trivial.
+
+### Verification, in the order that catches silent failures
+
+1. **Dimension** — 384, L2-normalised (norm 1.0000).
+2. **Pooling** — wrong pooling degrades retrieval *silently*, so it was
+   proved rather than assumed: related pairs averaged **0.794** cosine,
+   unrelated **0.432**, margin 0.362. If pooling were wrong every score
+   would sit near zero.
+3. **Ingest** — `POST /api/sources` with `embed=true` reports
+   `embedded:false, chunks:0` **by design**: `source_commands.py:175`
+   states embedding is fire-and-forget, so the count is read before the
+   job lands. Verified on a second source with no manual `/api/embed`
+   call: embedded on its own within ~8 s. Not a bug.
+4. **Retrieval** — `POST /api/search type=vector`:
+
+   | Query | Top hit | Score |
+   |---|---|---|
+   | "flashcards filed into boxes reviewed daily" | Leitner box method | **0.763** |
+   | "stability and desired retention of a card" | FSRS scheduler notes | **0.777** |
+   | "byzantine emperors and fall of an empire" | (off-topic) | **0.528** |
+
+   On-topic 0.76–0.78 vs off-topic 0.51–0.53 — clean separation, so
+   ranking discriminates rather than returning the least-bad match.
+
+Note the search response field is `similarity`, not `score`.
+
+### Two mistakes this section cost
+
+- Reading `score` instead of `similarity` made working search look broken
+  (0.000 on every result). Verified by dumping the raw response instead of
+  trusting the first parse.
+- `~/bin/onb*` are **copies**, not the repo files. Adding
+  `scripts/termux-embed.sh` to git did nothing on the device; `sh
+  ~/bin/onb-embed` failed with "No such file". `scripts/install-bin.sh`
+  now installs all four from the repo, with an explicit name mapping
+  (`termux-launch.sh` → `onb`, `termux-model.sh` → `onb-model`, …) and a
+  non-zero exit if any are missing.
+
+### Wiring
+
+`~/bin/onb` now starts the embedding server and stops it on exit. This is
+not optional: `default_embedding_model` points at `:8081`, so after a
+reboot without it, source ingestion would stop embedding while still
+reporting success.
