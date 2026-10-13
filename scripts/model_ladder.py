@@ -132,7 +132,15 @@ def coverage(
     return score, missing, []
 
 
-def ask(api: str, prompt: str, timeout: int) -> tuple[str, float, str | None]:
+def ask(api: str, prompt: str, timeout: int, retries: int = 1) -> tuple[str, float, str | None]:
+    """One completion. Returns (answer, seconds, error).
+
+    Retries once on ANY transport failure. Driving the phone over an adb
+    forward means resets and stale sockets are routine - an earlier
+    version caught only URLError/TimeoutError, and
+    http.client.RemoteDisconnected escaped it and killed the whole run
+    partway through, losing every result up to that point.
+    """
     payload = {
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
@@ -144,11 +152,21 @@ def ask(api: str, prompt: str, timeout: int) -> tuple[str, float, str | None]:
         headers={"Content-Type": "application/json"},
     )
     started = time.monotonic()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            body = json.loads(response.read().decode())
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        return "", time.monotonic() - started, str(exc)
+    last = "unknown error"
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                body = json.loads(response.read().decode())
+            break
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:  # noqa: BLE001 - transport layer is unpredictable
+            last = f"{type(exc).__name__}: {exc}"
+            if attempt < retries:
+                time.sleep(2)
+    else:
+        return "", time.monotonic() - started, last
+
     elapsed = time.monotonic() - started
     try:
         return body["choices"][0]["message"]["content"], elapsed, None
