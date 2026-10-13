@@ -46,9 +46,11 @@ Conflict policy, and its one acknowledged hole:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -76,8 +78,26 @@ def _slug(name: str) -> str:
     Record ids cannot cross devices - they are per-database. A name is
     the only thing both sides agree on, so it is normalised into a slug
     and matched case-insensitively on import.
+
+    Unicode-aware, because an ASCII-only rule silently erases non-Latin
+    notebooks. `[^a-z0-9]+` turned '日本語勉強会   ||   アドバンス' into
+    the empty string, which is then filtered out: the notebook vanished
+    from the index and every note attached to it exported with an empty
+    `notebook_slugs`. That is real data loss with no error anywhere -
+    found by exporting the operator's own PC database, where two of two
+    notes happened to hang off exactly that notebook.
+
+    `\\w` is Unicode-aware in Python 3, so CJK and accented characters
+    survive. NFKC folds compatibility forms (full-width and half-width
+    lookalikes) so they match, and casefold beats lower for matching.
+    A name with no word characters at all falls back to a hash, which is
+    still stable across devices and still distinct.
     """
-    cleaned = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+    normalised = unicodedata.normalize("NFKC", name or "").casefold()
+    cleaned = re.sub(r"\W+", "-", normalised).strip("-")
+    if not cleaned:
+        digest = hashlib.sha1((name or "").encode("utf-8")).hexdigest()[:8]
+        cleaned = f"notebook-{digest}"
     return cleaned
 
 

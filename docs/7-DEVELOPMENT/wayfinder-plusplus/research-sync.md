@@ -384,3 +384,48 @@ Notebooks themselves are not synced. Creating them on import was
 considered and rejected: it litters a device with folders the operator
 never asked for, and a name is not consent to make one. The report tells
 you what is missing so you can create it deliberately.
+
+---
+
+## 12. Slugs were ASCII-only, and that silently erased real notebooks
+
+Found by exporting the operator's actual PC database rather than a test
+fixture. `_slug()` used `[^a-z0-9]+`, so:
+
+```
+'日本語勉強会   ||   アドバンス'   -> ''
+'Ökonomie'                        -> ''
+```
+
+An empty slug is then filtered out of `notebook_slugs` and renders as an
+empty entry in the index. So the notebook disappears from sync, and every
+note attached to it exports **ungrouped** — with no error anywhere. On
+this account both notes happened to hang off exactly that notebook, so
+2 of 2 exported with `notebook_slugs=[]`.
+
+Now Unicode-aware: NFKC first (folds full-width to half-width so
+lookalikes match), then `casefold()`, then `\W+` → `-` — `\w` is
+Unicode-aware in Python 3, so CJK and accents survive. A name with no word
+characters at all falls back to `notebook-<sha1[:8]>`, which is still
+stable across devices and still distinct.
+
+| Input | Slug |
+|---|---|
+| `日本語勉強会   \|\|   アドバンス` | `日本語勉強会-アドバンス` |
+| `Ökonomie` | `ökonomie` |
+| `Ａ Ｂ` | `a-b` (NFKC folds full-width) |
+| `!!!` | `notebook-9a7b006d` |
+
+`test_slug_is_never_empty` now asserts the invariant directly, because an
+empty slug is indistinguishable from "no notebook" and that ambiguity is
+the whole bug.
+
+### The index is per-device, and that is a known limitation
+
+`notebooks/index.json` is regenerated from the *exporting* device's own
+notebooks, so it lists that device's notebooks rather than the union
+across devices. When the PC exported, its seven notebooks replaced the
+phone's single one in the file. This is informational only — resolution
+uses the per-note `notebook_slugs`, which are correct on both sides. A
+true union would need a merge, which git cannot do for a single
+whole-file rewrite.

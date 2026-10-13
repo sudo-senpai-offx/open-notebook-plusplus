@@ -501,13 +501,30 @@ class TestNotebookSlugs:
             ("cognitive science", "cognitive-science"),  # case-insensitive
             ("Linear Algebra!", "linear-algebra"),  # punctuation collapsed
             ("  spaced   out  ", "spaced-out"),
-            ("", ""),
+            ("Ökonomie", "ökonomie"),  # accents preserved
+            # The regression: an ASCII-only rule erased this entirely, the
+            # notebook vanished from the index, and both notes attached to
+            # it exported with empty notebook_slugs.
+            ("日本語勉強会   ||   アドバンス", "日本語勉強会-アドバンス"),
+            ("Ａ Ｂ", "a-b"),  # full-width folded by NFKC
         ],
     )
     def test_slug_normalisation(self, name, expected):
         from open_notebook.sync.exchange import _slug
 
         assert _slug(name) == expected
+
+    def test_slug_is_never_empty(self):
+        """An empty slug cannot be matched, so it is always data loss."""
+        from open_notebook.sync.exchange import _slug
+
+        for name in ("", "   ", "!!!", "|||"):
+            assert _slug(name) != ""
+
+    def test_distinct_names_get_distinct_slugs(self):
+        from open_notebook.sync.exchange import _slug
+
+        assert _slug("!!!") != _slug("???")
 
     @pytest.mark.asyncio
     async def test_unknown_slug_is_reported_not_silently_dropped(
