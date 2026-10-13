@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# (Re)establish the adb tunnels this repo's tooling depends on, then verify.
+#
+#   scripts/phone-tunnel.sh          # dev box -> phone loopback
+#   scripts/phone-tunnel.sh --check  # verify only, don't re-add
+#
+# `adb forward` is per-connection: unplugging or reconnecting the phone
+# CLEARS every forward silently. The symptom is a ladder run reporting
+# "Connection refused" on all prompts, which looks like a model failure
+# and is not. Run this before any phone-side measurement.
+#
+# Why forwards and not LAN: llama-server binds 127.0.0.1 inside Termux,
+# so it is unreachable from the network even though the app's API on
+# :5055 is. The tunnel is the only way to reach the model from here.
+
+set -uo pipefail
+
+PHONE_IP="${PHONE_IP:-10.7.112.85}"
+LLAMA_LOCAL=18080
+API_LOCAL=15055
+
+check() {
+  local ok=0
+  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${LLAMA_LOCAL}/health" 2>/dev/null || echo 000)
+  [ "$code" = "200" ] && echo "llama  127.0.0.1:${LLAMA_LOCAL} -> phone :8080   OK" || { echo "llama  tunnel DOWN (HTTP $code)"; ok=1; }
+  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${API_LOCAL}/health" 2>/dev/null || echo 000)
+  [ "$code" = "200" ] && echo "api    127.0.0.1:${API_LOCAL} -> phone :5055   OK" || { echo "api    tunnel DOWN (HTTP $code)"; ok=1; }
+  return $ok
+}
+
+if [ "${1:-}" != "--check" ]; then
+  if ! adb get-state >/dev/null 2>&1; then
+    echo "no adb device - reconnect the phone and retry" >&2
+    exit 2
+  fi
+  adb forward --remove-all >/dev/null 2>&1 || true
+  adb forward "tcp:${LLAMA_LOCAL}" tcp:8080 >/dev/null
+  adb forward "tcp:${API_LOCAL}"  tcp:5055 >/dev/null
+  echo "tunnels re-established"
+fi
+
+check
