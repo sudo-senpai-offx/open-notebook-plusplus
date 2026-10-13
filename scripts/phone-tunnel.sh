@@ -23,6 +23,10 @@ API_LOCAL=15055
 # wipe this port without restoring it, so any DB inspection that ran after
 # re-tunnelling failed with an empty body and looked like a dead database.
 DB_LOCAL=18000
+# Embedding server, a second llama-server because --embeddings disables
+# chat on the same process. Optional: absent, this reports DOWN without
+# failing the check, since chat and RAG are independently useful.
+EMBED_LOCAL=18081
 
 check() {
   local ok=0
@@ -32,6 +36,8 @@ check() {
   [ "$code" = "200" ] && echo "api    127.0.0.1:${API_LOCAL} -> phone :5055   OK" || { echo "api    tunnel DOWN (HTTP $code)"; ok=1; }
   code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${DB_LOCAL}/version" 2>/dev/null || echo 000)
   [ "$code" = "200" ] && echo "db     127.0.0.1:${DB_LOCAL} -> phone :8000   OK" || { echo "db     tunnel DOWN (HTTP $code)"; ok=1; }
+  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${EMBED_LOCAL}/health" 2>/dev/null || echo 000)
+  [ "$code" = "200" ] && echo "embed  127.0.0.1:${EMBED_LOCAL} -> phone :8081   OK" || echo "embed  not running (optional)"
   return $ok
 }
 
@@ -44,6 +50,7 @@ if [ "${1:-}" != "--check" ]; then
   adb forward "tcp:${LLAMA_LOCAL}" tcp:8080 >/dev/null
   adb forward "tcp:${API_LOCAL}"  tcp:5055 >/dev/null
   adb forward "tcp:${DB_LOCAL}"   tcp:8000 >/dev/null
+  adb forward "tcp:${EMBED_LOCAL}" tcp:8081 >/dev/null
   echo "tunnels re-established"
 fi
 
