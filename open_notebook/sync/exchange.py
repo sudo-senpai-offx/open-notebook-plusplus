@@ -48,12 +48,13 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from loguru import logger
 
-from open_notebook.database.repository import repo_query
+from open_notebook.database.repository import ensure_record_id, repo_query
 
 SCHEMA_VERSION = 1
 MANIFEST = "manifest.json"
@@ -185,6 +186,36 @@ async def _maybe_get(cls, record_id: str):
         return None
 
 
+async def _create_with_id(instance, record_id: str) -> None:
+    """Create a domain record under a caller-supplied id.
+
+    Needed because `ObjectModel.save()` branches on `self.id is None`, and
+    SurrealDB's `UPDATE` against a record that does not exist is a no-op
+    returning `[]` - so building a model with the *other* device's id and
+    calling `save()` silently creates nothing, then raises IndexError on
+    `result_list[0]`. `repo_create` cannot cover this either: it pops
+    `id`.
+
+    Both were found by running the import against a real SurrealDB. The
+    unit tests patch `save()` outright, so the create/update branch was
+    never executed by any of them.
+
+    UPSERT rather than CREATE so a concurrent import from the other
+    device cannot turn a duplicate into an error.
+    """
+    data = instance._prepare_save_data()
+    data.pop("id", None)
+    rows = await repo_query(
+        "UPSERT $rid MERGE $data RETURN AFTER",
+        {"rid": ensure_record_id(record_id), "data": data},
+    )
+    row = (rows or [{}])[0] or {}
+    for key, value in row.items():
+        if key != "id" and hasattr(instance, key):
+            setattr(instance, key, value)
+    instance.id = ensure_record_id(record_id)
+
+
 def _newer(incoming: Optional[str], existing: Optional[str]) -> bool:
     """Whether an incoming `updated` should overwrite the local record."""
     if not incoming:
@@ -240,12 +271,15 @@ async def import_all(
             continue
 
         note = existing_note or Note(
-            id=record_id, title=data.get("title"), content=data.get("content") or "x"
+            title=data.get("title"), content=data.get("content") or "x"
         )
         note.title = data.get("title")
         note.content = data.get("content")
         note.note_type = data.get("note_type")
-        await note.save()
+        if existing_note:
+            await note.save()
+        else:
+            await _create_with_id(note, record_id)
         result["notes_updated" if existing_note else "notes_created"] += 1
 
     for path in sorted((root / CARDS_DIR).glob("*.json")):
@@ -284,7 +318,10 @@ async def import_all(
         # synced, so the id would dangle on this device. A card with no
         # source still reviews and exports fine.
         card.fsrs_json = data.get("fsrs_json")
-        await card.save()
+        if existing_card:
+            await card.save()
+        else:
+            await _create_with_id(card, record_id)
         result["cards_updated" if existing_card else "cards_created"] += 1
 
     revlog_result = await _import_revlog(root, dry_run)
@@ -307,6 +344,32 @@ def _revlog_key(row: Dict[str, Any]) -> Tuple[Any, str, str, Any]:
         str(row.get("reviewed_at")),
         row.get("duration_ms", 0),
     )
+
+
+def _as_iso(value: Any) -> Any:
+    """Normalise a timestamp to something a `datetime` field will accept.
+
+    SurrealDB serialises datetimes with a space separator
+    (`2026-10-13 06:55:36+00:00`), which is what lands in the exported
+    JSONL. Now that migration 34 lets a supplied value through instead of
+    overwriting it with `time::now()`, that string is handed straight to
+    the field - and `TYPE datetime` rejects it:
+
+        Found '2026-10-13 06:55:36.740943+00:00' for field `reviewed_at`,
+        but expected a datetime
+
+    So parse it and re-emit in ISO-8601 with a `T`. Unparseable values
+    pass through untouched rather than being dropped, so a malformed row
+    surfaces as a schema error naming the value instead of vanishing.
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    return value
 
 
 async def _import_revlog(root: Path, dry_run: bool) -> Tuple[int, int]:
@@ -349,7 +412,7 @@ async def _import_revlog(root: Path, dry_run: bool) -> Tuple[int, int]:
             {
                 "card_id": row.get("card_id"),
                 "rating": row.get("rating"),
-                "reviewed_at": row.get("reviewed_at"),
+                "reviewed_at": _as_iso(row.get("reviewed_at")),
                 "duration_ms": row.get("duration_ms", 0),
             },
         )

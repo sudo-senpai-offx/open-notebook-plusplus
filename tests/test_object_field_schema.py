@@ -117,13 +117,23 @@ class TestObjectFieldsAreNotSilentlyDropped:
         ), "33.surrealql must declare fsrs_json FLEXIBLE TYPE option<object>"
 
     def test_migration_33_is_registered(self):
-        """Migrations are hard-coded in the manager, not discovered."""
+        """Migrations are hard-coded in the manager, not discovered.
+
+        Searches rather than indexing [-1]: this test originally assumed 33
+        was the newest migration and broke the moment 34 landed. A future
+        migration should not require editing an unrelated test.
+        """
         from open_notebook.database.async_migrate import AsyncMigrationManager
 
         manager = AsyncMigrationManager()
         assert len(manager.up_migrations) == len(manager.down_migrations)
-        assert "fsrs_json ON TABLE flashcard FLEXIBLE TYPE option<object>" in (
-            manager.up_migrations[-1].sql
+        needle = "fsrs_json ON TABLE flashcard FLEXIBLE TYPE option<object>"
+        assert any(needle in m.sql for m in manager.up_migrations), (
+            "migration 33 (the fsrs_json FLEXIBLE fix) is not registered"
+        )
+        assert any(
+            "REMOVE FIELD IF EXISTS fsrs_json ON TABLE flashcard" in m.sql
+            for m in manager.down_migrations
         )
 
     def test_no_unflexible_object_field_without_nested_defs(self):

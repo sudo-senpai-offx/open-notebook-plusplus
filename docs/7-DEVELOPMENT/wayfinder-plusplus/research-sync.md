@@ -144,3 +144,90 @@ corresponding fix is reverted:
 - no import of the vault module (AST-checked, not grepped — a grep
   matches the module's own docstring explaining why the vault is unused,
   which is how a test passes for the wrong reason)
+---
+
+## 9. Verification against a real database — three bugs the unit tests could not find
+
+The 22 sync tests all stub `repo_query` and patch `save()`. Running
+`import_all` against the dev box's real SurrealDB 2.7.0 found three
+defects in a row. This is the same lesson as the FSRS and export bugs:
+**the stub is where the bug hides.**
+
+### Bug A — importing created nothing
+
+`ObjectModel.save()` branches on `self.id is None`. Sync sets the other
+device's id, so every record took the **UPDATE** path. SurrealDB's
+`UPDATE` against a record that does not exist is a no-op returning `[]`,
+so `save()` then raised `IndexError` on `result_list[0]`.
+
+Every first-time sync failed. No test caught it: they patch `save()`
+outright, so the create/update branch was never executed.
+
+`repo_create` cannot cover it either — it pops `id`. Fixed with
+`_create_with_id()`, which issues `UPSERT $rid MERGE $data RETURN AFTER`:
+UPSERT rather than CREATE so a concurrent import from the other device
+cannot turn a duplicate into an error.
+
+### Bug B — imported reviews were timestamped at import time (migration 34)
+
+Migration 32 declared:
+
+```sql
+DEFINE FIELD reviewed_at ON revlog DEFAULT time::now() VALUE $before OR time::now();
+```
+
+A field's `VALUE` clause is evaluated **after** the statement's input and
+replaces it. Measured:
+
+```
+CREATE revlog SET reviewed_at = '2020-01-01T00:00:00+00:00'
+  -> stored: 2026-10-13T11:43:23   (the insert time)
+```
+
+The app's own writes were never affected — `record_grade()` already passes
+`time::now()`. Only importers break. Two consequences:
+
+1. **Review history is falsified.** "What did I study last week" becomes
+   "what did I import last week", and any future replay of the log reads
+   wrong intervals.
+2. **Dedupe can never match**, because every import has a unique
+   timestamp. The revlog grows without bound on every sync — observed
+   going 2 → 4 → 6 rows across three imports.
+
+Migration 34 drops the `VALUE` clause and keeps `DEFAULT`, so a supplied
+value wins. `$before` had nothing to preserve: revlog rows are
+append-only and never updated.
+
+### Bug C — space-separated timestamps rejected once B was fixed
+
+Fixing B let the supplied value through, and it then hit the field's
+strict type:
+
+```
+Found '2026-10-13 06:55:36.740943+00:00' for field `reviewed_at`,
+but expected a datetime
+```
+
+SurrealDB serialises datetimes with a space separator. `_as_iso()` parses
+and re-emits ISO-8601. Unparseable values pass through untouched, so a
+malformed row surfaces as a schema error naming the value rather than
+vanishing.
+
+### Result after all three
+
+```
+FIRST (empty db)      cards=3 notes=1 revlog=2   created=1/3  revlog+=2
+SECOND (same input)  cards=3 notes=1 revlog=2   stale=1/3    revlog+=0 dup=2
+THIRD (as 2nd device) cards=3 notes=1 revlog=2  stale=1/3    revlog+=0 dup=2
+
+graded card: stability=2.3065 state=1 due=2026-10-13T07:13:55
+revlog:      06:55:36, 07:03:55  <- real review times
+```
+
+Idempotent, lossless, and the review log no longer grows.
+
+### A test that broke for the right reason
+
+`test_migration_33_is_registered` asserted on `up_migrations[-1]` and
+failed the moment migration 34 landed. It now searches the whole list, so
+migration 35 will not require editing it.

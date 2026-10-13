@@ -1,0 +1,32 @@
+-- Migration 34: let revlog.reviewed_at carry a supplied value.
+--
+-- Migration 32 declared:
+--
+--   DEFINE FIELD reviewed_at ON revlog DEFAULT time::now()
+--       VALUE $before OR time::now();
+--
+-- A field's VALUE clause is evaluated after the statement's input and
+-- REPLACES it. So `CREATE revlog SET ... reviewed_at = <anything>` does not
+-- write that value - it writes the current time. Measured:
+--
+--   CREATE revlog SET reviewed_at = '2020-01-01T00:00:00+00:00'
+--   -> stored reviewed_at = 2026-10-13T11:43:23  (the insert time)
+--
+-- The app's own writes were never affected: record_grade() already passes
+-- time::now() explicitly, which is the same thing. It only breaks when
+-- something needs to import a review that happened *earlier* - which is
+-- precisely what sync does.
+--
+-- Two consequences, both bad:
+--   1. Review history is falsified on the receiving device. Every imported
+--      review is timestamped at import, so "what did I study last week"
+--      becomes "what did I import last week", and any future scheduling
+--      replay from the log reads the wrong intervals.
+--   2. Deduplication can never match, because every import has a unique
+--      timestamp. The revlog grows without bound on every sync.
+--
+-- DROP VALUE and keep DEFAULT: a supplied value now wins, and an absent
+-- one still falls back to time::now(). Revlog rows are append-only and
+-- never updated, so $before had nothing to preserve here.
+
+DEFINE FIELD OVERWRITE reviewed_at ON TABLE revlog TYPE datetime DEFAULT time::now();

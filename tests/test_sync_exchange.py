@@ -11,6 +11,7 @@ it yields an unreviewed card. That is why sync is JSON.
 """
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,91 @@ class TestLayout:
         )
 
 
+class TestTimestampNormalisation:
+    """SurrealDB serialises datetimes with a space separator.
+
+    Once migration 34 stops the field definition overwriting `reviewed_at`
+    with `time::now()`, that exact string is handed to a `TYPE datetime`
+    field, which rejects it:
+
+        Found '2026-10-13 06:55:36.740943+00:00' for field `reviewed_at`,
+        but expected a datetime
+    """
+
+    def test_space_separated_string_is_parsed(self):
+        from open_notebook.sync.exchange import _as_iso
+
+        out = _as_iso("2026-10-13 06:55:36.740943+00:00")
+        assert isinstance(out, datetime)
+        assert out.year == 2026 and out.hour == 6
+
+    def test_iso_string_still_works(self):
+        from open_notebook.sync.exchange import _as_iso
+
+        assert isinstance(_as_iso("2026-10-13T06:55:36.740943+00:00"), datetime)
+
+    def test_unparseable_passes_through(self):
+        """Must not silently drop a bad value: surfacing it as a schema
+        error naming the value beats an absent review."""
+        from open_notebook.sync.exchange import _as_iso
+
+        assert _as_iso("not a timestamp") == "not a timestamp"
+        assert _as_iso(None) is None
+        assert _as_iso(42) == 42
+
+    def test_datetime_passes_through(self):
+        from open_notebook.sync.exchange import _as_iso
+
+        now = datetime(2026, 1, 1)
+        assert _as_iso(now) is now
+
+
+class TestIdAwareCreate:
+    """ObjectModel.save() branches on `id is None`.
+
+    SurrealDB's UPDATE against a record that does not exist is a no-op
+    returning [], so building a model carrying the other device's id and
+    calling save() creates nothing and then raises IndexError on
+    result_list[0]. Found by running the import against a real database;
+    the unit tests patch save() outright and never ran this branch.
+    """
+
+    @pytest.mark.asyncio
+    async def test_uses_upsert_with_the_supplied_id(self, monkeypatch):
+        from open_notebook.domain.flashcard import Flashcard
+        from open_notebook.sync import exchange as ex
+
+        seen: dict = {}
+
+        async def fake_query(q, v=None):
+            seen["q"] = q
+            seen["v"] = v
+            return [{"status": "approved"}]
+
+        monkeypatch.setattr(ex, "repo_query", fake_query)
+        card = Flashcard(model="basic", status="approved")
+        card.front = "f"
+        await ex._create_with_id(card, "flashcard:abc")
+
+        assert "UPSERT" in seen["q"], "UPDATE no-ops on a missing record"
+        assert str(seen["v"]["rid"]) == "flashcard:abc"
+        assert seen["v"]["data"].get("front") == "f"
+
+    @pytest.mark.asyncio
+    async def test_empty_result_does_not_raise(self, monkeypatch):
+        """The original crash: IndexError on result_list[0]."""
+        from open_notebook.domain.flashcard import Flashcard
+        from open_notebook.sync import exchange as ex
+
+        async def fake_query(_q, _v=None):
+            return []
+
+        monkeypatch.setattr(ex, "repo_query", fake_query)
+        card = Flashcard(model="basic", status="approved")
+        await ex._create_with_id(card, "flashcard:empty")
+        assert str(card.id) == "flashcard:empty"
+
+
 class _Rec:
     """Minimal stand-in for a domain record: what the sync code touches."""
 
@@ -186,6 +272,14 @@ def _patch(monkeypatch, existing_by_id, revlog_rows=None):
         return list(revlog_rows or [])
 
     monkeypatch.setattr(ex, "repo_query", fake_query)
+
+    # New records go through _create_with_id, not save(): carrying the
+    # other device's id would otherwise make save() take the UPDATE path,
+    # which no-ops against a record that does not exist.
+    async def fake_create(instance, record_id):
+        _Rec.recorded.append(instance)
+
+    monkeypatch.setattr(ex, "_create_with_id", fake_create)
     return _Rec.recorded
 
 

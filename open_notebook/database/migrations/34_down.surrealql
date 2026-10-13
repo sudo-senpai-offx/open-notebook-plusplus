@@ -1,0 +1,7 @@
+-- Migration 34 rollback: restore migration 32's VALUE clause.
+--
+-- Faithful, including the defect: restoring FLEXIBLE-style cleverness here
+-- would silently re-break imported review timestamps and dedupe. Rolling
+-- this back means reviews cannot be imported with their real times.
+
+DEFINE FIELD OVERWRITE reviewed_at ON TABLE revlog DEFAULT time::now() VALUE $before OR time::now();
