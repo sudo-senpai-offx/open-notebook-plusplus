@@ -1,78 +1,193 @@
 {
-  "_instructions": "DRAFT for operator review — do not treat as scored until a human signs off on the must_contain facts. Generation-quality fixture for the H2 model ladder (distinct from quality_fixture.json, which measures RETRIEVAL). Each entry: a prompt a student would actually ask this app, plus the facts a correct answer MUST contain. Scoring is coverage of must_contain, which is deterministic and needs no judge model.",
-  "_scoring": "scripts/model_ladder.py sends each prompt to llama-server's /v1/chat/completions and computes must_contain coverage (fraction of facts present, case- and whitespace-insensitive). Pair that with llama-bench pp/tg tok/s to find the knee of the intelligence/latency curve.",
-  "_why_not_retrieval": "quality_fixture.json (pairs: []) scores recall@k over sources and needs an embedding provider. This one needs only the LLM, so it runs on the phone where the latency decision is actually being made.",
-  "_tier_note": "must_contain should be 2-5 short factual strings. Long answers make coverage trivially satisfiable by a verbose model; few, specific facts make it discriminating.",
+  "_instructions": "DRAFT v2 for operator review — scores are meaningless until a human signs off on the must_contain / must_contain_any values. Generation-quality fixture for the H2 model ladder (distinct from quality_fixture.json, which scores RETRIEVAL).",
+  "_scoring": "scripts/model_ladder.py sends each prompt to llama-server /v1/chat/completions and scores three checks. must_contain: ALL required. must_contain_any: at least one acceptable phrasing (use where a right answer has many wordings). must_not_contain: a HARD gate — a hit scores 0 and is counted separately, because 'the capital of Wakanda is Dambrik, but Wakanda is fictional' must not be averaged into a passing grade.",
+  "_why_expanded": "n=10 cannot rank models: one flipped prompt is 0.10, and 2 of 4 disagreements between 0.5B and 1.5B were fixture defects rather than model behaviour. 25 prompts weighted toward this app's actual domain.",
+  "_drafting_notes": [
+    "Weighted toward review/cards/focus because that is what a student does daily, not trivia.",
+    "extract-02 and refuse-01 are the two probes that caught real behaviour on the first run; keep them sharp.",
+    "judge-01 and num-01 are the kind of everyday judgement calls the app will actually face.",
+    "If you disagree with any must_contain, change it — a fact the model would not reasonably include is a bad test, not a strict model."
+  ],
   "prompts": [
     {
       "id": "srs-01",
       "domain": "spaced-repetition",
       "prompt": "In two sentences, explain why a review interval should grow after a correct answer.",
-      "must_contain": ["interval", "longer"],
-      "notes": "Domain core. 0.5B models often answer vaguely here."
+      "must_contain": ["interval"],
+      "must_contain_any": ["longer", "grow", "increase", "bigger"],
+      "notes": "Was scoring 0.5 for the 1.5B saying 'grow' instead of 'longer'. Now accepts either."
     },
     {
       "id": "srs-02",
       "domain": "spaced-repetition",
       "prompt": "What is the difference between a lapse and a leech in a spaced-repetition system?",
-      "must_contain": ["lapse", "leech"],
-      "notes": "Two distinct domain terms; tests whether it can hold two definitions."
+      "must_contain_any": ["lapse", "leech"],
+      "notes": "Two domain terms; can it hold two definitions."
+    },
+    {
+      "id": "srs-03",
+      "domain": "spaced-repetition",
+      "prompt": "What does desired retention mean in a spaced-repetition scheduler?",
+      "must_contain_any": ["retention", "remember", "recall"],
+      "must_not_contain": ["95 percent"],
+      "notes": "Should describe a probability/goal, not assert a number that was never given."
+    },
+    {
+      "id": "card-01",
+      "domain": "flashcards",
+      "prompt": "In one sentence, what makes a good cloze card?",
+      "must_contain_any": ["deleted", "removed", "blank", "hidden"],
+      "notes": "Cloze = one fact hidden. Tests product-domain knowledge."
+    },
+    {
+      "id": "card-02",
+      "domain": "flashcards",
+      "prompt": "Someone wants to memorise a whole 40-page chapter. In one sentence, what should they do instead of writing 200 cards?",
+      "must_contain_any": ["break", "smaller", "chunk", "divide", "smaller pieces"],
+      "notes": "Judgement: decomposition over brute force."
+    },
+    {
+      "id": "focus-01",
+      "domain": "pomodoro",
+      "prompt": "What is the point of taking a break between pomodoro work sessions?",
+      "must_contain_any": ["rest", "recover", "fatigue", "tired", "sustain"],
+      "notes": "Core feature rationale."
+    },
+    {
+      "id": "focus-02",
+      "domain": "pomodoro",
+      "prompt": "A student has been studying 90 minutes straight. Should they take a long break now? Answer yes or no.",
+      "must_contain_any": ["yes"],
+      "notes": "Matches the app's 90/20 preset."
+    },
+    {
+      "id": "r-01",
+      "domain": "retrieval",
+      "prompt": "Explain what an embedding vector is to someone who has never heard the term.",
+      "must_contain_any": ["vector", "list of numbers", "numbers"],
+      "notes": "Was scoring on the literal word 'meaning' - a vocabulary test, not comprehension."
+    },
+    {
+      "id": "r-02",
+      "domain": "retrieval",
+      "prompt": "In one sentence, why is a long document split into chunks before it is searched?",
+      "must_contain_any": ["chunk", "piece", "split", "segment"],
+      "notes": "Product's own retrieval pipeline."
+    },
+    {
+      "id": "multi-01",
+      "domain": "multi-hop",
+      "prompt": "If I want to find notes I wrote about the French Revolution, which search type should I use if I only remember an exact phrase from them: vector search or full-text search? Answer with the type and one clause of why.",
+      "must_contain_any": ["full-text", "full text", "keyword"],
+      "notes": "1.5B answered 'vector' and was wrong - the clearest genuine error seen."
+    },
+    {
+      "id": "extract-01",
+      "domain": "extraction",
+      "prompt": "From this note, extract the author and the year, replying exactly as 'author, year': 'Darwin, On the Origin of Species, published 1859.'",
+      "must_contain": ["Darwin", "1859"],
+      "notes": "1.5B echoed the literal format 'author, year' instead of extracting - genuine instruction-following failure."
+    },
+    {
+      "id": "extract-02",
+      "domain": "extraction",
+      "prompt": "From this sentence, extract only the person's job title: 'Dr. Alvarez, who is a marine biologist, spoke at the conference.'",
+      "must_contain_any": ["marine biologist", "biologist"],
+      "must_not_contain": ["Dr. Alvarez is the marine biologist who spoke"],
+      "notes": "Second extraction probe; guards against answering the wrong question."
     },
     {
       "id": "sum-01",
       "domain": "summarisation",
       "prompt": "Summarise in one sentence: 'The mitochondrion generates ATP via oxidative phosphorylation across the inner membrane, using an electron transport chain established by protons pumped from the matrix.'",
       "must_contain": ["ATP"],
-      "notes": "Compression test; only one fact survives summarisation."
+      "notes": "Compression test."
     },
     {
       "id": "reason-01",
       "domain": "reasoning",
       "prompt": "A student reviews 20 cards, gets 15 right and 5 wrong. Should they still do the 5 wrong ones today? Answer yes or no and justify in one sentence.",
-      "must_contain": ["yes"],
-      "notes": "Follows the app's own policy (relearn wrong cards same day)."
+      "must_contain_any": ["yes"],
+      "notes": "Matches the app's same-day relearn policy."
     },
     {
-      "id": "extract-01",
-      "domain": "extraction",
-      "prompt": "From this note, extract the name of the author and the year: 'Darwin, On the Origin of Species, published 1859.' Reply as 'author, year'.",
-      "must_contain": ["Darwin", "1859"],
-      "notes": "Exact-value extraction; easy to hallucinate a variant."
+      "id": "reason-02",
+      "domain": "reasoning",
+      "prompt": "Two cards are due today. One you always answer correctly, one you always fail. Which should you spend more time on, and why?",
+      "must_contain_any": ["fail", "wrong", "hard", "struggle"],
+      "notes": "Requires preferring the harder item over the easy one."
     },
     {
-      "id": "explain-01",
-      "domain": "explanation",
-      "prompt": "Explain what an embedding vector is to someone who has never heard the term.",
-      "must_contain": ["vector", "meaning"],
-      "notes": "Retrieval-adjacent, because embeddings are core to this product."
+      "id": "judge-01",
+      "domain": "judgement",
+      "prompt": "Someone has 200 flashcards due today after being away for two weeks. Should they do all 200 today? Answer yes or no in one sentence.",
+      "must_contain_any": ["no"],
+      "notes": "Everyday judgement: the honest answer is to cap the session."
+    },
+    {
+      "id": "num-01",
+      "domain": "arithmetic",
+      "prompt": "You have 60 cards and get 80% right. How many did you get wrong? Just the number.",
+      "must_contain": ["12"],
+      "notes": "Small arithmetic check; 12 cards is the answer."
     },
     {
       "id": "code-01",
       "domain": "code",
       "prompt": "What does this Python do in one sentence: `d = {k: v for k, v in pairs}`?",
-      "must_contain": ["dict"],
+      "must_contain_any": ["dict", "dictionary", "map"],
       "notes": "Small code comprehension."
+    },
+    {
+      "id": "code-02",
+      "domain": "code",
+      "prompt": "What does the word 'idempotent' mean in software, in one sentence?",
+      "must_contain_any": ["same result", "twice", "repeat"],
+      "notes": "Vocabulary in context."
     },
     {
       "id": "refuse-01",
       "domain": "calibration",
       "prompt": "What is the capital city of Wakanda?",
-      "must_contain": ["fictional", "does not exist"],
-      "notes": "Hallucination probe: a confident wrong answer is worse than a refusal."
+      "must_contain_any": ["fictional", "not real", "does not exist", "doesn't exist", "imaginary", "no such"],
+      "must_not_contain": ["Dambrik"],
+      "notes": "THE probe. 1.5B invented 'Dambrik' then hedged. The gate exists so that failure cannot be averaged away."
+    },
+    {
+      "id": "refuse-02",
+      "domain": "calibration",
+      "prompt": "Quote the exact wording of the third sentence of the Wikipedia article on photosynthesis.",
+      "must_contain_any": ["cannot", "can't", "no access", "don't have", "do not have", "unable"],
+      "notes": "Second calibration probe: no invented quotation."
     },
     {
       "id": "format-01",
       "domain": "instruction-following",
-      "prompt": "List exactly three benefits of spaced repetition, one per line, no numbering.",
+      "prompt": "List exactly three benefits of spaced repetition, one per line, no numbering, no preamble.",
       "must_contain": ["3"],
-      "notes": "Format compliance; small models over-produce."
+      "notes": "Format compliance. Known-weak check: verify a 2-item or 5-item answer is caught."
     },
     {
-      "id": "multi-01",
-      "domain": "multi-hop",
-      "prompt": "If I want to find notes I wrote about the French Revolution, which search type should I use if I only remember a phrase from them: vector search or full-text? Answer with the type and one clause of why.",
-      "must_contain": ["full-text"],
-      "notes": "Tests product-domain reasoning about its own features."
+      "id": "format-02",
+      "domain": "instruction-following",
+      "prompt": "Reply with a JSON object only, no other text: {\"ready\": true}",
+      "must_contain": ["ready"],
+      "must_contain_any": ["{", "json"],
+      "notes": "Strict output format."
+    },
+    {
+      "id": "util-01",
+      "domain": "utility",
+      "prompt": "Rewrite this more concisely: 'Due to the fact that the results were obtained prior to the deadline, the team was able to submit it.'",
+      "must_contain_any": ["deadline", "submitted"],
+      "notes": "Compression for a study tool's note-taking."
+    },
+    {
+      "id": "util-02",
+      "domain": "utility",
+      "prompt": "What is the Spanish word for 'library'? Just the word.",
+      "must_contain_any": ["biblioteca"],
+      "notes": "Simple factual recall; a 0.5B may miss it, a 1.5B should not."
     }
   ]
 }

@@ -45,13 +45,55 @@ def normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def coverage(answer: str, must_contain: list[str]) -> tuple[float, list[str]]:
-    """Fraction of required facts present, plus the ones that were missing."""
+def coverage(
+    answer: str, entry: dict
+) -> tuple[float, list[str], list[str]]:
+    """Score one answer against one prompt.
+
+    Three checks, in priority order:
+
+      must_not_contain  - a HARD gate. If any appear, the answer is wrong
+                          outright regardless of everything else. This
+                          exists because "the capital of Wakanda is
+                          Dambrik, but Wakanda is fictional" scored 0.5
+                          on a naive mean: the model hedged *after*
+                          confabulating. For a study tool that is the
+                          worst possible failure and must not be averaged
+                          away.
+      must_contain      - every one of these must appear.
+      must_contain_any  - at least one of these must appear. Used where a
+                          correct answer has many valid phrasings and a
+                          single literal token would score a correct
+                          answer as wrong (the "grow" vs "longer" defect).
+
+    Returns (score, missing, hallucinated).
+    """
     haystack = normalise(answer)
-    missing = [fact for fact in must_contain if normalise(fact) not in haystack]
-    if not must_contain:
-        return 0.0, []
-    return (len(must_contain) - len(missing)) / len(must_contain), missing
+
+    hallucinated = [f for f in entry.get("must_not_contain", []) if normalise(f) in haystack]
+    if hallucinated:
+        return 0.0, list(entry.get("must_contain", [])), hallucinated
+
+    required = entry.get("must_contain", [])
+    alts = entry.get("must_contain_any", [])
+    missing = [f for f in required if normalise(f) not in haystack]
+
+    if required:
+        score = (len(required) - len(missing)) / len(required)
+    else:
+        # Nothing strict to check; must_contain_any decides alone.
+        score = 0.0
+
+    if alts:
+        matched = any(normalise(a) in haystack for a in alts)
+        if not required:
+            score = 1.0 if matched else 0.0
+        elif not matched:
+            score *= 0.5
+        if not matched:
+            missing.append(f"any of {alts}")
+
+    return score, missing, []
 
 
 def ask(api: str, prompt: str, timeout: int) -> tuple[str, float, str | None]:
@@ -104,6 +146,7 @@ def main() -> int:
     total_cov = 0.0
     total_secs = 0.0
     errors = 0
+    hallucinations = 0
     rows = []
     for entry in prompts:
         answer, secs, error = ask(args.api, entry["prompt"], args.timeout)
@@ -112,12 +155,22 @@ def main() -> int:
             print(f"{entry['id']:<12} {'ERR':>5} {secs:>7.1f}  {error[:40]}")
             rows.append({"id": entry["id"], "coverage": 0.0, "seconds": secs, "missing": entry.get("must_contain", [])})
             continue
-        cov, missing = coverage(answer, entry.get("must_contain", []))
+        cov, missing, halluc = coverage(answer, entry)
         total_cov += cov
         total_secs += secs
-        flag = ",".join(missing) if missing else "-"
+        if halluc:
+            hallucinations += 1
+            flag = "HALLUCINATED: " + ",".join(halluc)
+        else:
+            flag = ",".join(missing) if missing else "-"
         print(f"{entry['id']:<12} {cov:>5.2f} {secs:>7.1f}  {flag}")
-        rows.append({"id": entry["id"], "coverage": cov, "seconds": secs, "missing": missing})
+        rows.append({
+            "id": entry["id"],
+            "coverage": cov,
+            "seconds": secs,
+            "missing": missing,
+            "hallucinated": halluc,
+        })
 
     n = len(prompts)
     mean_cov = total_cov / n
@@ -126,6 +179,10 @@ def main() -> int:
     print(f"{'MEAN':<12} {mean_cov:>5.2f} {mean_secs:>7.1f}")
     if errors:
         print(f"WARNING: {errors}/{n} prompts errored — mean coverage is understated")
+    if hallucinations:
+        print(f"HALLUCINATION GATE: {hallucinations}/{n} answers asserted a banned fact")
+        print("  Each of these scored 0. Treat any candidate with a non-zero count")
+        print("  as failing, regardless of its mean.")
 
     # Machine-readable so successive candidates can be diffed rather than
     # re-read off a terminal.
@@ -136,6 +193,7 @@ def main() -> int:
         "mean_coverage": round(mean_cov, 4),
         "mean_seconds": round(mean_secs, 2),
         "errors": errors,
+        "hallucinations": hallucinations,
         "rows": rows,
     }
     print(json.dumps(out))
