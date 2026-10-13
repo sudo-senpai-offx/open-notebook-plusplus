@@ -1,0 +1,7 @@
+-- Migration 33 rollback: restore migration 32's (broken) fsrs_json shape.
+--
+-- Deliberately faithful to the original. Rolling back re-introduces the
+-- defect that swallows every FSRS grade; the alternative would be to
+-- restore `FLEXIBLE` and make this file a lie about what it reverses.
+
+DEFINE FIELD OVERWRITE fsrs_json ON TABLE flashcard TYPE option<object>;

@@ -34,8 +34,9 @@ All claims below cite primary sources (library repos, Anki manual, SuperMemo aut
 - Minimal flow ([py-fsrs README Quickstart](https://github.com/open-spaced-repetition/py-fsrs)):
   ```python
   from fsrs import Scheduler, Card, Rating
+
   scheduler = Scheduler()  # defaults: 21 FSRS-6 weights, desired_retention=0.9
-  card = Card()            # new cards are due immediately
+  card = Card()  # new cards are due immediately
   card, review_log = scheduler.review_card(card, Rating.Good)
   ```
 - Ratings: `Rating.Again==1` forgot; `Hard==2` serious difficulty; `Good==3` hesitation; `Easy==4` easily recalled ([py-fsrs README Quickstart](https://github.com/open-spaced-repetition/py-fsrs)).

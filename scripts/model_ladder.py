@@ -73,14 +73,10 @@ def _phrase_present(phrase: str, haystack: set[str]) -> bool:
     stems = [_stem(w) for w in normalise(phrase).split() if w]
     if not stems:
         return False
-    return all(
-        any(h.startswith(s) or s.startswith(h) for h in haystack) for s in stems
-    )
+    return all(any(h.startswith(s) or s.startswith(h) for h in haystack) for s in stems)
 
 
-def coverage(
-    answer: str, entry: dict
-) -> tuple[float, list[str], list[str]]:
+def coverage(answer: str, entry: dict) -> tuple[float, list[str], list[str]]:
     """Score one answer against one prompt.
 
     Three checks, in priority order:
@@ -132,7 +128,9 @@ def coverage(
     return score, missing, []
 
 
-def ask(api: str, prompt: str, timeout: int, retries: int = 1) -> tuple[str, float, str | None]:
+def ask(
+    api: str, prompt: str, timeout: int, retries: int = 1
+) -> tuple[str, float, str | None]:
     """One completion. Returns (answer, seconds, error).
 
     Retries once on ANY transport failure. Driving the phone over an adb
@@ -207,7 +205,14 @@ def main() -> int:
         if error:
             errors += 1
             print(f"{entry['id']:<12} {'ERR':>5} {secs:>7.1f}  {error[:40]}")
-            rows.append({"id": entry["id"], "coverage": 0.0, "seconds": secs, "missing": entry.get("must_contain", [])})
+            rows.append(
+                {
+                    "id": entry["id"],
+                    "coverage": 0.0,
+                    "seconds": secs,
+                    "missing": entry.get("must_contain", []),
+                }
+            )
             continue
         cov, missing, halluc = coverage(answer, entry)
         total_cov += cov
@@ -218,13 +223,15 @@ def main() -> int:
         else:
             flag = ",".join(missing) if missing else "-"
         print(f"{entry['id']:<12} {cov:>5.2f} {secs:>7.1f}  {flag}")
-        rows.append({
-            "id": entry["id"],
-            "coverage": cov,
-            "seconds": secs,
-            "missing": missing,
-            "hallucinated": halluc,
-        })
+        rows.append(
+            {
+                "id": entry["id"],
+                "coverage": cov,
+                "seconds": secs,
+                "missing": missing,
+                "hallucinated": halluc,
+            }
+        )
 
     n = len(prompts)
     mean_cov = total_cov / n
@@ -234,7 +241,9 @@ def main() -> int:
     if errors:
         print(f"WARNING: {errors}/{n} prompts errored — mean coverage is understated")
     if hallucinations:
-        print(f"HALLUCINATION GATE: {hallucinations}/{n} answers asserted a banned fact")
+        print(
+            f"HALLUCINATION GATE: {hallucinations}/{n} answers asserted a banned fact"
+        )
         print("  Each of these scored 0. Treat any candidate with a non-zero count")
         print("  as failing, regardless of its mean.")
 

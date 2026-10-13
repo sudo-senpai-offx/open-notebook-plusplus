@@ -825,3 +825,107 @@ API-created notebook visible in the UI, notebook page with
 Sources/Notes/Chat tabs, and **Chrome offering the PWA install prompt**
 (`Open Notebook PlusPlus をインストールします`) — the manifest + service
 worker slice is doing its job.
+
+---
+
+## 14. Plusplus feature verification on-device — and three defects only a real database catches
+
+Ran the whole review surface against the phone's SurrealDB 2.7.0 through
+`adb forward tcp:18000 tcp:8000`. Six of eight checks passed first time.
+Three failed, and all three were invisible to the test suite because the
+tests stub `repo_query` — no unit test ever hands a query or a schema to a
+real SurrealDB.
+
+### What works (verified, not assumed)
+
+| Feature | Evidence |
+|---|---|
+| Source ingest without embeddings | `POST /api/sources` (form-data, `embed=false`) → `embedded:false, embedded_chunks:0` in 4.4 s. **Only vector search is degraded, not RAG as a whole** — correcting the earlier "sources cannot be ingested" note in §13. |
+| Card authoring + approval gate | 3 cards created as `draft`, approved to `approved` |
+| FSRS grading | `POST /api/review/grade` → card rescheduled, `reviews_today`/`median_ms`/`streak_days` updated |
+| Due queue | Correctly excludes a card rescheduled into the future (after the fix below) |
+| Pomodoro | Start → `/focus/sessions/open` lists it → end → empty. `focus_minutes_7d` measured **1** after a real 70 s session; it correctly reads elapsed wall time, not `planned_seconds` |
+| TSV import | `{"created":2,"skipped":[]}` |
+| `.apkg` export | Valid zip, `collection.anki2` + `media`, deck named, guids frozen |
+
+### Defect 1 — `flashcard.fsrs_json` silently discarded every write
+
+`record_grade` computed a correct FSRS schedule, returned it to the caller,
+and wrote `{}`. **Every graded card therefore stayed due forever.** The
+entire review loop was inert and nothing reported an error.
+
+SurrealDB 2.7.0 empties an object written to a field on a SCHEMAFULL table
+when the field has no nested FIELD definitions and is not FLEXIBLE. Measured
+on the device, both halves of the fix:
+
+| Definition | accepts a missing field | stores the object |
+|---|---|---|
+| `TYPE option<object>` (migration 32) | ok | **`{}` — lost** |
+| `TYPE object`, no nested defs | ok | `{}` — lost |
+| `TYPE any` | ok | `{}` — lost |
+| `TYPE option<object> DEFAULT NONE` | ok | `{}` — lost |
+| `FLEXIBLE TYPE object` | **rejected** | ok |
+| **`FLEXIBLE TYPE option<object>`** | **ok** | **ok** |
+| `FLEXIBLE TYPE any` | ok | ok |
+
+`FLEXIBLE TYPE object` is the trap: it fixes the content and breaks the
+absent case, and `_prepare_save_data` omits every `None` field, so a card
+created before its first review has no `fsrs_json` at all. Both halves are
+load-bearing — I shipped the content half first, broke card creation on the
+phone, and only caught it by testing the case I had not tested.
+
+Migration 33 fixes it. `tests/test_object_field_schema.py` guards the whole
+class: any object-typed field must be FLEXIBLE or have nested definitions.
+It confirms `episode_profile` and `speaker_profile` (migration 7) were
+already correct — `speaker_profile.speakers` is `array<object>` plus four
+`speakers.*` nested fields, and its three stored rows keep every key.
+
+### Defect 2 — `.apkg` export 500'd on every call
+
+`SELECT model, front, back, cloze_text, tags, guid FROM flashcard ...
+ORDER BY created` — SurrealQL 2.x parse-errors when `ORDER BY` names a field
+absent from an explicit projection:
+
+```
+Parse error: Missing order idiom `created` in statement selection
+```
+
+The handler catches it as a bare `except Exception` and reports
+`Failed to export deck`. It is the only explicit projection in the tree that
+orders by an unselected field; everything else uses `SELECT *`.
+`tests/test_surrealql_order_by.py` compares each query's projection to its
+`ORDER BY` clause, handling `SELECT *`, `SELECT * OMIT`, and f-strings.
+
+### Defect 3 — every cloze card was missing from exported decks
+
+A 3-note deck (2 basic, 1 cloze) exported **3 notes and 2 cards**. The
+cloze note had no card at all, so it would never appear in Anki's queue.
+
+The app stores the user-facing form `{{intervals}}`. genanki 0.13.1 counts a
+cloze note's cards by scanning for Anki's ordinal form `{{c1::intervals}}`
+only, and its fallback `if card_ords == {}` compares a **set to an empty
+dict** — always False, so it is dead code. Result: ordinal-free cloze text
+yields zero cards, and the note row is still written, so the package looks
+structurally fine.
+
+`to_anki_cloze()` now numbers deletions in reading order at export time,
+resuming after any ordinal already present. `{{a}} {{b}} {{c}}` →
+`{{c1::a}} {{c2::b}} {{c3::c}}`; already-converted text is left alone.
+
+The pre-existing `tests/test_apkg_export.py` fixture used
+`"Canberra was founded in {{c1::1913}}"` throughout — it exercised the one
+input genanki handles and never the one the app emits, which is why this
+survived. `tests/test_apkg_cloze_cards.py` covers both forms.
+
+### Unresolved
+
+`.apkg` import into Anki is unverified — no Anki here, and the phone's
+`.apkg` export path still 500s until migration 33 is applied on restart.
+Import currently writes drafts only, by design.
+
+### The general lesson
+
+All three were invisible to CI because the tests fake the database boundary.
+Two now have static guards that need no database. The third needed real
+SQLite and real rows. Running the actual feature on the actual engine found
+three bugs in one sitting; the test suite had found none.

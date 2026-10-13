@@ -17,7 +17,7 @@ def _waiter(log):
 
 @pytest.mark.asyncio
 async def test_success_first_try_no_waits():
-    log = []
+    log: list[float] = []
     calls = []
 
     async def fn():
@@ -30,7 +30,7 @@ async def test_success_first_try_no_waits():
 
 @pytest.mark.asyncio
 async def test_db_conflicts_ride_full_budget():
-    log = []
+    log: list[float] = []
     calls = []
 
     async def fn():
@@ -45,7 +45,7 @@ async def test_db_conflicts_ride_full_budget():
 
 @pytest.mark.asyncio
 async def test_transients_capped_low():
-    log = []
+    log: list[float] = []
     calls = []
 
     async def fn():
@@ -60,7 +60,7 @@ async def test_transients_capped_low():
 
 @pytest.mark.asyncio
 async def test_permanent_errors_raise_immediately():
-    log = []
+    log: list[float] = []
     calls = []
 
     async def fn():
@@ -74,7 +74,7 @@ async def test_permanent_errors_raise_immediately():
 
 @pytest.mark.asyncio
 async def test_cancellation_never_counted():
-    log = []
+    log: list[float] = []
     calls = []
 
     async def fn():
@@ -88,7 +88,7 @@ async def test_cancellation_never_counted():
 
 @pytest.mark.asyncio
 async def test_recovery_mid_budget():
-    log = []
+    log: list[float] = []
     calls = []
 
     async def fn():

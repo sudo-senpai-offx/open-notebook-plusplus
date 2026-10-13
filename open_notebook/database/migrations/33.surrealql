@@ -1,0 +1,36 @@
+-- Migration 33: repair flashcard.fsrs_json, which silently discarded writes.
+--
+-- SurrealDB 2.7.0 empties object values on a SCHEMAFULL table when the
+-- field has no nested FIELD definitions, UNLESS the definition is marked
+-- FLEXIBLE. Migration 32 declared:
+--
+--     DEFINE FIELD fsrs_json ON TABLE flashcard TYPE option<object>;
+--
+-- which accepts the write, reports OK, and stores `{}`. Every FSRS grade
+-- therefore computed a correct schedule, returned it to the caller, wrote
+-- an empty object, and the card stayed due forever. Found by running the
+-- review flow on-device, not by a test - tests/test_review_store.py stubs
+-- repo_query, so the write path was never exercised.
+--
+-- Reproduced in isolation on 2.7.0, SCHEMAFULL table, object value written,
+-- testing both whether a *missing* field is accepted and whether content
+-- survives:
+--
+--     TYPE option<object>                 -> NONE ok, content {}   (lost)
+--     TYPE object, no nested defs          -> NONE ok, content {}   (lost)
+--     TYPE any                            -> NONE ok, content {}   (lost)
+--     TYPE option<object> DEFAULT NONE    -> NONE ok, content {}   (lost)
+--     FLEXIBLE TYPE object                -> NONE REJECTED, content ok
+--     FLEXIBLE TYPE option<object>        -> NONE ok, content ok   <- this
+--     FLEXIBLE TYPE any                   -> NONE ok, content ok
+--
+-- Both halves matter. FLEXIBLE is what stops the content being emptied,
+-- but plain `FLEXIBLE TYPE object` rejects NONE, and _prepare_save_data
+-- omits every None field, so a card created before its first review has no
+-- fsrs_json at all. `option<>` is what allows that absence.
+--
+-- FLEXIBLE rather than explicit nested fields on purpose: the dict shape
+-- belongs to py-fsrs, not to us, so pinning the schema to today's seven
+-- keys would break the first time that library adds or renames one.
+
+DEFINE FIELD OVERWRITE fsrs_json ON TABLE flashcard FLEXIBLE TYPE option<object>;

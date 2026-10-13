@@ -244,8 +244,8 @@ async def export_apkg(deck: str = Query(default="OpenNotebook")):
     safe_deck = re.sub(r"[^A-Za-z0-9_-]+", "_", deck).strip("_") or "OpenNotebook"
     try:
         rows = await repo_query(
-            "SELECT model, front, back, cloze_text, tags, guid FROM flashcard "
-            "WHERE status = 'approved' ORDER BY created ASC LIMIT 5000"
+            "SELECT model, front, back, cloze_text, tags, guid, created "
+            "FROM flashcard WHERE status = 'approved' ORDER BY created ASC LIMIT 5000"
         )
         cards = [dict(r) for r in (rows or [])]
         data = build_package_bytes(cards, deck_name=safe_deck)
