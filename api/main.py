@@ -57,6 +57,7 @@ from api.routers import (
     source_chat,
     sources,
     speaker_profiles,
+    sync,
     transformations,
 )
 from api.routers import commands as commands_router
@@ -430,6 +431,7 @@ app.include_router(
 app.include_router(governor.router, prefix="/api", tags=["governor"])
 app.include_router(focus.router, prefix="/api", tags=["focus"])
 app.include_router(flashcards.router, prefix="/api", tags=["flashcards"])
+app.include_router(sync.router, prefix="/api", tags=["sync"])
 app.include_router(review.router, prefix="/api", tags=["review"])
 app.include_router(metrics.router, prefix="/api", tags=["metrics"])
 app.include_router(settings.router, prefix="/api", tags=["settings"])
