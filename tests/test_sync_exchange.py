@@ -484,3 +484,69 @@ class TestRevlogUnion:
         from open_notebook.sync.exchange import _import_revlog
 
         assert await _import_revlog(tmp_path, dry_run=True) == (0, 0)
+
+
+class TestNotebookSlugs:
+    """Notes reference notebooks by slug, never by record id.
+
+    A record id is per-database and means nothing on the other device.
+    Verified against two real databases: the note attached to device B's
+    own notebook id, resolved from the slug alone.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("Cognitive Science", "cognitive-science"),
+            ("cognitive science", "cognitive-science"),  # case-insensitive
+            ("Linear Algebra!", "linear-algebra"),  # punctuation collapsed
+            ("  spaced   out  ", "spaced-out"),
+            ("", ""),
+        ],
+    )
+    def test_slug_normalisation(self, name, expected):
+        from open_notebook.sync.exchange import _slug
+
+        assert _slug(name) == expected
+
+    @pytest.mark.asyncio
+    async def test_unknown_slug_is_reported_not_silently_dropped(
+        self, tmp_path, monkeypatch
+    ):
+        """A missing notebook must not discard the note or fabricate an edge.
+
+        The dangerous outcome would be relating the note to a notebook id
+        that does not exist here. SurrealDB record links do not prevent
+        dangling references, so nothing downstream would complain.
+        """
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        (notes / "note-n.json").write_text(
+            '{"id": "note:n", "title": "t", "content": "c",'
+            ' "updated": "2026-12-01T00:00:00", "notebook_slugs": ["ghost-notebook"]}'
+        )
+        _patch(monkeypatch, {}, revlog_rows=[])
+
+        from open_notebook.sync.exchange import import_all
+
+        result = await import_all(root=tmp_path, dry_run=False)
+        assert result["notes_created"] == 1, "content must still import"
+        assert result["notes_attached"] == 0
+        assert result["notes_unattached"] == 1
+        assert result["missing_notebooks"] == ["ghost-notebook"]
+
+    @pytest.mark.asyncio
+    async def test_no_slugs_means_no_attempt(self, tmp_path, monkeypatch):
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        (notes / "note-n.json").write_text(
+            '{"id": "note:n", "title": "t", "content": "c",'
+            ' "updated": "2026-12-01T00:00:00"}'
+        )
+        _patch(monkeypatch, {}, revlog_rows=[])
+
+        from open_notebook.sync.exchange import import_all
+
+        result = await import_all(root=tmp_path, dry_run=False)
+        assert result["notes_attached"] == 0
+        assert result["missing_notebooks"] == []

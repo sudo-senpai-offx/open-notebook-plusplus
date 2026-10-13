@@ -318,3 +318,69 @@ local edit still bumps updated:      2026-10-13 17:14:09
 ```
 
 A local edit *should* change the file. That is content, not churn.
+
+---
+
+## 11. Notebooks on import — resolved by slug
+
+A synced note used to arrive unattached from every notebook, which made
+working sync feel broken. Record ids cannot carry that meaning: they are
+per-database, so `notebook:89ihirkrx...` on the phone names nothing on
+the PC.
+
+### Export
+
+One query each, not one per note:
+
+```sql
+SELECT id, name FROM notebook
+SELECT in, out FROM artifact          -- note -> notebook edges
+```
+
+Each note payload gains `notebook_slugs`, and `notebooks/index.json`
+lists `{slug, name}` for everything known. `_slug()` lowercases, collapses
+non-alphanumerics to `-`, and trims — so `"Cognitive Science"` and
+`"cognitive science"` resolve to the same notebook.
+
+### Import
+
+Build `{slug: local_id}` once, then relate only to notebooks that exist
+here. Result counters:
+
+| Counter | Meaning |
+|---|---|
+| `notes_attached` | linked to at least one local notebook |
+| `notes_unattached` | imported, but no local notebook matched |
+| `missing_notebooks` | the slugs that did not resolve |
+
+### Verified across two real databases
+
+Device A and device B each had a notebook named "Cognitive Science" with
+**different record ids**:
+
+```
+device A note -> notebook:k13atwmrlolgrpwflgg8
+device B notebook          = notebook:q80innpk4w1mw91wg48u
+import: attached=1 unattached=0 missing=[]
+edge: note:8r68iczcl5i1wmajc8sx -> notebook:q80innpk4w1mw91wg48u
+attached to device B's notebook? YES
+```
+
+And the failure case, on a device with no notebooks at all:
+
+```
+attached=0  unattached=1  missing=['cognitive-science']
+artifact edges created: 0        <- no dangling reference
+notes still imported:  1         <- content preserved
+```
+
+The second result matters most. SurrealDB record links do **not** prevent
+dangling references, so relating a note to a notebook id that does not
+exist locally would leave a broken edge that nothing downstream
+complains about. Import only relates to notebooks it has confirmed, and
+names the ones it could not resolve instead of failing or pretending.
+
+Notebooks themselves are not synced. Creating them on import was
+considered and rejected: it litters a device with folders the operator
+never asked for, and a name is not consent to make one. The report tells
+you what is missing so you can create it deliberately.

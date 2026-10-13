@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -59,6 +60,7 @@ from open_notebook.database.repository import ensure_record_id, repo_query
 SCHEMA_VERSION = 1
 MANIFEST = "manifest.json"
 NOTES_DIR = "notes"
+NOTEBOOKS = "notebooks/index.json"
 CARDS_DIR = "cards"
 REVLOG = "revlog/revlog.jsonl"
 
@@ -66,6 +68,17 @@ REVLOG = "revlog/revlog.jsonl"
 def sync_dir() -> Path:
     """Where the exchange lives. A git repo, checked out wherever."""
     return Path(os.getenv("OPEN_NOTEBOOK_SYNC_DIR", "./sync"))
+
+
+def _slug(name: str) -> str:
+    """Device-independent key for a notebook name.
+
+    Record ids cannot cross devices - they are per-database. A name is
+    the only thing both sides agree on, so it is normalised into a slug
+    and matched case-insensitively on import.
+    """
+    cleaned = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+    return cleaned
 
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -122,6 +135,42 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     notes: List[Note] = await Note.get_all()
     cards: List[Flashcard] = await Flashcard.get_all()
 
+    # Notebooks are referenced by slug, not id: a record id is per-database
+    # and means nothing on the other device. One query each rather than
+    # one per note.
+    notebook_names = {
+        str(r["id"]): r.get("name") or ""
+        for r in (await repo_query("SELECT id, name FROM notebook") or [])
+    }
+    note_to_notebooks: Dict[str, List[str]] = {}
+    for edge in await repo_query("SELECT in, out FROM artifact") or []:
+        if edge.get("in"):
+            note_to_notebooks.setdefault(str(edge["in"]), []).append(str(edge["out"]))
+
+    slugs_for = {
+        nid: sorted(
+            {
+                _slug(notebook_names.get(nbid, ""))
+                for nbid in nbids
+                if _slug(notebook_names.get(nbid, ""))
+            }
+        )
+        for nid, nbids in note_to_notebooks.items()
+    }
+
+    _write_json(
+        root / NOTEBOOKS,
+        {
+            "notebooks": sorted(
+                (
+                    {"slug": _slug(name), "name": name}
+                    for name in notebook_names.values()
+                ),
+                key=lambda nb: nb["slug"],
+            )
+        },
+    )
+
     for note in notes:
         _write_json(
             root / NOTES_DIR / f"{str(note.id).replace(':', '-')}.json",
@@ -131,6 +180,7 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
                 "note_type": note.note_type,
                 "content": note.content,
                 "updated": note.updated.isoformat() if note.updated else None,
+                "notebook_slugs": slugs_for.get(str(note.id), []),
             },
         )
 
@@ -171,6 +221,7 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             "notes": len(notes),
             "cards": len(cards),
             "revlog": len(revlog_rows or []),
+            "notebooks": len(notebook_names),
         },
     }
     _write_json(root / MANIFEST, manifest)
@@ -272,6 +323,13 @@ async def import_all(
     from open_notebook.domain.notebook import Note
 
     root = root or sync_dir()
+
+    local_notebooks = {
+        _slug(r.get("name") or ""): str(r["id"])
+        for r in (await repo_query("SELECT id, name FROM notebook") or [])
+    }
+    missing: set[str] = set()
+
     result: Dict[str, Any] = {
         "notes_created": 0,
         "notes_updated": 0,
@@ -279,6 +337,9 @@ async def import_all(
         "cards_created": 0,
         "cards_updated": 0,
         "cards_skipped_stale": 0,
+        "notes_attached": 0,
+        "notes_unattached": 0,
+        "missing_notebooks": [],
         "revlog_added": 0,
         "revlog_duplicates": 0,
         "errors": [],
@@ -317,6 +378,38 @@ async def import_all(
             await _create_with_id(note, record_id)
         await _apply_timestamp(note, data.get("updated"))
         result["notes_updated" if existing_note else "notes_created"] += 1
+
+        slugs = data.get("notebook_slugs") or []
+        if slugs:
+            linked = (
+                await repo_query(
+                    "SELECT VALUE out FROM artifact WHERE in = $nid",
+                    {"nid": ensure_record_id(record_id)},
+                )
+                or []
+            )
+            already = {str(x) for x in linked}
+            attached = False
+            for slug in slugs:
+                nb_id = local_notebooks.get(slug)
+                if not nb_id:
+                    missing.add(slug)
+                    continue
+                if nb_id in already:
+                    attached = True
+                    continue
+                if dry_run:
+                    attached = True
+                    continue
+                try:
+                    await note.add_to_notebook(nb_id)
+                    attached = True
+                except Exception as exc:  # noqa: BLE001 - one bad edge is not fatal
+                    logger.warning(f"sync: could not attach {record_id}: {exc}")
+            if attached:
+                result["notes_attached"] += 1
+            else:
+                result["notes_unattached"] += 1
 
     for path in sorted((root / CARDS_DIR).glob("*.json")):
         data = _read_json(path)
@@ -364,6 +457,7 @@ async def import_all(
     revlog_result = await _import_revlog(root, dry_run)
     result["revlog_added"] = revlog_result[0]
     result["revlog_duplicates"] = revlog_result[1]
+    result["missing_notebooks"] = sorted(missing)
     return result
 
 
