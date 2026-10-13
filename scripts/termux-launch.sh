@@ -16,11 +16,33 @@
 
 set -u
 
-MODEL="$HOME/gguf/qwen2.5-0.5b-instruct-q2_k.gguf"
+# Default model per docs/7-DEVELOPMENT/wayfinder-plusplus/research-cpu-infer.md
+# Appendix F: the 1.5B-Q4_K_M scored 0.84 mean coverage against the 0.5B's
+# 0.58 on the 25-prompt fixture, for a mean 15.5s vs 6.1s. The latency is
+# affordable - warm chat turns are 2.3-4.6s - so the bigger model is the
+# right default. The 0.5B is the FLOOR model for 2GB/SD439 devices, which
+# cannot hold 1.04 GiB of weights alongside the stack.
+#
+# Falls back to the 0.5B when the 1.5B is not downloaded, so a fresh device
+# starts rather than dying on a missing path. Override with
+# ONB_MODEL=/path/to/model.gguf.
+MODEL="${ONB_MODEL:-}"
+if [ -z "$MODEL" ]; then
+  for _candidate in \
+    "$HOME/gguf/qwen2.5-1.5b-instruct-q4_k_m.gguf" \
+    "$HOME/gguf/qwen2.5-0.5b-instruct-q2_k.gguf"; do
+    if [ -f "$_candidate" ]; then
+      MODEL="$_candidate"
+      break
+    fi
+  done
+fi
+
 LLAMA="$HOME/llama.cpp/build/bin/llama-server"
 LOG="$HOME/llama-server.log"
-# Measured on SD680: defaults allocate 4x32768 = 131072 tokens of KV cache,
-# which is ~1.6 GB for a 390 MB model. 492 MB RSS with these values.
+# Always pin these. llama-server defaults allocate 4x32768 = 131072 tokens of
+# KV cache, which is ~1.6 GB for a 390 MB model and more for the 1.5B. On
+# SD680 the 0.5B sits at 492 MB RSS with these values.
 LLAMA_ARGS="-t 2 -c 4096 -np 1 --port 8080"
 
 pid_of() {
@@ -52,7 +74,13 @@ start_llama() {
     echo "[onb] llama-server already running"
     return 0
   fi
-  [ -f "$MODEL" ] || { echo "[onb] FATAL: model missing at $MODEL"; return 1; }
+  [ -f "$MODEL" ] || {
+    echo "[onb] FATAL: no usable model found."
+    echo "        looked for qwen2.5-1.5b-instruct-q4_k_m.gguf then"
+    echo "        qwen2.5-0.5b-instruct-q2_k.gguf under \$HOME/gguf/"
+    echo "        set ONB_MODEL=/path/to/model.gguf to pick one explicitly"
+    return 1
+  }
   [ -x "$LLAMA" ] || { echo "[onb] FATAL: llama-server missing at $LLAMA"; return 1; }
 
   # shellcheck disable=SC2086

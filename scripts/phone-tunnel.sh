@@ -18,6 +18,11 @@ set -uo pipefail
 PHONE_IP="${PHONE_IP:-10.7.112.85}"
 LLAMA_LOCAL=18080
 API_LOCAL=15055
+# SurrealDB speaks HTTP as well as its own WS endpoint, which makes it
+# queryable directly from here. `adb forward --remove-all` below used to
+# wipe this port without restoring it, so any DB inspection that ran after
+# re-tunnelling failed with an empty body and looked like a dead database.
+DB_LOCAL=18000
 
 check() {
   local ok=0
@@ -25,6 +30,8 @@ check() {
   [ "$code" = "200" ] && echo "llama  127.0.0.1:${LLAMA_LOCAL} -> phone :8080   OK" || { echo "llama  tunnel DOWN (HTTP $code)"; ok=1; }
   code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${API_LOCAL}/health" 2>/dev/null || echo 000)
   [ "$code" = "200" ] && echo "api    127.0.0.1:${API_LOCAL} -> phone :5055   OK" || { echo "api    tunnel DOWN (HTTP $code)"; ok=1; }
+  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${DB_LOCAL}/version" 2>/dev/null || echo 000)
+  [ "$code" = "200" ] && echo "db     127.0.0.1:${DB_LOCAL} -> phone :8000   OK" || { echo "db     tunnel DOWN (HTTP $code)"; ok=1; }
   return $ok
 }
 
@@ -36,6 +43,7 @@ if [ "${1:-}" != "--check" ]; then
   adb forward --remove-all >/dev/null 2>&1 || true
   adb forward "tcp:${LLAMA_LOCAL}" tcp:8080 >/dev/null
   adb forward "tcp:${API_LOCAL}"  tcp:5055 >/dev/null
+  adb forward "tcp:${DB_LOCAL}"   tcp:8000 >/dev/null
   echo "tunnels re-established"
 fi
 
