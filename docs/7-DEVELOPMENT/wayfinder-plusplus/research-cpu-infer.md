@@ -426,3 +426,54 @@ Latency is bimodal, not spread: most prompts 2-14 s, four hit the
 256-token cap at 57-60 s (srs-03, focus-01, reason-02, and srs-02 at
 41 s). Those are verbose answers, not slow thinking — max_tokens, not
 model size, is the binding constraint on the slow tail.
+
+## Appendix F — ladder conclusion (SD680, 25 prompts, corrected scorer)
+
+| | 0.5B-Q2_K | 1.5B-Q4_K_M |
+|---|---|---|
+| size | 390 MB | 1.04 GiB |
+| pp512 / tg128 (-t 2) | 20.31 / 13.13 | 6.63 / 4.21 |
+| mean s/prompt | 6.1 | 15.5 |
+| **mean coverage** | **0.58** | **0.84** |
+| hallucinations | 1/25 | 1/25 |
+
+**The bigger model wins by 0.26 coverage for 2.5x the latency.** At 2.4
+s warm chat turns on the phone, that latency is affordable — the earlier
+"62 s" figure that made 1.5B look unaffordable was cold start.
+
+Both models hallucinate exactly once, but differently:
+
+- 1.5B `refuse-01`: invented "Dambrik" as Wakanda's capital, then
+  correctly noted Wakanda is fictional. Fabricate-then-hedge.
+- 0.5B `extract-02`: was asked to extract a job title and instead
+  restated the whole sentence — a *format* failure, not a fabrication,
+  caught by the gate only because the banned string was the full
+  restatement.
+
+The 0.5B's failures are dominated by small-model artefacts rather than
+knowledge gaps: `num-01` missed 80% of 60 (12), `util-02` could not
+produce "biblioteca", `format-01` miscounted to three. It still scores
+1.00 on the core SRS domain (`srs-01/02/03`) and `multi-01`-adjacent
+retrieval reasoning — so it is not uniformly weak, it is brittle.
+
+**Both fail the same two calibration prompts** (`focus-02`, `judge-01`):
+neither will tell the user to stop. That is a product problem, not a
+model-size problem — and a possible argument for a system prompt that
+licenses pushback, rather than for a larger model.
+
+### Recommendation
+
+Ship **1.5B-Q4_K_M** as the phone default. 0.84 vs 0.58 is too large a
+gap to accept for a 2.5x speed saving the user barely notices (chat turns
+are seconds, not minutes). Keep 0.5B-Q2_K as the floor model for the
+2 GB / SD439 class where memory forces it.
+
+Do NOT go to 3B yet: at ~2 tok/s a 200-token answer is ~100 s, and the
+1.5B already hits the 256-token cap on 3/25 prompts. Verbosity, not
+intelligence, is the binding constraint — raise `max_tokens` handling in
+the app before buying more parameters.
+
+Unmeasured: 1.5B at IQ4_XS / Q2_K quants (would cut 1.04 GiB toward
+~700 MB for possible small quality loss — the best next data point if
+memory on the floor class matters), and 3B as an explicit
+find-the-breakpoint run rather than a default candidate.
