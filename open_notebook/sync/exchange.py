@@ -99,6 +99,18 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     Files are named from the record id, so re-exporting is idempotent and
     two devices exporting the same note produce the same filename and
     therefore a real git conflict rather than a silent duplicate.
+
+    The payload carries ONLY fields sync owns. `source_id` and
+    `written_by` were both dropped because each one flip-flopped forever:
+
+      * source_id is not imported (sources are not synced), so the phone
+        always exports null while the PC always exports its real id.
+      * written_by is stamped with the exporting device, so the two
+        devices overwrote each other's value on every cycle.
+
+    Provenance lives in the git commit instead - the author and message
+    already say which device pushed. Keeping either field produced a
+    commit per cycle, which is churn by another name.
     """
     from open_notebook.domain.flashcard import Flashcard
     from open_notebook.domain.notebook import Note
@@ -119,7 +131,6 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
                 "note_type": note.note_type,
                 "content": note.content,
                 "updated": note.updated.isoformat() if note.updated else None,
-                "written_by": device,
             },
         )
 
@@ -135,10 +146,8 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
                 "tags": list(card.tags or []),
                 "guid": card.guid,
                 "status": card.status,
-                "source_id": card.source_id,
                 "fsrs_json": card.fsrs_json,
                 "updated": card.updated.isoformat() if card.updated else None,
-                "written_by": device,
             },
         )
 
@@ -216,6 +225,32 @@ async def _create_with_id(instance, record_id: str) -> None:
     instance.id = ensure_record_id(record_id)
 
 
+async def _apply_timestamp(instance, incoming: Optional[str]) -> None:
+    """Carry the other device's `updated` onto the saved record.
+
+    Migration 35 removed the `VALUE time::now()` clause that made this
+    impossible, but the schema change alone did nothing: the importer was
+    never *supplying* a value, only reading one for the last-write-wins
+    comparison. Two writes rather than one, because `ObjectModel.save()`
+    unconditionally stamps `updated` with the current time, so the
+    incoming value has to be restored after it.
+
+    Only reached when the incoming timestamp was already judged newer, so
+    this cannot move a record backwards.
+    """
+    if not incoming:
+        return
+    stamp = _as_iso(incoming)
+    try:
+        await repo_query(
+            "UPDATE $rid SET updated = $updated",
+            {"rid": ensure_record_id(str(instance.id)), "updated": stamp},
+        )
+        instance.updated = stamp
+    except Exception as exc:  # noqa: BLE001 - never fail an import on this
+        logger.warning(f"sync: could not set updated on {instance.id}: {exc}")
+
+
 def _newer(incoming: Optional[str], existing: Optional[str]) -> bool:
     """Whether an incoming `updated` should overwrite the local record."""
     if not incoming:
@@ -280,6 +315,7 @@ async def import_all(
             await note.save()
         else:
             await _create_with_id(note, record_id)
+        await _apply_timestamp(note, data.get("updated"))
         result["notes_updated" if existing_note else "notes_created"] += 1
 
     for path in sorted((root / CARDS_DIR).glob("*.json")):
@@ -322,6 +358,7 @@ async def import_all(
             await card.save()
         else:
             await _create_with_id(card, record_id)
+        await _apply_timestamp(card, data.get("updated"))
         result["cards_updated" if existing_card else "cards_created"] += 1
 
     revlog_result = await _import_revlog(root, dry_run)

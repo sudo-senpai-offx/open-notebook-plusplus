@@ -1,0 +1,8 @@
+-- Migration 35 rollback: restore the VALUE clause on the synced tables.
+--
+-- Faithful, including the defect: restoring this re-breaks import timestamps
+-- and reintroduces guaranteed push/pull churn and silent loss under clock
+-- skew on flashcard and note.
+
+DEFINE FIELD OVERWRITE updated ON TABLE flashcard DEFAULT time::now() VALUE time::now();
+DEFINE FIELD OVERWRITE updated ON TABLE note DEFAULT time::now() VALUE time::now();

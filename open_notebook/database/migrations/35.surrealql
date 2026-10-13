@@ -1,0 +1,46 @@
+-- Migration 35: let `updated` carry a supplied value on the synced tables.
+--
+-- Same shape of problem as migration 34, one layer over. These fields read:
+--
+--   DEFINE FIELD updated ON flashcard DEFAULT time::now() VALUE time::now();
+--
+-- and a field's VALUE clause is evaluated after the statement's input and
+-- REPLACES it. So no write can ever set `updated` to anything other than
+-- the instant of the write - including the sync importer, which needs to
+-- preserve the other device's actual edit time.
+--
+-- Consequence on a real pull:
+--
+--   repo file   updated = 2026-10-14T09:00:00   (the PC's edit)
+--   phone DB    updated = 2026-10-13T17:10:04   (the import moment)
+--
+-- Two costs:
+--
+--   1. Guaranteed churn. The phone's next export writes its own `updated`
+--      and `written_by`, so every push/pull cycle produces two commits
+--      flipping those fields back and forth. History fills with noise.
+--   2. Silent loss under clock skew. Sync resolves conflicts by comparing
+--      `updated`. A record imported at T looks newer than any edit made
+--      before T, so a PC edit timestamped T-1h is skipped as "stale" and
+--      dropped with no message. The import moment has no relationship to
+--      the content's real age.
+--
+-- Scoped to flashcard and note deliberately - the two tables sync owns.
+-- `source`, `episode`, `notebook`, `transformation`, `focus_session`,
+-- `site` and `revlog` keep the existing definition. Their raw writers are
+-- mostly embedding updates, and some of those callers may reasonably
+-- expect `updated` to move; changing eight tables to fix two would trade a
+-- known problem for an unmeasured one. `episode_profile` and
+-- `speaker_profile` already declare `TYPE datetime DEFAULT time::now()`
+-- with no VALUE clause, so this brings two tables in line with existing
+-- practice rather than inventing a new one.
+--
+-- Safe to drop VALUE here because every model write supplies the field:
+-- `ObjectModel.save()` sets `updated` explicitly, and so do `repo_create`
+-- and `repo_update`. The only raw writer of these tables is
+-- `UPDATE $record_id SET embedding = $embedding`
+-- (commands/embedding_commands.py:143), which sets only the embedding -
+-- and an embedding write should not move a note's content age anyway.
+
+DEFINE FIELD OVERWRITE updated ON TABLE flashcard TYPE datetime DEFAULT time::now();
+DEFINE FIELD OVERWRITE updated ON TABLE note TYPE datetime DEFAULT time::now();

@@ -231,3 +231,90 @@ Idempotent, lossless, and the review log no longer grows.
 `test_migration_33_is_registered` asserted on `up_migrations[-1]` and
 failed the moment migration 34 landed. It now searches the whole list, so
 migration 35 will not require editing it.
+
+---
+
+## 10. Churn and silent loss — migration 35
+
+Found by checking *when* the phone's records claimed to change after a
+pull, rather than only *whether* they changed:
+
+```
+repo file   updated = 2026-10-14T09:00:00   (the PC's edit)
+phone DB    updated = 2026-10-13T17:10:04   (the import moment)
+```
+
+### Cause
+
+Same shape as migration 34, one layer over:
+
+```sql
+DEFINE FIELD updated ON flashcard DEFAULT time::now() VALUE time::now();
+```
+
+The `VALUE` clause replaces whatever the statement supplied, so **no
+write could ever set `updated` to anything but the moment of the write**.
+
+Two costs:
+
+1. **Guaranteed churn.** The next export wrote the phone's own `updated`,
+   so every push/pull cycle produced two commits flipping it back and
+   forth.
+2. **Silent loss under clock skew.** Sync resolves conflicts by comparing
+   `updated`. A record imported at *T* looks newer than any edit made
+   before *T*, so a PC edit timestamped *T−1h* is skipped as "stale" and
+   dropped without a message.
+
+### Two fixes were needed, not one
+
+Migration 35 removed the `VALUE` clause — and on its own changed
+**nothing**, because the importer was never *supplying* a timestamp, only
+reading one for the last-write-wins comparison. The schema was enabled
+for a value nobody sent.
+
+`_apply_timestamp()` closes that half. It runs after the content write
+because `ObjectModel.save()` unconditionally stamps `updated` with the
+current time, so the incoming value has to be restored afterwards. Two
+writes per imported record; import is not a hot path.
+
+### Scope, deliberately narrow
+
+Only `flashcard` and `note` — the two tables sync owns. `source`,
+`episode`, `notebook`, `transformation`, `focus_session`, `site` and
+`revlog` keep the existing definition, because their raw writers are
+mostly embedding updates and some callers may reasonably expect
+`updated` to move. `episode_profile` and `speaker_profile` already
+declare `TYPE datetime DEFAULT time::now()` with no `VALUE` clause, so
+this brings two tables in line with existing practice rather than
+inventing one.
+
+Safe because every model write supplies the field: `ObjectModel.save()`,
+`repo_create` and `repo_update` all set it explicitly. The only raw
+writer of these tables is `UPDATE $record_id SET embedding = $embedding`
+(`commands/embedding_commands.py:143`), which sets only the embedding —
+and an embedding write should not move a note's content age anyway.
+
+### The last churn came from two fields of my own
+
+With `updated` stable, the only diffs left were `source_id` and
+`written_by`:
+
+- `source_id` is deliberately not imported, so the phone always exports
+  `null` and the PC always exports its real id.
+- `written_by` is stamped with the exporting device, so the two devices
+  overwrote each other on every cycle.
+
+Both are now dropped from the payload. `source_id` has no meaning in a
+file where sources do not sync, and provenance already lives in the git
+commit author and message. Keeping either produced a commit per cycle,
+which is churn by another name.
+
+### Verified
+
+```
+import -> export, unedited records: IDENTICAL — zero churn, nothing to commit
+imported timestamp preserved:        db 2026-10-12 09:00:00 == file
+local edit still bumps updated:      2026-10-13 17:14:09
+```
+
+A local edit *should* change the file. That is content, not churn.
