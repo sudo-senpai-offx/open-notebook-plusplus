@@ -1,0 +1,78 @@
+{
+  "_instructions": "DRAFT for operator review — do not treat as scored until a human signs off on the must_contain facts. Generation-quality fixture for the H2 model ladder (distinct from quality_fixture.json, which measures RETRIEVAL). Each entry: a prompt a student would actually ask this app, plus the facts a correct answer MUST contain. Scoring is coverage of must_contain, which is deterministic and needs no judge model.",
+  "_scoring": "scripts/model_ladder.py sends each prompt to llama-server's /v1/chat/completions and computes must_contain coverage (fraction of facts present, case- and whitespace-insensitive). Pair that with llama-bench pp/tg tok/s to find the knee of the intelligence/latency curve.",
+  "_why_not_retrieval": "quality_fixture.json (pairs: []) scores recall@k over sources and needs an embedding provider. This one needs only the LLM, so it runs on the phone where the latency decision is actually being made.",
+  "_tier_note": "must_contain should be 2-5 short factual strings. Long answers make coverage trivially satisfiable by a verbose model; few, specific facts make it discriminating.",
+  "prompts": [
+    {
+      "id": "srs-01",
+      "domain": "spaced-repetition",
+      "prompt": "In two sentences, explain why a review interval should grow after a correct answer.",
+      "must_contain": ["interval", "longer"],
+      "notes": "Domain core. 0.5B models often answer vaguely here."
+    },
+    {
+      "id": "srs-02",
+      "domain": "spaced-repetition",
+      "prompt": "What is the difference between a lapse and a leech in a spaced-repetition system?",
+      "must_contain": ["lapse", "leech"],
+      "notes": "Two distinct domain terms; tests whether it can hold two definitions."
+    },
+    {
+      "id": "sum-01",
+      "domain": "summarisation",
+      "prompt": "Summarise in one sentence: 'The mitochondrion generates ATP via oxidative phosphorylation across the inner membrane, using an electron transport chain established by protons pumped from the matrix.'",
+      "must_contain": ["ATP"],
+      "notes": "Compression test; only one fact survives summarisation."
+    },
+    {
+      "id": "reason-01",
+      "domain": "reasoning",
+      "prompt": "A student reviews 20 cards, gets 15 right and 5 wrong. Should they still do the 5 wrong ones today? Answer yes or no and justify in one sentence.",
+      "must_contain": ["yes"],
+      "notes": "Follows the app's own policy (relearn wrong cards same day)."
+    },
+    {
+      "id": "extract-01",
+      "domain": "extraction",
+      "prompt": "From this note, extract the name of the author and the year: 'Darwin, On the Origin of Species, published 1859.' Reply as 'author, year'.",
+      "must_contain": ["Darwin", "1859"],
+      "notes": "Exact-value extraction; easy to hallucinate a variant."
+    },
+    {
+      "id": "explain-01",
+      "domain": "explanation",
+      "prompt": "Explain what an embedding vector is to someone who has never heard the term.",
+      "must_contain": ["vector", "meaning"],
+      "notes": "Retrieval-adjacent, because embeddings are core to this product."
+    },
+    {
+      "id": "code-01",
+      "domain": "code",
+      "prompt": "What does this Python do in one sentence: `d = {k: v for k, v in pairs}`?",
+      "must_contain": ["dict"],
+      "notes": "Small code comprehension."
+    },
+    {
+      "id": "refuse-01",
+      "domain": "calibration",
+      "prompt": "What is the capital city of Wakanda?",
+      "must_contain": ["fictional", "does not exist"],
+      "notes": "Hallucination probe: a confident wrong answer is worse than a refusal."
+    },
+    {
+      "id": "format-01",
+      "domain": "instruction-following",
+      "prompt": "List exactly three benefits of spaced repetition, one per line, no numbering.",
+      "must_contain": ["3"],
+      "notes": "Format compliance; small models over-produce."
+    },
+    {
+      "id": "multi-01",
+      "domain": "multi-hop",
+      "prompt": "If I want to find notes I wrote about the French Revolution, which search type should I use if I only remember a phrase from them: vector search or full-text? Answer with the type and one clause of why.",
+      "must_contain": ["full-text"],
+      "notes": "Tests product-domain reasoning about its own features."
+    }
+  ]
+}
