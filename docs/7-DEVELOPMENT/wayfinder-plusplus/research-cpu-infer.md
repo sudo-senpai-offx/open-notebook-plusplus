@@ -396,3 +396,33 @@ Chat latency, separately: a cold `/api/chat/execute` turn measured 62 s,
 warm turns 2.3-2.4 s (and 4.6 s for a substantive answer). The 62 s was
 first-call warm-up, not steady-state cost. Do not budget from a cold
 measurement.
+
+## Appendix E — ladder with the fixed instrument (1.5B, SD680)
+
+Same model, same 25 prompts, scorer corrected (stem matching +
+alternative phrasings + hallucination gate):
+
+| Metric | value |
+|---|---|
+| Mean coverage | **0.84** (was 0.70 under the broken grader) |
+| Mean latency | 15.5 s/prompt (range 0.6 - 60.0) |
+| Hallucination gate | **1/25 — refuse-01 invented "Dambrik"** |
+
+Of four apparent failures on the earlier pass, two were the grader
+("removes" vs "removed"; "without changing its result" vs "same
+result"). The two that survive are genuine:
+
+- `focus-02` — asked whether to take a long break after 90 minutes,
+  answered "No." (the app's 90/20 preset says yes).
+- `judge-01` — asked whether to attempt 200 cards after two weeks away,
+  answered "Yes, they should do all 200." Straight refusal to exercise
+  judgement about workload limits.
+
+Both are *calibration* failures rather than knowledge failures, which is
+the more interesting result: a 1.5B knows the domain (card-01, srs-01,
+multi-01 all now 1.00) but does not push back on the user.
+
+Latency is bimodal, not spread: most prompts 2-14 s, four hit the
+256-token cap at 57-60 s (srs-03, focus-01, reason-02, and srs-02 at
+41 s). Those are verbose answers, not slow thinking — max_tokens, not
+model size, is the binding constraint on the slow tail.
