@@ -1,4 +1,5 @@
 import asyncio
+import os
 import traceback
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -34,6 +35,11 @@ from open_notebook.utils.context_builder import (
 from open_notebook.utils.graph_utils import (
     get_session_message_count,
     invoke_chat_turn,
+)
+from open_notebook.utils.history import (
+    DEFAULT_CONTEXT_TOKENS,
+    parse_since,
+    select_history,
 )
 
 router = APIRouter()
@@ -83,6 +89,13 @@ class ExecuteChatRequest(BaseModel):
     )
     model_override: Optional[str] = Field(
         None, description="Optional model override for this message"
+    )
+    # Narrow the conversation the model sees: an ISO timestamp, or a
+    # shorthand like "2d" / "36h". Without it, history is filled from the
+    # newest end until the context budget is spent.
+    history_since: Optional[str] = Field(
+        default=None,
+        description="Only consider history at or after this time (ISO, or 45m/2d/1w)",
     )
 
 
@@ -385,6 +398,22 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=500, detail=f"Error deleting session: {str(e)}")
 
 
+def _context_tokens() -> int:
+    """The model's window, as told to us by the launcher.
+
+    The phone runs `llama-server -c 4096`; termux-launch.sh exports the
+    same number so the two cannot drift. Anything not set falls back to
+    the observed device value rather than a generous default - assuming
+    a big window is what makes a phone-sized one fail.
+    """
+    raw = os.getenv("OPEN_NOTEBOOK_CHAT_CONTEXT", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_CONTEXT_TOKENS
+    except ValueError:
+        return DEFAULT_CONTEXT_TOKENS
+    return value if value >= 512 else DEFAULT_CONTEXT_TOKENS
+
+
 @router.post("/chat/execute", response_model=ExecuteChatResponse)
 async def execute_chat(request: ExecuteChatRequest):
     """Execute a chat request and get AI response."""
@@ -417,7 +446,24 @@ async def execute_chat(request: ExecuteChatRequest):
 
         # Prepare state for execution
         state_values = current_state.values if current_state else {}
-        state_values["messages"] = state_values.get("messages", [])
+
+        # Trim the history to what the model can actually read. Without
+        # this the entire conversation is sent every turn, and a
+        # long-running session silently stops working once it outgrows
+        # the window - no error, just a server that truncates or refuses.
+        history = select_history(
+            current_state.values.get("messages", []) if current_state else [],
+            context_tokens=_context_tokens(),
+            history_since=parse_since(request.history_since),
+        )
+        if history.dropped_exchanges:
+            logger.info(
+                f"History trimmed for {full_session_id}: kept "
+                f"{history.kept_exchanges} exchange(s), dropped "
+                f"{history.dropped_exchanges} ({history.reason}), "
+                f"{history.used_tokens}/{history.budget_tokens} tokens"
+            )
+        state_values["messages"] = list(history.messages)
         state_values["context"] = request.context
         state_values["notebook"] = notebook
         state_values["model_override"] = model_override

@@ -16,6 +16,14 @@
 
 set -u
 
+# One number, used twice. The API trims a conversation to this many
+# tokens; llama-server is started with the same value as its window.
+# Keeping them as two literals means one can be changed and the other
+# forgotten, and the symptom is a prompt the server silently truncates.
+LLAMA_CTX="${OPEN_NOTEBOOK_CHAT_CONTEXT:-4096}"
+OPEN_NOTEBOOK_CHAT_CONTEXT="$LLAMA_CTX"
+export OPEN_NOTEBOOK_CHAT_CONTEXT
+
 # Once-a-day update check, before anything is started. Checks only - it
 # never merges, because merging during a launch is exactly the conflict
 # onb-update refuses to run into, and it would make start-up depend on
@@ -52,7 +60,7 @@ LOG="$HOME/llama-server.log"
 # Always pin these. llama-server defaults allocate 4x32768 = 131072 tokens of
 # KV cache, which is ~1.6 GB for a 390 MB model and more for the 1.5B. On
 # SD680 the 0.5B sits at 492 MB RSS with these values.
-LLAMA_ARGS="-t 2 -c 4096 -np 1 --port 8080"
+LLAMA_ARGS="-t 2 -c $LLAMA_CTX -np 1 --port 8080"
 
 pid_of() {
   for p in /proc/[0-9]*; do

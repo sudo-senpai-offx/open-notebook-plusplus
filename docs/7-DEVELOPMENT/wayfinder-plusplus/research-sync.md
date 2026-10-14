@@ -1204,3 +1204,76 @@ raised, 500-ing the chat page. The mock was unrealistic - but so was the
 code, which trusted its rows. Both are fixed: the read filters malformed
 rows instead of raising inside a comprehension, and a partial row is a
 degraded message rather than a failed request.
+
+---
+
+## 19. Selective history
+
+### The measurement that prompted it
+
+`execute_chat` sent the entire checkpoint history every turn, with no
+trimming anywhere. Against the phone's configuration:
+
+    llama-server -c 4096
+
+    system prompt, bare                     618 tokens
+    plus 6k of retrieved context         1,404 tokens
+    reserving room for the reply           256 tokens
+    ----------------------------------------------
+    room for history                      2,436 tokens
+
+A real exchange, with citations, is a few hundred tokens rather than my
+47-token sample, so call it ten to twenty-five exchanges. That is a
+conversation reached over a couple of weeks of study - and reached
+*silently*, because the server truncates or refuses rather than saying
+"your conversation got too long".
+
+Not an emergency. Still the thing that breaks first on the device class
+this fork targets.
+
+### Two ways to be shorter
+
+**By budget** - the default, always applied. Newest exchanges that fit,
+never split. A model shown an answer with its question cut off answers
+something nobody asked, which is worse than it simply not remembering.
+The newest exchange always survives, even alone over budget, because
+dropping it leaves the model answering a question it cannot see.
+
+    400 exchanges, 4096 window  ->  kept 32,  3808/3840 tokens
+    400 exchanges, 2048 window  ->  kept 15,  1785/1792 tokens
+
+**By timeframe** - `history_since` on the chat request, accepting an ISO
+timestamp or shorthand (`45m`, `2h`, `2d`, `1w`). A different tool: not
+"as much as fits" but "last night's session". A study conversation spans
+days, and Tuesday's exchange may matter more than this morning's four
+regardless of budget.
+
+Undated messages survive a timeframe filter. A conversation predating
+timestamps in its checkpoint must not be emptied by the control - that
+would turn "narrow this" into "delete everything".
+
+### Three bugs, two of them mine
+
+**The timeframe path never applied the budget.** It returned straight
+after filtering, so a long afternoon selected with "since this morning"
+was sent whole: 26,800 tokens into a 1,792-token budget. The docstring
+had promised the budget applied within the window; the code did not. The
+budget now runs after the filter, on both paths.
+
+**`select_history` bypassed `parse_since`.** The router parsed the
+shorthand before calling, and with only that in place a raw string
+reached the function, failed to parse, and was ignored - so the timeframe
+control quietly did nothing. It now accepts a datetime or a string
+alike. My own test is what found this, by passing `"2h"`.
+
+**A fixture that reversed time.** The test built the conversation
+newest-first, so the trimmer appeared to keep the *oldest* exchanges -
+which looks exactly like the trimmer working. Real transcripts are
+oldest-first; the fix makes the test say so in a comment.
+
+### One number, used twice
+
+`OPEN_NOTEBOOK_CHAT_CONTEXT` is exported by `termux-launch.sh` and used
+both as llama-server's `-c` and as the API's trimming budget, from one
+literal. Two literals drift, and the symptom is a prompt the server
+silently truncates.
