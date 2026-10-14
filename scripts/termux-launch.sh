@@ -16,6 +16,15 @@
 
 set -u
 
+# Once-a-day update check, before anything is started. Checks only - it
+# never merges, because merging during a launch is exactly the conflict
+# onb-update refuses to run into, and it would make start-up depend on
+# the network. Silent on every outcome except "there is something".
+# Failure here must never stop the launch.
+if [ -f "$HOME/bin/onb-update" ]; then
+  sh "$HOME/bin/onb-update" --launch-check 2>/dev/null || true
+fi
+
 # Default model per docs/7-DEVELOPMENT/wayfinder-plusplus/research-cpu-infer.md
 # Appendix F: the 1.5B-Q4_K_M scored 0.84 mean coverage against the 0.5B's
 # 0.58 on the 25-prompt fixture, for a mean 15.5s vs 6.1s. The latency is

@@ -34,6 +34,7 @@ DEVICE_SCRIPTS = [
     "termux-model.sh",
     "termux-embed.sh",
     "termux-sync.sh",
+    "termux-update.sh",
     "install-bin.sh",
 ]
 

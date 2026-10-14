@@ -58,10 +58,14 @@ install_one termux-embed.sh  onb-embed || rc=1
 # onb-sync was missing here, which is why the wrapper drifted out of
 # step with termux-sync.sh and never picked up the `blobs` command.
 install_one termux-sync.sh   onb-sync  || rc=1
+# onb-update: fetch, merge --ff-only, reinstall the wrappers. Refuses to
+# run while the stack answers, because updating underneath a live server
+# leaves a half-old process tree. --restart does stop/update/start.
+install_one termux-update.sh onb-update || rc=1
 
 echo
 if [ "$rc" -eq 0 ]; then
-  echo "all four installed. start with:  sh ~/bin/onb"
+  echo "all installed. start with:  sh ~/bin/onb"
 else
   echo "some wrappers were missing from the repo - see above"
 fi

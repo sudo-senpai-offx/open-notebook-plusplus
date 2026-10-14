@@ -1043,3 +1043,89 @@ After the phone exported, `/api/sources` on it returned:
 
 which is the distinction that matters: the record is present either
 way, but only one of them can be opened.
+
+---
+
+## 17. onb-update: updating the device
+
+### The problem it solves
+
+Deploying meant remembering five commands in the right order: push a
+bundle over adb, copy it into the guest rootfs, merge it, reinstall the
+wrappers, restart. Miss the `install-bin.sh` step and the wrappers in
+`~/bin` silently stay at the old version - which is exactly how
+`onb-embed` drifted away from `termux-embed.sh` in the first place.
+
+    sh ~/bin/onb-update             # update, if the stack is stopped
+    sh ~/bin/onb-update --restart   # stop, update, start again
+    sh ~/bin/onb-update --check     # report only
+
+### Refusing while the stack is up
+
+Merging underneath a running server leaves a half-old process tree:
+Python has already imported the old modules, the worker pool runs old
+code, and the next restart behaves differently from the one you just
+watched. There is no safe way to do that from outside, so it refuses.
+
+But refusing is a dead end, so `--restart` is the better workaround and
+is why the refusal is an error rather than a wall: it stops through the
+same path `onb stop` uses, updates, and starts again. One command, and
+no window where you have to remember what to run next.
+
+`--check` is exempt. It changes nothing, so refusing would be theatre -
+and "is there an update?" is precisely the question worth asking before
+deciding to restart anything.
+
+### Nothing to do is success
+
+Already up to date exits 0. Only real failures - a dirty tree, a
+non-fast-forward, a missing bundle, the stack being up without
+`--restart` - are non-zero. A launcher that treats "no update" as an
+error teaches you to ignore the exit code, which costs you the errors
+that matter.
+
+### Divergence is refused, not reset
+
+If the guest's HEAD is not an ancestor of the incoming bundle, the
+script stops and says so. A silent `reset --hard` would be simpler and
+would also throw away any edits made on the device, which is not a
+trade worth making on someone's phone unannounced.
+
+### The launch hook
+
+`onb` runs `onb-update --launch-check` before starting anything. It
+**checks only** - merging during a launch is the exact conflict the
+script refuses, and it would make start-up depend on the network. It is
+throttled to once a day (`ONB_UPDATE_MAX_AGE`), because a `git fetch`
+on every launch is real latency on a phone for information that rarely
+changes. It prints one line when there is something, and is silent on
+every other outcome including total failure.
+
+### Three bugs found by testing it off-device
+
+The script is the one piece of this sync story that runs *on the phone*,
+against a repo inside proot, fetched from a bundle the operator pushes
+over adb - none of which can be exercised from a development box. So
+`tests/test_update_script.py` runs the shipping file against a fake
+Termux with a real git repo in a fake rootfs, stubbing only
+`proot-distro` and `curl`. That immediately paid for itself:
+
+  * **Error messages were being swallowed.** `stage_source` printed its
+    failure inside `$( )`, so the most likely failure of all - a bundle
+    that was never pushed - exited non-zero with no explanation. Worse,
+    `STAGE_ERROR` set inside the substitution never reached the caller,
+    so the script reported literally `ERROR: ` followed by nothing.
+  * **A bundle was being rev-parsed.** `git rev-parse /path/to.bundle`
+    cannot work; a bundle is not a ref. It has to be fetched, exactly as
+    the manual procedure does. Every run reported "could not resolve a
+    commit" for a perfectly good bundle.
+  * **`--check` refused while the stack was up.** Read-only, so refusing
+    was theatre, and it was the one case where refusing was least
+    useful.
+
+Two further failures were the fixture's fault and are recorded because
+each would have made the suite lie: the fake guest was built with
+`copytree` (a directory containing the same files, which git correctly
+refuses a bundle from), and the "divergent repo" test committed on a
+side branch and checked `main` out again - leaving main perfectly
+fast-forwardable, so the test passed for entirely the wrong reason.
