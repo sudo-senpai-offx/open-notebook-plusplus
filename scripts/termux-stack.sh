@@ -22,24 +22,62 @@ DATA=/root/snb-data
 LOG=/root/stack.log
 NODE="$APP/.venv/lib/python3.12/site-packages/nodejs_wheel/bin/node"
 
-# Process lookup by cmdline substring. `ss`/`fuser`/`pkill` are not
-# installed in this guest, and Next rewrites its own process title to
-# "next-server (v16.2.6)" — so match that, never "server.js".
-pid_of() {
+# Process lookup by executable, with arguments matched separately.
+# `ss`/`fuser`/`pkill` are not installed in this guest, so /proc is the
+# only option. Next rewrites its own process title to "next-server
+# (v16.2.6)", so the executable name is the stable part to match — never
+# "server.js", and never a bare substring of the whole command line.
+pids_of() {
+  # Every process matching $1, where the pattern is matched in two
+  # parts: the executable against argv[0], and any remaining words
+  # against the whole command line.
+  #
+  # This is needed because the callers disagree about what they are
+  # matching. "llama-server" and "next-server" are one executable.
+  # "uvicorn api.main:app" and "surreal start" are an executable plus
+  # its arguments - and for those, argv[0] alone is just `uvicorn`, so
+  # an argv[0]-only match would find every uvicorn on the device
+  # whatever it was serving.
+  #
+  # It was a substring match over the whole cmdline, and it lied in a
+  # way that mattered: it reported `llama up pid 26053 3236 kB` for a
+  # process serving nothing, while termux-launch.sh - with its own copy
+  # of this function - correctly reported the port unhealthy. Two
+  # implementations of one idea, disagreeing, and the status table was
+  # the one that was confidently wrong.
+  #
+  # Matching argv[0] means a `tail -f llama-server.log` can no longer
+  # be mistaken for the server. Returning *all* matches rather than the
+  # first is deliberate: llama-server is not reliably a single process,
+  # and signalling one of several leaves the port held by another.
+  pattern_head=${1%% *}
+  pattern_tail=${1#"$pattern_head"}
+  pattern_tail=${pattern_tail# }
   for p in /proc/[0-9]*; do
-    cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
-    case "$cl" in
-      *"$1"*) echo "${p#/proc/}"; return 0 ;;
+    argv0=$(tr '\0' '\n' 2>/dev/null < "$p/cmdline" | head -1) || continue
+    [ -n "$argv0" ] || continue
+    case "${argv0##*/}" in
+      "$pattern_head") ;;
+      *) continue ;;
     esac
+    if [ -n "$pattern_tail" ]; then
+      tr '\0' ' ' 2>/dev/null < "$p/cmdline" | grep -q -- "$pattern_tail" || continue
+    fi
+    echo "${p#/proc/}"
   done
-  return 1
+}
+
+pid_of() {
+  pids_of "$1" | head -1 | grep . || return 1
 }
 
 is_up() { pid_of "$1" >/dev/null 2>&1; }
 
 kill_of() {
-  pid=$(pid_of "$1") || return 0
-  kill "$pid" 2>/dev/null && echo "stopped $1 (pid $pid)"
+  pids=$(pids_of "$1")
+  [ -n "$pids" ] || return 0
+  for p in $pids; do kill "$p" 2>/dev/null; done
+  echo "stopped $1 (pid $(echo "$pids" | tr '\n' ' '))"
 }
 
 # Wait for a process to actually disappear. `down` immediately followed by
@@ -51,7 +89,7 @@ wait_gone() {
   while [ "$i" -lt 20 ]; do
     # A zombie's cmdline is empty, so a killed process stops matching here
     # even before its parent reaps it.
-    pid_of "$1" >/dev/null 2>&1 || return 0
+    pids_of "$1" >/dev/null 2>&1 && [ -n "$(pids_of "$1")" ] || return 0
     i=$((i + 1))
     sleep 1
   done
@@ -156,9 +194,21 @@ cmd_status() {
       printf '%-8s DOWN\n' "${name%% *}"
     fi
   done
-  if pid=$(pid_of "llama-server"); then
+
+  # llama is reported by what it is doing, not by whether a process with
+  # its name exists. Those are different facts, and reporting the second
+  # one as though it were the first is what let `llama up 3236 kB` sit
+  # in this table while chat could not possibly work. A 3 MB process is
+  # not a loaded 1.5B model - the loaded one is several hundred MB - so
+  # that figure is also printed, as the thing worth noticing.
+  if curl -sf -m 2 http://127.0.0.1:8080/health >/dev/null 2>&1; then
+    pid=$(pid_of "llama-server")
+    rss=$(awk '/VmRSS/{print $2}' "/proc/${pid:-0}/status" 2>/dev/null)
+    printf '%-8s up    pid %-7s %s kB\n' "llama" "${pid:-?}" "${rss:-?}"
+  elif pid=$(pid_of "llama-server"); then
     rss=$(awk '/VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null)
-    printf '%-8s up    pid %-7s %s kB\n' "llama" "$pid" "${rss:-?}"
+    printf '%-8s STUCK pid %-7s %s kB - process present, nothing on :8080\n' \
+      "llama" "$pid" "${rss:-?}"
   else
     printf '%-8s DOWN\n' "llama"
   fi

@@ -62,20 +62,55 @@ LOG="$HOME/llama-server.log"
 # SD680 the 0.5B sits at 492 MB RSS with these values.
 LLAMA_ARGS="-t 2 -c $LLAMA_CTX -np 1 --port 8080"
 
-pid_of() {
+pids_of() {
+  # Every process whose *executable* is $1. Not the first match.
+  #
+  # A previous version returned one pid, and `llama-server` is not
+  # reliably a single process: the launcher found pid 26053 at 3 MB,
+  # signalled it, reported success, and the server still did not come
+  # up - the same pid reappeared after `pkill -f llama-server` had run,
+  # meaning something was still holding the port that was not the pid
+  # being signalled. Killing the whole set removes the need to know
+  # which one it is.
   for p in /proc/[0-9]*; do
-    cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
-    case "$cl" in
-      *"$1"*) echo "${p#/proc/}"; return 0 ;;
+    argv0=$(tr '\0' '\n' 2>/dev/null < "$p/cmdline" | head -1) || continue
+    [ -n "$argv0" ] || continue
+    case "${argv0##*/}" in
+      "$1") echo "${p#/proc/}" ;;
     esac
   done
-  return 1
+}
+
+# True only when something is actually answering. A process existing is
+# not a server serving, and start_llama consults both so a stale
+# process can never suppress a real start.
+llama_healthy() {
+  curl -sf -m 2 http://127.0.0.1:8080/health >/dev/null 2>&1
+}
+
+# Clear every match, escalating. SIGTERM first because llama-server
+# frees its KV cache on the way out and the phone has 8 GB to lose;
+# SIGKILL only if it does not go.
+kill_llama() {
+  pids=$(pids_of llama-server)
+  [ -n "$pids" ] || return 0
+  for p in $pids; do kill "$p" 2>/dev/null; done
+  i=0
+  while [ "$i" -lt 5 ]; do
+    llama_healthy || return 0
+    sleep 1
+    i=$((i + 1))
+  done
+  for p in $pids; do kill -9 "$p" 2>/dev/null; done
+  sleep 1
+  return 0
 }
 
 stop_llama() {
-  if pid=$(pid_of "llama-server"); then
-    kill "$pid" 2>/dev/null && echo "[onb] stopped llama-server (pid $pid)"
-  fi
+  pids=$(pids_of llama-server)
+  [ -n "$pids" ] || return 0
+  kill_llama
+  echo "[onb] stopped llama-server (pid $(echo "$pids" | tr '\n' ' '))"
 }
 
 stop_all() {
@@ -87,9 +122,17 @@ stop_all() {
 }
 
 start_llama() {
-  if pid_of "llama-server" >/dev/null; then
-    echo "[onb] llama-server already running"
-    return 0
+  # A process matching is not the same as a server serving. Requiring
+  # both means the two checks can no longer disagree in the direction
+  # that leaves nothing listening: if a match exists but health fails,
+  # clear them all out and start a real one.
+  if pids=$(pids_of llama-server) && [ -n "$pids" ]; then
+    if llama_healthy; then
+      echo "[onb] llama-server already running (pid $(echo "$pids" | tr '\n' ' '))"
+      return 0
+    fi
+    echo "[onb] stale llama-server (pid $(echo "$pids" | tr '\n' ' ')) is not serving; replacing"
+    kill_llama
   fi
   [ -f "$MODEL" ] || {
     echo "[onb] FATAL: no usable model found."
@@ -102,7 +145,7 @@ start_llama() {
 
   # shellcheck disable=SC2086
   nohup "$LLAMA" -m "$MODEL" $LLAMA_ARGS >>"$LOG" 2>&1 &
-  echo "[onb] llama-server starting (2 threads, 4096 ctx)"
+  echo "[onb] llama-server starting (2 threads, ${LLAMA_CTX} ctx)"
 }
 
 wait_for_llama() {
@@ -116,6 +159,9 @@ wait_for_llama() {
     sleep 1
   done
   echo "[onb] WARNING: llama-server not healthy after 30s (see $LOG)"
+  echo "[onb]   nothing is answering on :8080, so chat will fail."
+  echo "[onb]   tail -5 $LOG for the reason; if the port is held by a"
+  echo "[onb]   process this launcher cannot see, reboot the phone."
   return 1
 }
 
