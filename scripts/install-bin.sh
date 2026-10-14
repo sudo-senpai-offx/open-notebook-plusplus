@@ -55,6 +55,9 @@ install_one termux-launch.sh onb       || rc=1
 install_one termux-stack.sh  onb-stack || rc=1
 install_one termux-model.sh  onb-model || rc=1
 install_one termux-embed.sh  onb-embed || rc=1
+# onb-sync was missing here, which is why the wrapper drifted out of
+# step with termux-sync.sh and never picked up the `blobs` command.
+install_one termux-sync.sh   onb-sync  || rc=1
 
 echo
 if [ "$rc" -eq 0 ]; then
