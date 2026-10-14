@@ -238,6 +238,11 @@ export interface BuildContextRequest {
     sources: Record<string, string>
     notes: Record<string, string>
   }
+  // The user's question. Sent at send time so the server can retrieve the
+  // passages that match it. Omitted by callers that only want a size
+  // estimate, such as the podcast generator.
+  query?: string
+  retrieval_limit?: number
 }
 
 export interface BuildContextResponse {
@@ -247,6 +252,18 @@ export interface BuildContextResponse {
   }
   token_count: number
   char_count: number
+  // Present only when a query was sent. `mode` is "retrieval" when the
+  // context came from matched passages, "documents" when it fell back to
+  // whole sources and notes.
+  retrieval?: {
+    mode: 'retrieval' | 'empty' | 'fallback' | 'documents'
+    chunks: number
+    documents: number
+    characters: number
+    dropped_out_of_scope?: number
+    dropped_over_budget?: number
+    reason?: string
+  }
 }
 
 export interface RecentlyViewedResponse {

@@ -22,7 +22,11 @@ from open_notebook.exceptions import (
 )
 from open_notebook.graphs.chat import graph as chat_graph
 from open_notebook.utils import token_count
-from open_notebook.utils.context_builder import build_notebook_context
+from open_notebook.utils.context_builder import (
+    _ensure_prefix,
+    build_notebook_context,
+    build_relevant_context,
+)
 from open_notebook.utils.graph_utils import (
     get_session_message_count,
     invoke_chat_turn,
@@ -86,12 +90,28 @@ class ExecuteChatResponse(BaseModel):
 class BuildContextRequest(BaseModel):
     notebook_id: str = Field(..., description="Notebook ID")
     context_config: Dict[str, Any] = Field(..., description="Context configuration")
+    # The user's question. Present it and the response is built from the
+    # passages that actually match it rather than from whole documents.
+    # Optional: without it the endpoint behaves exactly as before.
+    query: Optional[str] = Field(
+        default=None,
+        description="Question to retrieve against; omit for whole-document context",
+    )
+    retrieval_limit: int = Field(
+        default=8, ge=1, le=32, description="Maximum passages to retrieve"
+    )
 
 
 class BuildContextResponse(BaseModel):
     context: Dict[str, Any] = Field(..., description="Built context data")
     token_count: int = Field(..., description="Estimated token count")
     char_count: int = Field(..., description="Character count")
+    # How the context was assembled: "retrieval", "empty" or "documents".
+    # Surfaced rather than logged because a student asking a question and
+    # getting an ungrounded answer deserves to know why.
+    retrieval: Optional[Dict[str, Any]] = Field(
+        default=None, description="Retrieval outcome, when a query was given"
+    )
 
 
 @router.get("/chat/sessions", response_model=List[ChatSessionResponse])
@@ -392,6 +412,31 @@ async def execute_chat(request: ExecuteChatRequest):
         raise HTTPException(status_code=500, detail=f"Error executing chat: {str(e)}")
 
 
+def _eligible_ids(
+    context_config: Dict[str, Any],
+) -> Optional[Dict[str, set]]:
+    """Which records the user's inclusion config makes eligible for retrieval.
+
+    "not in" is the exclusion the UI writes for an unselected row, so it is
+    the only status that disqualifies something. Returns None when there is
+    no config, meaning the whole notebook is in scope.
+    """
+    if not context_config:
+        return None
+    return {
+        "sources": {
+            _ensure_prefix("source", str(sid))
+            for sid, status in (context_config.get("sources") or {}).items()
+            if "not in" not in str(status)
+        },
+        "notes": {
+            _ensure_prefix("note", str(nid))
+            for nid, status in (context_config.get("notes") or {}).items()
+            if "not in" not in str(status)
+        },
+    }
+
+
 @router.post("/chat/context", response_model=BuildContextResponse)
 async def build_context(request: BuildContextRequest):
     """Build context for a notebook based on context configuration."""
@@ -401,15 +446,53 @@ async def build_context(request: BuildContextRequest):
         if not notebook:
             raise HTTPException(status_code=404, detail="Notebook not found")
 
-        context_data, total_content = await build_notebook_context(
-            notebook, request.context_config
-        )
+        retrieval_report = None
+        context_data = None
+        total_content = ""
+
+        if request.query and request.query.strip():
+            eligible = _eligible_ids(request.context_config)
+            try:
+                (
+                    context_data,
+                    total_content,
+                    retrieval_report,
+                ) = await build_relevant_context(
+                    notebook_id=request.notebook_id,
+                    query=request.query.strip(),
+                    eligible_ids=eligible,
+                    limit=request.retrieval_limit,
+                )
+            except Exception as exc:  # noqa: BLE001 - fall back, never fail
+                logger.info(f"Falling back to whole-document context: {exc}")
+                if retrieval_report is None:
+                    retrieval_report = {"mode": "fallback", "reason": str(exc)[:160]}
+
+            # Nothing matched above the similarity bar. An empty prompt is
+            # worse than the document dump, so fall back rather than send
+            # the model nothing.
+            if retrieval_report and retrieval_report.get("mode") == "empty":
+                context_data = None
+
+        if context_data is None:
+            context_data, total_content = await build_notebook_context(
+                notebook, request.context_config
+            )
+            if retrieval_report is not None:
+                retrieval_report["mode"] = (
+                    "fallback"
+                    if retrieval_report.get("mode") == "empty"
+                    else "documents"
+                )
 
         char_count = len(total_content)
         estimated_tokens = token_count(total_content) if total_content else 0
 
         return BuildContextResponse(
-            context=context_data, token_count=estimated_tokens, char_count=char_count
+            context=context_data,
+            token_count=estimated_tokens,
+            char_count=char_count,
+            retrieval=retrieval_report,
         )
     except HTTPException:
         raise

@@ -849,3 +849,86 @@ jsdom lacks, so the menu is mocked to plain markup like `select` and
 `tabs` already are in that file. Its removal left
 `sources.deleteSourceConfirm` unused, which a test enforces - dropped
 from all fourteen locales rather than left as dead weight.
+
+---
+
+## 16. Retrieval in the chat path
+
+### What was actually happening
+
+`POST /api/chat/context` -> `build_notebook_context` had no notion of the
+question. It walked a user-made inclusion list and pasted whole sources
+and notes into the prompt. The model received tens of thousands of
+characters and was expected to select the relevant part itself.
+
+That is the wrong division of labour. A small model is bad at selecting;
+an embedding index is very good at it. On a device built for SDM439,
+adding retrieval is the only lever that makes the model question
+irrelevant - a bigger model is the lever that makes it unaffordable.
+
+Retrieval already existed and was already tested: `POST /api/search`
+with `type: "vector"`, `fn::vector_search` with an HNSW index over 698
+`source_embedding` rows. It simply was not wired into chat.
+
+### The bug that hid it
+
+The first version returned nothing, for every query, with no error.
+
+`fn::vector_search` does not return `content`. Its final statement is
+
+    RETURN (select id, parent_id, title, math::max(similarity) as similarity,
+            array::flatten(content) as matches
+            from $all_results ... group by id, parent_id, title
+            ORDER BY similarity DESC LIMIT $match_count);
+
+so a row is one **document** carrying its matching passages in an array
+called `matches`, already grouped, with the document's best similarity.
+Reading `row["content"]` yields None on every row, every document is
+skipped, and the caller reads "no documents" as an empty corpus and
+falls back to the whole-document dump.
+
+The failure was indistinguishable from "nothing to retrieve" - which is
+the third time in this project that a detector returning a confident
+zero was the actual defect. Rendering a real query's output row by row
+is what caught it; no unit test had, because the shape was guessed
+rather than read.
+
+### The similarity bar
+
+`POST /api/search` defaults to `minimum_score=0.2`. Measured here with
+bge-m3: genuine topical matches land at **0.52-0.61**, while "how do I
+bake sourdough bread" still returned electrophoresis notes at **0.44**.
+At 0.2 that noise is indistinguishable from a real hit, and a small
+model will answer from it confidently.
+
+The bar is therefore **0.45**. Above it, a question with nothing to do
+with the corpus retrieves nothing, and the caller falls back to whole
+documents - which for a general-knowledge question means the model
+answers from its priors, exactly as today. No worse, and honest.
+
+### Budget
+
+`limit` bounds *documents*, and each document carries several passages,
+so a character ceiling is enforced separately at 6000 (~1500 tokens).
+It leaves room in a 4096 window for the system prompt, the question and
+the answer. The dump this replaces had no ceiling at all.
+
+### Scope and degradation
+
+The user's inclusion config stays authoritative: retrieval chooses the
+content, the checkbox chooses the bookshelf. A passage from an
+unselected record is discarded and counted in
+`dropped_out_of_scope`.
+
+Every failure degrades rather than raises - no embedding model, index
+not built, dimension mismatch. The response carries a `retrieval` report
+(`mode`, `documents`, `characters`, `dropped_*`) so "the answer had no
+grounding" is visible instead of inferred.
+
+### The blocker this exposed
+
+**No notebook in this database has a single source attached.** All 46
+sources sit under no notebook, so notebook-scoped retrieval returns
+nothing for them. This is the notebook-grouping item, and it now has a
+concrete cost rather than being cosmetic: until sources are grouped,
+chat retrieves nothing and always falls back.

@@ -130,7 +130,7 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
   })
 
   // Build context from sources and notes based on user selections
-  const buildContext = useCallback(async () => {
+  const buildContext = useCallback(async (query?: string) => {
     // Build context_config mapping IDs to selection modes
     const context_config: { sources: Record<string, string>, notes: Record<string, string> } = {
       sources: {},
@@ -160,9 +160,14 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
     })
 
     // Call API to build context with actual content
+    // `query` is what makes this retrieval rather than a whole-document
+    // dump: the server returns the passages matching the question instead
+    // of every selected source in full. Omitting it keeps the old
+    // behaviour, which is what the podcast path still wants.
     const response = await chatApi.buildContext({
       notebook_id: notebookId,
-      context_config
+      context_config,
+      ...(query ? { query } : {})
     })
 
     // Store token and char counts
@@ -214,7 +219,7 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
 
     try {
       // Build context and send message
-      const context = await buildContext()
+      const context = await buildContext(message)
       const response = await chatApi.sendMessage({
         session_id: sessionId,
         message,

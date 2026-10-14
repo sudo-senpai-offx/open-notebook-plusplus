@@ -510,3 +510,173 @@ async def build_source_context(
     except Exception as e:
         logger.error(f"Error building context: {str(e)}")
         raise DatabaseOperationError(f"Failed to build context: {str(e)}")
+
+
+# How many chunks retrieval keeps, and how lax the similarity bar is.
+#
+# 8 chunks is roughly what fits alongside a question in a 4k window once
+# the system prompt and the answer are accounted for. The point is not to
+# maximise recall - it is to get the relevant passages *into the window at
+# all*, which the whole-document dump below does not manage.
+RETRIEVAL_LIMIT = 8
+# 0.45, not the 0.2 the search endpoint defaults to. Measured on this
+# library with bge-m3: genuine topical matches land at 0.52-0.61, and a
+# question with nothing to do with the corpus - "how do I bake sourdough
+# bread" - still returned electrophoresis notes at 0.44. At 0.2 that noise
+# is indistinguishable from a real hit, and a small model will happily
+# answer from it. Above this bar, a nonsense question retrieves nothing,
+# which makes the caller fall back to whole documents rather than answer
+# confidently from an unrelated slide deck.
+RETRIEVAL_MINIMUM_SCORE = 0.45
+
+# Hard ceiling on retrieved text. The phone runs a 4k-token window that
+# also has to hold the system prompt, the question and the answer; at
+# roughly four characters per token this leaves room for all three. The
+# whole-document dump this replaces had no ceiling at all, which is how a
+# 40,000-character prompt ended up in a 16,384-character window.
+MAX_CONTEXT_CHARACTERS = 6000
+
+
+async def build_relevant_context(
+    notebook_id: Optional[str],
+    query: str,
+    eligible_ids: Optional[Dict[str, set]] = None,
+    limit: int = RETRIEVAL_LIMIT,
+    minimum_score: float = RETRIEVAL_MINIMUM_SCORE,
+    max_characters: int = MAX_CONTEXT_CHARACTERS,
+) -> Tuple[Dict[str, list], str, Dict[str, Any]]:
+    """Assemble chat context from the passages that match the question.
+
+    Why this exists
+    ----------------
+    :func:`build_notebook_context` has no notion of the question. It walks
+    a user-made inclusion list and pastes whole sources and notes into the
+    prompt, so the model receives tens of thousands of characters and is
+    expected to select the relevant part itself. On a phone-sized window
+    most of that is discarded before the model reads it, and a small model
+    is not going to do the selecting well.
+
+    Retrieval moves that work out of the model and into the embedding
+    index, which is already built and already queried by
+    ``POST /api/search``. A 1.5B model given eight relevant chunks is a
+    different proposition from the same model given a whole notebook.
+
+    Scope still comes from the user: *eligible_ids* carries the ids their
+    inclusion config selected, and a passage from anything else is
+    discarded. Relevance chooses the content; the checkbox chooses the
+    bookshelf.
+
+    Every failure degrades to the caller's existing behaviour rather than
+    raising. A device with no embedding model configured, an index that
+    has not been built yet, or an embedding dimension that does not match
+    are all ordinary states, not errors - and the fallback is the context
+    the user would have got anyway.
+    """
+    from open_notebook.domain.notebook import vector_search
+
+    # Every key is present from the start. A report whose shape changes
+    # depending on the outcome is a KeyError waiting for whoever reads it
+    # next, and the caller cannot tell an early return from a finished
+    # search without checking which keys came back.
+    report: Dict[str, Any] = {
+        "mode": "retrieval",
+        "chunks": 0,
+        "documents": 0,
+        "characters": 0,
+        "dropped_out_of_scope": 0,
+        "dropped_over_budget": 0,
+    }
+
+    try:
+        rows = await vector_search(
+            keyword=query,
+            results=limit,
+            source=True,
+            note=True,
+            minimum_score=minimum_score,
+            # None means search everything. The endpoint always scopes to a
+            # notebook; this exists because a device whose sources have not
+            # been grouped into one yet would otherwise retrieve nothing at
+            # all, which looks identical to "the index is empty".
+            notebook_ids=[notebook_id] if notebook_id else None,
+        )
+    except Exception as exc:  # noqa: BLE001 - degrade, never fail a chat turn
+        logger.info(f"Context retrieval unavailable, using whole documents: {exc}")
+        report["mode"] = "fallback"
+        report["reason"] = str(exc)[:160]
+        raise
+
+    if not rows:
+        # Nothing scored above the bar. An empty prompt is worse than the
+        # document dump the caller would otherwise send.
+        logger.info("Retrieval matched nothing; caller should fall back")
+        report["mode"] = "empty"
+        return {"sources": [], "notes": []}, "", report
+
+    # `fn::vector_search` already does the grouping. Its final RETURN is
+    # `array::flatten(content) as matches` over `group by id, parent_id,
+    # title` with `math::max(similarity)`, so a row is one *document*
+    # carrying its matching passages - not one passage.
+    #
+    # Reading `row["content"]` instead returns nothing at all, and looks
+    # exactly like an empty index.
+    context_data: Dict[str, list] = {"sources": [], "notes": []}
+    kept: list[Dict[str, Any]] = []
+
+    # Sorted here rather than trusted to arrive that way. `vector_search`
+    # does sort, but a budget that silently drops the best matches
+    # because an ordering contract changed upstream is not a failure
+    # anyone would notice.
+    for row in sorted(
+        rows or [], key=lambda item: -float(item.get("similarity") or 0.0)
+    ):
+        record_id = str(row.get("parent_id") or row.get("id") or "")
+        if not record_id:
+            continue
+        if eligible_ids is not None:
+            kind = "notes" if record_id.startswith("note:") else "sources"
+            allowed = eligible_ids.get(kind)
+            if allowed is not None and record_id not in allowed:
+                report["dropped_out_of_scope"] += 1
+                continue
+
+        # `matches` is an array of the document's matching passages.
+        matches = row.get("matches") or []
+        if isinstance(matches, str):
+            matches = [matches]
+        passages = [str(m).strip() for m in matches if str(m).strip()]
+        if not passages:
+            continue
+
+        kept.append(
+            {
+                "id": record_id,
+                "title": row.get("title") or "",
+                "relevant_content": "\n\n[... ]\n\n".join(passages),
+                "similarity": round(float(row.get("similarity") or 0.0), 4),
+            }
+        )
+
+    # `limit` bounds documents, and each document can carry several
+    # passages, so the character budget is enforced separately. Without it
+    # eight generous sources can still overflow a 4k window - which is the
+    # failure this whole function exists to prevent.
+    budget = max_characters
+    for payload in kept:
+        if budget <= 0:
+            report["dropped_over_budget"] += 1
+            continue
+        if len(payload["relevant_content"]) > budget:
+            payload["relevant_content"] = payload["relevant_content"][:budget]
+        budget -= len(payload["relevant_content"])
+        context_data[
+            "notes" if payload["id"].startswith("note:") else "sources"
+        ].append(payload)
+        report["chunks"] += payload["relevant_content"].count("[... ]") + 1
+
+    report["documents"] = len(context_data["sources"]) + len(context_data["notes"])
+    report["characters"] = sum(
+        len(e["relevant_content"])
+        for e in context_data["sources"] + context_data["notes"]
+    )
+    return context_data, "", report
