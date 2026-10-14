@@ -1,6 +1,7 @@
 import asyncio
 import operator
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -175,6 +176,128 @@ _SCANNED_PDF_MESSAGE = (
 )
 
 
+async def _try_ocr(file_path: str, cmd_id: str | None = None) -> str:
+    """Read a scanned PDF with the lightweight engine.
+
+    Returns empty string rather than raising: OCR being unavailable is a
+    degraded outcome, not a failure, and the caller's fallback is the
+    existing actionable error.
+    """
+    from open_notebook.ocr import available, ocr_document
+
+    ok, detail = available()
+    if not ok:
+        logger.info(f"OCR unavailable, falling back to the scanned-PDF error: {detail}")
+        return ""
+    try:
+        if cmd_id:
+            await report_progress_record(cmd_id, progress=20, stage="ocr_started")
+        result = await asyncio.to_thread(ocr_document, file_path)
+    except Exception as exc:  # noqa: BLE001 - never fail the import over OCR
+        logger.warning(f"OCR failed for {file_path}: {type(exc).__name__}: {exc}")
+        return ""
+    if not result.ok:
+        if result.error:
+            logger.warning(f"OCR produced nothing for {file_path}: {result.error}")
+        return ""
+    logger.info(
+        f"OCR read {result.pages} page(s) in {result.seconds:.1f}s "
+        f"(mean confidence {result.mean_confidence:.0f}, {len(result.text)} chars)"
+    )
+    return result.text
+
+
+async def _augment_with_ocr(
+    file_path: str, base_text: str, cmd_id: str | None = None
+) -> str:
+    """Add text that only exists inside the document's figures.
+
+    The selective half. A research paper is mostly typeset text that the
+    extractor reads perfectly; OCR over the whole document would be
+    wasted CPU and slightly worse output. So only the pages and regions
+    the analysis flagged - figure images, scanned inserts - are read, and
+    whatever survives the confidence gate is appended.
+    """
+    from open_notebook.ocr import analyse, available, ocr_document
+
+    ok, detail = available()
+    if not ok:
+        return base_text
+    try:
+        analysis = await asyncio.to_thread(analyse, file_path)
+        if not analysis.readable or not analysis.needs_ocr:
+            return base_text
+        result = await asyncio.to_thread(ocr_document, file_path, analysis)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            f"selective OCR failed for {file_path}: {type(exc).__name__}: {exc}"
+        )
+        return base_text
+
+    if not result.ok:
+        return base_text
+    logger.info(
+        f"Selective OCR added {len(result.text)} chars from "
+        f"{result.pages} figure page(s) of {Path(file_path).name}"
+    )
+    if not base_text.strip():
+        return result.text
+    return (
+        base_text.rstrip()
+        + "\n\n[Text recovered from figures]\n\n"
+        + result.text.strip()
+    )
+
+
+async def _extract_with_text_engine(
+    cmd_id: str | None,
+    content_state: dict,
+    config: Optional[ContentCoreConfig],
+    config_kwargs: dict,
+    url: str,
+    file_path: str | None,
+):
+    """Run content-core, then read whatever only the figures contain.
+
+    The selective half of OCR. A research paper is mostly typeset text
+    that this already reads perfectly; OCR over the whole document would
+    be wasted CPU and slightly worse output, while skipping the figures
+    loses real content. So only the pages and regions the analysis
+    flagged get read, and the result is appended.
+    """
+    await report_progress_record(cmd_id, progress=25, stage="extracting_content")
+    try:
+        # Fast profile when Docling is explicitly chosen: the heavy
+        # passes are what make it impractical on a phone.
+        if config_kwargs.get("document_engine") == "docling" and os.getenv(
+            "OPEN_NOTEBOOK_DOCLING_FAST_PROFILE", "true"
+        ).lower() in ("1", "true", "yes", "on"):
+            config_kwargs.setdefault("docling_formulas", False)
+            config_kwargs.setdefault("docling_vision", False)
+
+        processed = await extract_content(
+            url=content_state.get("url"),
+            file_path=content_state.get("file_path"),
+            content=content_state.get("content"),
+            config=config,
+        )
+        await report_progress_record(cmd_id, progress=35, stage="extraction_done")
+
+        if (
+            file_path
+            and file_path.lower().endswith(".pdf")
+            and processed.content
+            and processed.content.strip()
+        ):
+            augmented = await _augment_with_ocr(file_path, processed.content, cmd_id)
+            if augmented != processed.content:
+                processed.content = augmented
+    except cc.ContentCoreError as e:
+        logger.warning(f"content-core extraction failed ({type(e).__name__}): {e}")
+        raise _extraction_error(e, url) from e
+    return processed
+
+
 def _pdf_engine_uses_ocr(document_engine: str) -> bool:
     """Whether PDFs will be routed through Docling (and therefore OCR'd).
 
@@ -309,34 +432,37 @@ async def content_process(state: SourceState) -> dict:
         and not _pdf_engine_uses_ocr(config_kwargs.get("document_engine", "auto"))
         and not await asyncio.to_thread(_pdf_text_layer_present, file_path)
     ):
-        logger.warning(
-            f"PDF {file_path} has no text layer and no OCR engine is enabled; "
-            "failing fast with an actionable message."
-        )
-        raise ValueError(_SCANNED_PDF_MESSAGE)
+        # Try the lightweight engine before giving up. Docling is the
+        # heavyweight answer and the wrong one for a phone: it needs
+        # multi-hundred-megabyte models and will be killed by the OOM
+        # killer next to two llama-servers. Tesseract is ~30 MB and
+        # reads this page in about a second.
+        ocr_text = await _try_ocr(file_path, cmd_id)
+        if ocr_text:
+            content_state["ocr_text"] = ocr_text
+            content_state["skip_extraction"] = True
+        else:
+            logger.warning(
+                f"PDF {file_path} has no text layer and no OCR engine produced "
+                "text; failing fast with an actionable message."
+            )
+            raise ValueError(_SCANNED_PDF_MESSAGE)
 
+    # OCR produced the whole document, so the text extractor is skipped:
+    # it would read the same pages and return empty content. Validation,
+    # cleanup and the return are shared with the normal path, so this
+    # falls through rather than returning early.
     url = content_state.get("url") or ""
-    await report_progress_record(cmd_id, progress=25, stage="extracting_content")
-    try:
-        # Apply fast profile if Docling is explicitly enabled/used; keep OCR only if missing
-        doc_engine = config_kwargs.get("document_engine", "auto")
-        if doc_engine == "docling" and os.getenv(
-            "OPEN_NOTEBOOK_DOCLING_FAST_PROFILE", "true"
-        ).lower() in ("1", "true", "yes", "on"):
-            if "docling_formulas" not in config_kwargs:
-                config_kwargs["docling_formulas"] = False
-            if "docling_vision" not in config_kwargs:
-                config_kwargs["docling_vision"] = False
-        processed = await extract_content(
-            url=content_state.get("url"),
-            file_path=content_state.get("file_path"),
-            content=content_state.get("content"),
-            config=config,
-        )
+
+    if content_state.get("skip_extraction"):
+        from content_core import ExtractionOutput
+
+        processed = ExtractionOutput(content=content_state["ocr_text"], title="")
         await report_progress_record(cmd_id, progress=35, stage="extraction_done")
-    except cc.ContentCoreError as e:
-        logger.warning(f"content-core extraction failed ({type(e).__name__}): {e}")
-        raise _extraction_error(e, url) from e
+    else:
+        processed = await _extract_with_text_engine(
+            cmd_id, content_state, config, config_kwargs, url, file_path
+        )
 
     # Since content-core 2.2, empty content means the source was genuinely
     # empty; extraction failures raise (handled above).

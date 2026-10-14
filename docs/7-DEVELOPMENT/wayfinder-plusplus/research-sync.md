@@ -539,3 +539,96 @@ Sources still do not sync. This step is storage only. Still outstanding:
 the manifest half (hash + metadata, no bytes), the blob transfer channel,
 LAN first with git as the offline-tolerant queue, and tombstones so a
 delete on one device is not resurrected by the next export.
+
+---
+
+## 14. Selective OCR: Tesseract + pypdfium2
+
+### Why not Docling
+
+Docling needs PyTorch and multi-hundred-megabyte layout and table
+models. On the floor device - an SDM439-class 3 GB phone already running
+two llama-servers - it is not slow, it is fatal: the OOM killer takes the
+app. Tesseract is ~30 MB, pure CPU, and reads a page in about a second.
+
+`pypdfium2` was already in the venv as a transitive dependency, which
+removed the other half of the problem: rasterising PDF pages needs no
+system poppler, so there is no second native dependency to install.
+
+### The part that is actually the design
+
+OCR over a whole document is the obvious approach and the wrong one. It
+is also unnecessary, because the PDF already knows which pages need
+reading. Classifying a page costs only its object list, which pdfium
+parsed anyway:
+
+| | |
+|---|---|
+| **TEXT** | a real text layer, little imagery - already extracted, skip |
+| **GRAPHICAL** | no usable text - a scan or a figure, read the page |
+| **MIXED** | both - read only the regions occupied by images |
+
+Measured across this library: **618 readable pages, 411 text, 207
+graphical. 66.5% skipped.** The 196-page textbook drops from 196 pages
+of recognition to 7. That ratio is the whole argument for doing this
+rather than simply running OCR at ingest.
+
+### Quality against speed
+
+**200 DPI.** Tesseract's guidance is that x-height must reach 20px; 10pt
+body text is ~14pt x-height, so 200 DPI yields ~28px, comfortably past
+it. 300 DPI costs ~2.2x the pixels for no gain on clean type, and is
+what the retry path is for on degraded scans.
+
+**Confidence gating.** Tesseract scores every word. Words below 70 are
+dropped; a page whose survivors still average below 60 is discarded
+entirely. Without this a molecular diagram yields lines like
+`KINA i N` and `\e 'protein =` - technically a result, completely wrong,
+and poison to `full_text`, embeddings and search. Discarding is better
+than storing, because the damage is hard to trace back later.
+
+**One process per page, OMP_THREAD_LIMIT=1.** Tesseract spawns its own
+OpenMP pool. On a device already running two llama-servers, letting it
+claim every core is how the whole app gets killed. It is a subprocess by
+design - linking it into the worker would carry its memory for the
+lifetime of the app.
+
+Measured on this machine: **1.2 s/page**, confidence 88-90, on the
+lecture slides.
+
+### Two bugs that failed silently, and how they were found
+
+The first version flagged **77%** of the library for OCR and read
+**nothing**. Both numbers were wrong for the same reason - the detector
+counted text *objects* rather than characters, so a normal typeset page
+scored 5 against a threshold of 200.
+
+The second was worse and quieter: `int("92.167656")` raises, so every
+real word was discarded by the confidence filter and the whole library
+OCR'd to zero. That is indistinguishable from a filter doing its job.
+Only rendering a page to PNG and looking at it - a title slide with
+perfectly legible type - showed that "no text found" and "no text there"
+are different claims.
+
+A third: piping tesseract's TSV emits the confidence column but
+silently empties the text column. Given an output base it writes
+`<base>.tsv` correctly - 22 words at confidence 88-97 versus zero over a
+pipe.
+
+All three now have regression tests. The lesson is the one that keeps
+repeating in this project: a plausible-looking zero is the most
+dangerous thing a filter can return.
+
+### Result
+
+`Protein purification_compressed.pdf` previously failed extraction
+outright with an actionable error. It now yields **10,418 characters** of
+real lecture content at confidence 88, in about a minute for 42 pages.
+
+### Configuration
+
+    OPEN_NOTEBOOK_OCR_ENABLED=true     master switch, fails closed
+    OPEN_NOTEBOOK_OCR_LANG=eng+jpn     any Tesseract language set
+    OPEN_NOTEBOOK_OCR_BIN=tesseract    binary to exec
+    OPEN_NOTEBOOK_OCR_DPI=200          clamped to 150-400
+    OPEN_NOTEBOOK_OCR_TIMEOUT=300
