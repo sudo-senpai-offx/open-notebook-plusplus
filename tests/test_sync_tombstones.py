@@ -29,6 +29,7 @@ from open_notebook.sync.tombstones import (
     load_tombstones,
     prune_tombstones,
     sweep,
+    sweep_notebooks,
     write_tombstone,
 )
 
@@ -211,6 +212,68 @@ class TestPruning:
         assert "source:new" in load_tombstones(tmp_path)
 
 
+class TestNotebookSweep:
+    """Notebooks share one index file, so the sweep has different rules.
+
+    The ordering is load-bearing and was got wrong once: writing the
+    index before sweeping erased the only evidence of what the peer
+    believed existed, and every deletion silently stopped propagating.
+    """
+
+    def _index(self, root: Path, entries: list[tuple[str, str]]) -> None:
+        (root / "notebooks").mkdir(parents=True, exist_ok=True)
+        (root / "notebooks" / "index.json").write_text(
+            json.dumps(
+                {
+                    "notebooks": [
+                        {"slug": slug, "name": name, "updated": STAMP}
+                        for slug, name in entries
+                    ]
+                }
+            )
+        )
+
+    def test_a_vanished_notebook_is_tombstoned_by_slug(self, tmp_path):
+        from open_notebook.sync.tombstones import NOTEBOOKS_KIND, notebook_id
+
+        self._index(
+            tmp_path, [("genetics-301", "Genetics 301"), ("dropped", "Dropped")]
+        )
+
+        written = sweep_notebooks(tmp_path, "notebooks/index.json", ["genetics-301"])
+
+        assert len(written) == 1
+        assert written[0].id == notebook_id("dropped")
+        assert written[0].kind == NOTEBOOKS_KIND
+        assert notebook_id("dropped") == "notebook:dropped"
+
+    def test_the_dead_entry_is_dropped_from_the_index(self, tmp_path):
+        self._index(tmp_path, [("kept", "Kept"), ("dropped", "Dropped")])
+
+        sweep_notebooks(tmp_path, "notebooks/index.json", ["kept"])
+
+        remaining = json.loads((tmp_path / "notebooks" / "index.json").read_text())[
+            "notebooks"
+        ]
+        assert [nb["slug"] for nb in remaining] == ["kept"]
+
+    def test_a_live_notebook_is_untouched(self, tmp_path):
+        self._index(tmp_path, [("kept", "Kept")])
+
+        assert sweep_notebooks(tmp_path, "notebooks/index.json", ["kept"]) == []
+        assert not (tmp_path / TOMBSTONES_DIR).exists()
+
+    def test_a_missing_index_is_not_an_error(self, tmp_path):
+        assert sweep_notebooks(tmp_path, "notebooks/index.json", ["x"]) == []
+
+    def test_a_corrupt_index_is_not_a_mass_deletion(self, tmp_path):
+        """A truncated index must not tombstone every notebook in it."""
+        (tmp_path / "notebooks").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "notebooks" / "index.json").write_text("{truncated")
+
+        assert sweep_notebooks(tmp_path, "notebooks/index.json", []) == []
+
+
 # --- live round trip -------------------------------------------------------
 #
 # Two namespaces on one server stand in for two devices. One namespace
@@ -220,7 +283,10 @@ class TestPruning:
 # configuration straight from the environment on every call - swapping
 # SURREAL_NAMESPACE alone is not enough, the database name moves too.
 
-pytestmark = pytest.mark.skipif(
+# Scoped to the live tests rather than set as a module-level `pytestmark`,
+# which would skip the unit tests above too - and a skipped suite that
+# looks green is worse than a red one.
+requires_db = pytest.mark.skipif(
     not os.getenv("SURREAL_TEST_URL"),
     reason="needs a live SurrealDB; set SURREAL_TEST_URL",
 )
@@ -274,6 +340,7 @@ def use_device(monkeypatch):
         pass
 
 
+@requires_db
 @pytest.mark.asyncio
 async def test_a_deletion_survives_the_round_trip(tmp_path, use_device):
     """The whole point, end to end.
@@ -314,6 +381,7 @@ async def test_a_deletion_survives_the_round_trip(tmp_path, use_device):
     )
 
 
+@requires_db
 @pytest.mark.asyncio
 async def test_a_local_edit_overrides_a_remote_deletion(tmp_path, use_device):
     """Last-write-wins, including edits.
@@ -372,6 +440,7 @@ async def test_a_local_edit_overrides_a_remote_deletion(tmp_path, use_device):
     )
 
 
+@requires_db
 @pytest.mark.asyncio
 async def test_deleting_a_source_keeps_the_bytes(tmp_path, use_device):
     """Forget, not destroy.
@@ -411,3 +480,76 @@ async def _exists(model, record_id: str) -> bool:
         return True
     except Exception:
         return False
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_a_notebook_reaches_the_other_device(tmp_path, use_device):
+    """Notebooks sync at all now.
+
+    The index was written by every export and read by nothing, so a
+    notebook that existed only on the PC never appeared on the phone.
+    This is why seven course notebooks were missing from the device.
+    """
+    from open_notebook.domain.notebook import Notebook
+    from open_notebook.sync.exchange import export_all, import_all
+
+    use_device("pc")
+    for name in ("Genetics 301", "日本語勉強会", "Molecular Biology"):
+        await Notebook(name=name, description="").save()
+
+    await export_all(device="pc", root=tmp_path / "pc")
+
+    use_device("phone")
+    result = await import_all(root=tmp_path / "pc")
+
+    assert result["notebooks_created"] == 3
+    assert result["missing_notebooks"] == []
+
+    names = {r["name"] for r in await _query("SELECT name FROM notebook")}
+    assert names == {"Genetics 301", "日本語勉強会", "Molecular Biology"}
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_a_deleted_notebook_stays_deleted(tmp_path, use_device):
+    """The gap that was flagged rather than papered over."""
+    from open_notebook.domain.notebook import Notebook
+    from open_notebook.sync.exchange import export_all, import_all
+
+    use_device("pc")
+    await Notebook(name="Doomed course", description="").save()
+    await export_all(device="pc", root=tmp_path / "pc")
+
+    use_device("phone")
+    await import_all(root=tmp_path / "pc")
+    assert await _notebook_exists("Doomed course"), "precondition: phone has it"
+
+    await (await _get_notebook("Doomed course")).delete()
+    await export_all(device="phone", root=tmp_path / "pc")
+
+    use_device("pc")
+    result = await import_all(root=tmp_path / "pc")
+
+    assert result["tombstones_applied"] == 1
+    assert not await _notebook_exists("Doomed course"), (
+        "a deleted notebook resurrected - the gap this closes"
+    )
+
+
+async def _query(statement: str):
+    from open_notebook.database.repository import repo_query
+
+    return await repo_query(statement)
+
+
+async def _get_notebook(name: str):
+    from open_notebook.domain.notebook import Notebook
+
+    rows = await _query(f"SELECT * FROM notebook WHERE name = '{name}'")
+    return await Notebook.get(str(rows[0]["id"]))
+
+
+async def _notebook_exists(name: str) -> bool:
+    rows = await _query(f"SELECT * FROM notebook WHERE name = '{name}'")
+    return bool(rows)

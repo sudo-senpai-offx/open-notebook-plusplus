@@ -198,9 +198,14 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     # Notebooks are referenced by slug, not id: a record id is per-database
     # and means nothing on the other device. One query each rather than
     # one per note.
-    notebook_names = {
-        str(r["id"]): r.get("name") or ""
-        for r in (await repo_query("SELECT id, name FROM notebook") or [])
+    # `updated` is what makes a notebook subject to the same
+    # last-write-wins rule as every other record. Without it a deleted
+    # notebook could not be distinguished from one that never synced,
+    # and there was nothing to compare a tombstone against.
+    notebook_rows = await repo_query("SELECT id, name, updated FROM notebook") or []
+    notebook_names = {str(r["id"]): r.get("name") or "" for r in notebook_rows}
+    notebook_updated = {
+        str(r["id"]): r.get("updated") for r in notebook_rows if r.get("updated")
     }
     note_to_notebooks: Dict[str, List[str]] = {}
     for edge in await repo_query("SELECT in, out FROM artifact") or []:
@@ -218,17 +223,31 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
         for nid, nbids in note_to_notebooks.items()
     }
 
+    # Slugs are the notebook's identity across devices - a record id is
+    # per-database and means nothing on the other side - so the index is
+    # keyed by slug and deduped on it.
+    notebook_entries: Dict[str, Dict[str, Any]] = {}
+    for notebook_id, name in notebook_names.items():
+        slug = _slug(name)
+        if not slug:
+            continue
+        stamped = _as_iso(notebook_updated.get(notebook_id))
+        notebook_entries[slug] = {
+            "slug": slug,
+            "name": name,
+            "updated": stamped.isoformat() if stamped else None,
+        }
+    # Swept here, before the index is written, and not alongside the
+    # per-record sweep below. Notebooks share one index file, so
+    # overwriting it first destroys the only record of what the peer
+    # believed existed - there would be nothing left to detect a
+    # deletion against. Per-record files are immune to this because each
+    # is its own baseline.
+    tombstones.sweep_notebooks(root, NOTEBOOKS, notebook_entries.keys())
+
     _write_json(
         root / NOTEBOOKS,
-        {
-            "notebooks": sorted(
-                (
-                    {"slug": _slug(name), "name": name}
-                    for name in notebook_names.values()
-                ),
-                key=lambda nb: nb["slug"],
-            )
-        },
+        {"notebooks": sorted(notebook_entries.values(), key=lambda nb: nb["slug"])},
     )
 
     for note in notes:
@@ -326,6 +345,7 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             SOURCES_DIR: [str(s.id) for s in sources],
         },
     )
+    removed += tombstones.sweep_notebooks(root, NOTEBOOKS, notebook_entries.keys())
 
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -479,7 +499,19 @@ async def import_all(
     }
     missing: set[str] = set()
 
+    # Notebooks first. Everything downstream resolves a `notebook_slugs`
+    # entry to a local notebook id, so this has to run before the notes
+    # and sources are processed.
+    #
+    # This step did not exist at all before: the index was exported and
+    # then never read, so a notebook that only ever existed on the PC
+    # simply never appeared on the phone. Anything whose slug had no
+    # local match was dropped into `missing_notebooks` and left there.
+    notebooks_created, notebooks_updated = await _import_notebooks(root, dry_run)
+
     result: Dict[str, Any] = {
+        "notebooks_created": 0,
+        "notebooks_updated": 0,
         "notes_created": 0,
         "notes_updated": 0,
         "notes_skipped_stale": 0,
@@ -696,11 +728,132 @@ async def import_all(
     result["revlog_added"] = revlog_result[0]
     result["revlog_duplicates"] = revlog_result[1]
     result["missing_notebooks"] = sorted(missing)
-    await _apply_tombstones(root, result, dry_run)
+    result["notebooks_created"] = notebooks_created
+    result["notebooks_updated"] = notebooks_updated
+    await _apply_tombstones(root, result, dry_run, local_notebooks)
     return result
 
 
-async def _apply_tombstones(root: Path, result: Dict[str, Any], dry_run: bool) -> None:
+async def _import_notebooks(root: Path, dry_run: bool) -> Tuple[int, int]:
+    """Create or rename notebooks to match the manifest.
+
+    Matched on slug, which is the only identity two devices share - a
+    record id is per-database. A notebook present locally under a
+    different name is renamed only when the manifest is newer, so the
+    same last-write-wins rule applies here as to notes and sources.
+    """
+    from open_notebook.domain.notebook import Notebook
+
+    path = root / NOTEBOOKS
+    if not path.is_file():
+        return 0, 0
+
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8")).get("notebooks") or []
+    except (OSError, ValueError) as exc:
+        logger.warning(f"sync: unreadable notebook index: {exc}")
+        return 0, 0
+
+    existing = {
+        _slug(r.get("name") or ""): r
+        for r in (await repo_query("SELECT id, name, updated FROM notebook") or [])
+    }
+
+    created = updated = 0
+    for entry in entries:
+        slug = str(entry.get("slug") or "")
+        name = entry.get("name") or slug
+        if not slug:
+            continue
+
+        match = existing.get(slug)
+        if match is None:
+            if dry_run:
+                created += 1
+                continue
+            notebook = Notebook(name=name, description="")
+            await notebook.save()
+            await _apply_timestamp(notebook, entry.get("updated"))
+            created += 1
+            existing[slug] = {"id": str(notebook.id), "name": name}
+            continue
+
+        incoming = entry.get("updated")
+        local_updated = match.get("updated")
+        local_iso = _as_iso(local_updated)
+        local_iso = (
+            local_iso.isoformat() if isinstance(local_iso, datetime) else local_iso
+        )
+        if incoming and not _newer(incoming, local_iso):
+            continue
+        if dry_run:
+            updated += 1
+            continue
+
+        notebook = await Notebook.get(str(match["id"]))
+        if (notebook.name or "") != name:
+            notebook.name = name
+            await notebook.save()
+        await _apply_timestamp(notebook, incoming)
+        updated += 1
+
+    return created, updated
+
+
+async def _apply_notebook_tombstone(
+    tombstone: "tombstones.Tombstone",
+    result: Dict[str, Any],
+    dry_run: bool,
+    local_notebooks: Dict[str, str],
+) -> None:
+    """Delete a notebook the peer says is gone, matched by slug.
+
+    Same rule as everything else, keyed on the slug rather than a record
+    id because the id is per-database and means nothing on the other
+    device. Deleting a notebook cascades to its notes; the cascaded
+    notes are tombstoned in turn by this device's next export sweep, so
+    the deletion propagates one level at a time rather than needing the
+    cascade to be transmitted.
+    """
+    from open_notebook.domain.notebook import Notebook
+
+    slug = tombstone.id.split(":", 1)[-1]
+    notebook_id = local_notebooks.get(slug)
+    if notebook_id is None:
+        result["tombstones_already_absent"] += 1
+        return
+
+    notebook = await Notebook.get(notebook_id)
+    local_updated = (
+        notebook.updated.isoformat() if notebook.updated is not None else None
+    )
+    if not _newer(tombstone.updated, local_updated):
+        result["tombstones_overridden_by_local_edit"] += 1
+        logger.info(
+            f"Notebook tombstone for {slug} ignored: edited locally at "
+            f"{local_updated} after the delete at {tombstone.updated}"
+        )
+        return
+
+    if dry_run:
+        result["tombstones_applied"] += 1
+        return
+
+    # delete_exclusive_sources stays False: a source that merely hung
+    # off this notebook still exists, it just stops being filed here.
+    # Tombstoning it would delete the user's material because they
+    # tidied a folder.
+    await notebook.delete(delete_exclusive_sources=False)
+    result["tombstones_applied"] += 1
+    logger.info(f"Applied notebook tombstone: deleted notebook {slug}")
+
+
+async def _apply_tombstones(
+    root: Path,
+    result: Dict[str, Any],
+    dry_run: bool,
+    local_notebooks: Optional[Dict[str, str]] = None,
+) -> None:
     """Delete the records the peer says are gone.
 
     Resolved by the same last-write-wins rule as everything else: a
@@ -720,10 +873,14 @@ async def _apply_tombstones(root: Path, result: Dict[str, Any], dry_run: bool) -
     models = {NOTES_DIR: Note, CARDS_DIR: Flashcard, SOURCES_DIR: Source}
 
     for record_id, tombstone in found.items():
+        if tombstone.kind == tombstones.NOTEBOOKS_KIND:
+            await _apply_notebook_tombstone(
+                tombstone, result, dry_run, local_notebooks or {}
+            )
+            continue
+
         model = models.get(tombstone.kind)
         if model is None:
-            # Notebooks sync by slug in a single index file and carry no
-            # timestamp of their own, so they get no recency comparison.
             result["errors"].append(
                 f"tombstone {record_id}: unknown kind {tombstone.kind!r}"
             )

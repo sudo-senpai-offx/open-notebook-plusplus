@@ -741,3 +741,51 @@ recording because they would have made the suite lie:
 A third was real: the assertion compared a tombstone stamped 12:00
 against a save made at 10:35 UTC, so the ordering depended on the wall
 clock rather than on the rule being tested.
+
+### Closing the notebook gap (which was worse than stated)
+
+Flagging "notebooks carry no timestamp" turned out to be the small part.
+The index was written by every export and **read by nothing**. No import
+ever created a notebook from it; anything whose slug had no local match
+was dropped into `missing_notebooks` and left there. That, not the
+missing timestamp, is why seven course notebooks never reached the
+phone.
+
+Three changes:
+
+  * `notebooks/index.json` entries carry `updated`, so a notebook is
+    subject to the same last-write-wins rule as every other record.
+  * import reads the index and creates or renames notebooks by slug,
+    before anything that resolves a `notebook_slugs` entry to a local id.
+  * `sweep_notebooks` tombstones notebooks that vanished, keyed on a
+    synthetic `notebook:<slug>` id - a record id is per-database and
+    means nothing on the other device, so the slug is the only identity
+    both sides share.
+
+Deleting a notebook on import passes `delete_exclusive_sources=False`.
+A source that merely hung off that notebook still exists; it just stops
+being filed there. Tombstoning it would delete the user's material
+because they tidied a folder.
+
+### An ordering bug worth recording
+
+The notebook sweep was initially placed alongside the per-record sweep,
+after the index had been written. It detected nothing, every time.
+
+Per-record files are immune to this: each is its own baseline, and
+overwriting one leaves the others as evidence. Notebooks share a single
+index, so writing the phone's now-empty list first destroyed the only
+record of what the peer believed existed. The sweep has to run *before*
+the index is written.
+
+The general lesson is the one from the OCR confidence bug: a detector
+that reads its baseline after the baseline has been overwritten returns
+a confident zero. Two different modules, same shape of failure.
+
+### A test trap in the new suite
+
+The live tests need a database, so the file originally carried a
+module-level `pytestmark` skipif - which skipped the unit tests above it
+too. The suite reported green while testing nothing. The marker is now
+scoped to the five live tests, so the file reports 18 passed without a
+server and 23 with one.

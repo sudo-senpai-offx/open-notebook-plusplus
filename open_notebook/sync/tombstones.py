@@ -55,11 +55,15 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from loguru import logger
 
 TOMBSTONES_DIR = "tombstones"
+
+# Notebooks tombstone under a synthetic id rather than a record id;
+# see `notebook_id`.
+NOTEBOOKS_KIND = "notebooks"
 
 # How far past the record's own timestamp a tombstone is stamped. One
 # second is enough to win the comparison and small enough that the
@@ -238,6 +242,67 @@ def sweep(
             # it would make every future import delete the record again,
             # and the tombstone is already the authoritative signal.
             path.unlink(missing_ok=True)
+    return written
+
+
+def notebook_id(slug: str) -> str:
+    """Synthetic, stable identity for a notebook in a tombstone.
+
+    Every other record keeps its database id, which survives the sync
+    because `_create_with_id` preserves it. Notebooks cannot: they are
+    matched by slug, since a record id means nothing on the other
+    device. A tombstone needs an id both sides can derive, and the slug
+    is the only thing they share.
+    """
+    return f"notebook:{slug}"
+
+
+def sweep_notebooks(
+    root: Path, index_rel: str, live_slugs: Iterable[str]
+) -> List[Tombstone]:
+    """Tombstone notebooks that vanished, and drop them from the index.
+
+    The index is one file rather than one file per notebook, so this
+    cannot reuse `sweep` - but the principle is identical: compare what
+    the manifest claims against what exists now.
+    """
+    path = root / index_rel
+    if not path.is_file():
+        return []
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning(f"Unreadable notebook index {index_rel}: {exc}")
+        return []
+
+    entries = payload.get("notebooks") or []
+    live = {str(s) for s in live_slugs}
+    kept: List[Dict] = []
+    written: List[Tombstone] = []
+
+    for entry in entries:
+        slug = str(entry.get("slug") or "")
+        if slug and slug not in live:
+            written.append(
+                write_tombstone(
+                    root,
+                    notebook_id(slug),
+                    kind=NOTEBOOKS_KIND,
+                    previous_updated=entry.get("updated"),
+                )
+            )
+        else:
+            kept.append(entry)
+
+    if written:
+        payload["notebooks"] = kept
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
     return written
 
 
