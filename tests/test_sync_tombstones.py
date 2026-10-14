@@ -46,14 +46,23 @@ def _seed(root: Path, name: str, record_id: str, **fields) -> None:
 
 
 @pytest.fixture(autouse=True)
-def synced_device(monkeypatch, request):
+def synced_device(monkeypatch, request, tmp_path):
     """Arm the sweep for tests that are not about the watermark.
 
     A device that has completed an import is the precondition for any
     tombstone existing at all. Tests written before the watermark
     assumed an always-armed device; this makes that explicit instead of
     restoring the old, unsafe assumption. The watermark tests override it.
+
+    DATA_FOLDER is redirected as well, and that is not tidiness. Patching
+    `read_watermark` to a far-future date means any `import_all` under
+    this fixture reads 2099, finds it newer than now, and *writes* it -
+    to wherever DATA_FOLDER points, which by default is the developer's
+    own data directory. That left the real PC with a 2099 watermark:
+    the sweep fully armed, so every manifest entry looked deletable,
+    which is precisely the failure the watermark exists to prevent.
     """
+    monkeypatch.setenv("DATA_FOLDER", str(tmp_path / "data"))
     # The watermark tests set the watermark themselves - including to
     # "none" and to real values - so arming it here would overwrite the
     # thing under test.
@@ -677,3 +686,26 @@ def _parse(value):
     from datetime import datetime
 
     return datetime.fromisoformat(value) if value else None
+
+
+def test_no_test_writes_into_the_project_data_directory():
+    """A suite must not mutate the developer's own state.
+
+    This one leaked. The `synced_device` fixture patches
+    `read_watermark` to a far-future date, and the live round-trip tests
+    under it call `import_all`, which calls `write_watermark()` — which
+    reads the patched value, sees it is newer than now, and writes it.
+
+    With DATA_FOLDER unset that landed in the repository's `data/`, and
+    the real PC ended up with a watermark of 2099: the sweep fully
+    armed, so every manifest entry looked deletable. That is precisely
+    the failure the watermark exists to prevent, delivered by its own
+    test suite.
+    """
+    project_data = Path(__file__).resolve().parents[1] / "data"
+    stray = [p for p in (project_data / "sync-watermark.json",) if p.exists()]
+
+    assert not stray, (
+        f"a watermark was written into {project_data} by this run: "
+        f"{[p.name for p in stray]}. Tests must redirect DATA_FOLDER."
+    )

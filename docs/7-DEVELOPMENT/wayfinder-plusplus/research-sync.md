@@ -1277,3 +1277,38 @@ oldest-first; the fix makes the test say so in a comment.
 both as llama-server's `-c` and as the API's trimming budget, from one
 literal. Two literals drift, and the symptom is a prompt the server
 silently truncates.
+
+### The test suite disarmed the sweep it exists to protect
+
+While writing the selective-history tests I checked whether the PC was
+safe to sync, and found `data/sync-watermark.json` containing
+`2099-01-01`.
+
+That is the fully-armed state: every manifest entry looks deletable to
+this device. Exactly the failure the watermark exists to prevent.
+
+The cause was the test suite. `synced_device`, the autouse fixture that
+arms the sweep for tests that are not about the watermark, patches
+`read_watermark` to a far-future date. The live round-trip tests under
+it call `import_all`, which calls `write_watermark()`, which reads the
+**patched** value, sees it is newer than now, and writes it. With
+`DATA_FOLDER` unset that landed in the repository's `data/`.
+
+Two files were still leaking after the first fix, so the durable answer
+is an autouse fixture in `tests/conftest.py` redirecting `DATA_FOLDER`
+for every test in the suite, plus a detector that fails if anything
+appears in the project's data directory.
+
+Worth stating plainly: this is the second time in this project that a
+guard designed to prevent data loss was itself the cause. The first was
+the OCR confidence filter returning a plausible zero. Both were found by
+looking at the state rather than by reading the code - the code had been
+right in its own terms the whole time.
+
+### What that means for deploying
+
+Before this was caught, the PC would have been the dangerous side rather
+than the phone: it is the device holding the manifest copy. A sync run
+in that state could have tombstoned records rather than protecting them.
+`rm data/sync-watermark.json` disarms the sweep; the first real import
+re-arms it correctly, with the actual time.
