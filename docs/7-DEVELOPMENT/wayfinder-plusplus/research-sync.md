@@ -1412,3 +1412,74 @@ server as up.
 None were found by reading the code, which was correct in its own terms
 throughout. Each was found by looking at the state and asking whether the
 number was plausible.
+
+---
+
+## 21. The first sync, and the failures it took to get there
+
+### The container was serving a build without sync in it
+
+`sh scripts/pc-sync.sh push` returned `{"detail":"Not Found"}` from
+`/api/sync/export`. The router existed in the source, tested and green -
+but the PC app runs in a Docker container built from an image, and the
+image predated it. Only `notebook_data` was mounted, so even a working
+export would have written the manifest into the container where no
+host-side git could see it, and `sync/` was not gitignored, so it would
+also have tried to become a gitlink - putting transcripts in the app
+repo's history, the one thing this design exists to prevent.
+
+All three were true at once. The export would have looked like it
+worked, committed nothing, and written traces into the app repository
+for good measure.
+
+### The blob store the app reads was empty
+
+Fifteen hashes recorded, fifteen files on disk, `resolve_blob_path`
+finding none of them. The sources had been migrated to content
+addressing correctly - `file_path` was already
+`data/blobs/<aa>/<sha256>.<ext>` - but there are two stores:
+
+    ./data/blobs             21 files   the real store
+    notebook_data/blobs       0 files   what the container mounts
+
+`BLOBS_FOLDER` is relative to whichever process asks, so the host means
+one directory and the container another. Both are correct; they are just
+different. Copied and verified by re-hashing, never moved or deleted.
+
+The repair script's first version asked the app where its blobs were,
+which on the host is the store they were already in, so it reported
+"nothing to do" while the app could open none of them: a comparison
+between a thing and itself. Both roots are named explicitly now.
+
+And the six chat sessions were read as test residue and very nearly
+deleted. They were real conversations from 12-22 September. The
+placeholder rows belonged to `chat_session:abc` and `chat_session:n`,
+which do not exist - the real sessions simply have no `chat_message`
+rows, because their transcripts live only in the LangGraph checkpoint.
+A zero-sample "no transcript text in git" check would then have passed
+for the wrong reason: there were no transcripts to leak.
+
+### A failed pull reported itself as a conflict
+
+The phone's pull was not a divergence at all - `git pull --ff-only` on
+an unborn branch succeeds (verified). The remote needed credentials the
+fresh Termux git had never been given, and the driver discarded stderr
+and called every failure "someone edited the same record". The operator
+then tried to resolve a conflict on a branch never committed to.
+
+The pull now captures stderr and classifies it. A network error or a
+refused credential says so and points at `ls-remote`; only a real
+non-fast-forward is called a conflict. Same change on the PC driver.
+
+Also reordered while there: `pull` checked the app *before* fetching,
+so a stopped app hid a broken remote behind a message about starting
+things. Git first, then the import gate - the git half needs no app.
+
+### The pattern by now
+
+Six guards in this project have failed in the direction of their own
+plausibility: a filter returning nothing, a sweep tombstoning nothing, a
+status line reporting a dead server as up, a serialiser discarding a
+conversation, a script reporting nothing to do, and a pull diagnosing a
+conflict that did not exist. None were found by reading the code. Each
+was found by asking whether the number on screen was true.

@@ -102,19 +102,41 @@ cmd_push() {
 cmd_pull() {
   apply=false
   [ "${1:-}" = "--apply" ] && apply=true
-  api_up
+  # The git half of a pull needs no app, and the app half needs git to
+  # have succeeded - so the app check used to come first, and a stopped
+  # app hid a broken remote behind a message about starting things. The
+  # API is checked only when the import is about to run, not before the
+  # fetch.
   [ -d "$SYNC_DIR/.git" ] || die "no git repo at $SYNC_DIR - run: onb-sync init <url>"
   git_sane
 
   echo "[sync] pulling"
-  if ! git -C "$SYNC_DIR" pull -q --ff-only origin main 2>/dev/null; then
+  # Stderr is captured, not discarded, and for a reason. This used to
+  # swallow it and report every failure - including a network error or
+  # a GitHub credential prompt answered wrong - as "someone edited the
+  # same record". The operator then resolved a conflict that did not
+  # exist, on a branch that had never been committed to. A pull failure
+  # and a divergence are different problems with different remedies, so
+  # the output has to say which one it is.
+  pull_err=$(git -C "$SYNC_DIR" pull --ff-only origin main 2>&1 >/dev/null) || {
+    echo "[sync] pull failed: $pull_err" | head -3
+    if echo "$pull_err" | grep -qiE "could not resolve|connection|timed out|refused|authentication|credential|permission"; then
+      echo "       This is the network or the credential, not a conflict."
+      echo "       Check the connection and that git can reach GitHub:"
+      echo "         git -C '$SYNC_DIR' ls-remote origin"
+      return 1
+    fi
     echo "[sync] pull was not a fast-forward, so it was NOT applied."
     echo "       Someone edited the same record. Inspect:"
     echo "         git -C '$SYNC_DIR' log --oneline -5"
     echo "         git -C '$SYNC_DIR' diff"
     echo "       Then resolve and retry. Nothing was changed locally."
     return 1
-  fi
+  }
+
+  # Here, not earlier: git has already succeeded or failed by now,
+  # so the "is the app up" question cannot mask a broken remote.
+  api_up
 
   echo "[sync] import dry run (nothing written yet)"
   curl -s -m 300 -X POST "$API/api/sync/import" \

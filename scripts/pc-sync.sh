@@ -132,13 +132,28 @@ cmd_push() {
 cmd_pull() {
   apply=false
   [ "${1:-}" = "--apply" ] && apply=true
-  api_up
+  # The git half of a pull needs no app, and the app half needs git to
+  # have succeeded - so the app check used to come first, and a stopped
+  # app hid a broken remote behind a message about starting things. The
+  # API is checked only when the import is about to run, not before the
+  # fetch.
   [ -d "$SYNC_DIR/.git" ] || die "no git repo at $SYNC_DIR - run: pc-sync.sh init <url>"
   git_sane
 
   echo "[sync] pulling"
   if [ -n "$(git -C "$SYNC_DIR" remote get-url origin 2>/dev/null)" ]; then
-    git -C "$SYNC_DIR" pull -q --ff-only origin main 2>/dev/null || return 1
+    # Same as on the phone: a failed pull is not necessarily a
+    # conflict, and swallowing stderr made every one look like one.
+    pull_err=$(git -C "$SYNC_DIR" pull --ff-only origin main 2>&1 >/dev/null) || {
+      echo "[sync] pull failed: $pull_err" | head -3
+      if echo "$pull_err" | grep -qiE "could not resolve|connection|timed out|refused|authentication|credential|permission"; then
+        echo "       This is the network or the credential, not a conflict."
+        return 1
+      fi
+      echo "[sync] pull was not a fast-forward, so it was NOT applied."
+      echo "       Someone edited the same record. Nothing was changed locally."
+      return 1
+    }
   else
     echo "       (no remote - using whatever fetch-bundle last brought in)"
   fi
@@ -148,6 +163,10 @@ cmd_pull() {
       -H 'Content-Type: application/json' -d "{\"dry_run\":$1}" |
       tr ',' '\n' | grep -E 'created|updated|stale|revlog|awaiting' | sed 's/^/       /'
   }
+
+  # Here, not earlier: git has already succeeded or failed by now,
+  # so the "is the app up" question cannot mask a broken remote.
+  api_up
 
   echo "[sync] import dry run (nothing written yet)"
   show_import true

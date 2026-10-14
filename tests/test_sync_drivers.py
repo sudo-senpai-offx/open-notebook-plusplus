@@ -265,6 +265,42 @@ class TestTheDivergenceGuard:
         assert local in result.stdout + result.stderr
 
 
+class TestAPullFailureIsNotReportedAsAConflict:
+    """A guard that names the wrong reason sends the operator to fix one
+    that does not exist.
+
+    `pull` used to discard stderr and report every failure - including a
+    network drop or a refused credential - as "someone edited the same
+    record". On a phone with no interactive git, the operator then tried
+    to resolve a conflict on a branch that had never been committed to.
+    The output has to say which problem it actually is.
+    """
+
+    @pytest.mark.parametrize("script", [PC_SYNC, TERMUX_SYNC], ids=["pc", "phone"])
+    def test_an_unreachable_remote_is_not_a_conflict(self, tmp_path, script):
+        sync_dir = tmp_path / "sync"
+        _drive(script, sync_dir, "init", "https://does-not-exist.invalid/none.git")
+
+        result = _drive(script, sync_dir, "pull")
+
+        out = result.stdout + result.stderr
+        assert "edited the same record" not in out, "misdiagnosed: " + out
+        assert "network or the credential" in out, "cause not named: " + out
+
+    @pytest.mark.parametrize("script", [PC_SYNC, TERMUX_SYNC], ids=["pc", "phone"])
+    def test_a_failed_pull_changes_nothing_locally(self, tmp_path, script):
+        sync_dir = tmp_path / "sync"
+        _drive(script, sync_dir, "init", "https://does-not-exist.invalid/none.git")
+
+        result = _drive(script, sync_dir, "pull")
+
+        assert result.returncode != 0
+        before = list(sync_dir.glob("*"))
+        assert before == [] or all(p.name == ".git" for p in sync_dir.iterdir()), (
+            "a failed pull must not leave files behind"
+        )
+
+
 class TestNoCourseContentInTheRepo:
     def test_the_sync_dir_is_not_committed_to_the_app_repo(self):
         """The manifest has its own repository and its own remote.
