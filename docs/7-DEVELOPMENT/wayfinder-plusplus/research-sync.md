@@ -1312,3 +1312,103 @@ than the phone: it is the device holding the manifest copy. A sync run
 in that state could have tombstoned records rather than protecting them.
 `rm data/sync-watermark.json` disarms the sweep; the first real import
 re-arms it correctly, with the actual time.
+
+---
+
+## 20. Chat transcripts over the blob channel
+
+### The rule, and why it is the whole design
+
+The sync repository holds metadata and hashes. A transcript is course
+content - the same material as a lecture PDF - so the moment one lands in
+git, the repo stops being metadata and becomes a library. Transcripts
+therefore travel as blobs over the channel sources already use, and the
+manifest records only the hash.
+
+One blob per session, as recommended. The alternative was one per
+message: each is tiny, so nothing large is ever in flight. But a
+fifty-message conversation becomes fifty blobs and fifty requests, and
+the conversation is the unit a person thinks in. A session grows by
+rewriting one blob, which content addressing makes cheap. The cost is
+size, so there is an advisory at 256 KB - a warning and not an error,
+because a conversation long enough to trip it is exactly the one worth
+having.
+
+### Merge is an append-only union on record id
+
+Migration 36 already made `chat_message.id` unique and intended it for
+this. A message is either present (skip) or new (insert), so both devices
+can extend one conversation with no conflict. Ordering is deliberately not
+the merge key: two devices assign overlapping `seq` and display order
+falls back to `created`, then id.
+
+### Five bugs, four of them mine
+
+**`_export_chats` asked the wrong object.** It called
+`ChatMessage(**row).transcript()` on a *chat_session* row, building a
+message with no `session` set. The lookup matched nothing, every session
+exported with no hash, and the entire blob path did nothing while looking
+like it had worked. Now one query fetches all messages, bucketed by
+session - which is also fewer round trips than one per session.
+
+**Re-export dropped the hash.** A device that had imported a session but
+not its transcript has no messages to serialise, so it wrote
+`transcript_sha256: null` - destroying the only record that bytes exist.
+The peer would never push them, and the conversation would stay
+half-synced for good with no error anywhere. This is the planned
+pull-then-export order, not a corner. The previous export is now read
+before being overwritten and the hash carried forward, deliberately
+*without* claiming to hold the bytes, since that claim is what tells the
+peer to push.
+
+**A stale metadata check skipped the transcript.** The bytes arrive on a
+later pass than the metadata, so a session whose title has not changed is
+exactly the one whose transcript is still missing. The import branched
+out before reaching it. Transcript merging is now outside that branch.
+
+**`serialize_transcript` read attributes only.** `parse_transcript`
+returns dicts, so re-serialising a parsed transcript turned every message
+into an empty one - a conversation reduced to a fraction of its size,
+hashed consistently, valid at every step. What surfaced it was the size
+advisory *not* appearing, so the assertion that noticed was an unrelated
+looking one. `_field` now reads either form.
+
+**Hashes depended on arrival order.** Sorted JSON keys fixed key order
+but not list order, so two devices holding the same messages in different
+arrival order produced different blobs and each pushed its own copy
+forever. Messages are now sorted by (seq, id) before serialising - the
+same ordering the merge uses, so nothing downstream depends on it.
+
+### The tombstone path had a live landmine
+
+Unrelated to chats, found while adding sessions to it. `_apply_tombstones`
+called `existing.delete(keep_blob=True)` unconditionally. Only `Source`
+accepts that argument; `Note`, `Flashcard` and `ChatSession` inherit
+`ObjectModel.delete(self)`. So a tombstone for a record this device
+actually held raised `TypeError`, part-way through applying the rest.
+
+**Delete a note on the phone and the PC's import dies.** No test caught
+it: `keep_blob` appeared nowhere in the tombstone tests. The flag is now
+passed only to a `delete` that asks for it, checked by signature rather
+than caught - a `try` would swallow a `TypeError` thrown from inside a
+delete for an unrelated reason and leave the record half-removed.
+
+Chat sessions also clear their messages when tombstoned.
+`chat_message.session` has no `ON DELETE CASCADE`, so deleting a session
+leaves rows behind - invisible, since every read is scoped by session,
+but adopted by any session later re-imported under the same id. A
+conversation the user deleted comes back with the parts they removed.
+
+### Fourth time a guard was the cause
+
+The OCR confidence filter returned a plausible zero. The test suite wrote
+a 2099 watermark into the real data directory. `pid_of` reported a 3 MB
+process as a running server. `serialize_transcript` discarded a whole
+conversation. Every one was a safety mechanism, and in three of the four
+the failure looked like the mechanism working - a filter returning
+nothing, a sweep tombstoning nothing, a status line reporting a dead
+server as up.
+
+None were found by reading the code, which was correct in its own terms
+throughout. Each was found by looking at the state and asking whether the
+number was plausible.

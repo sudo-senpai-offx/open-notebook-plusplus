@@ -81,6 +81,11 @@ NOTEBOOKS = "notebooks/index.json"
 CARDS_DIR = "cards"
 SOURCES_DIR = "sources"
 REVLOG = "revlog/revlog.jsonl"
+# Chat sessions. One file per session, holding metadata and the
+# transcript's hash - never the transcript. That travels as a blob, so
+# the repository stays metadata-only and a conversation stays a
+# conversation rather than becoming a commit nobody can read.
+CHAT_DIR = "chat"
 
 
 def sync_dir() -> Path:
@@ -350,6 +355,8 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
         encoding="utf-8",
     )
 
+    chat_entries = await _export_chats(root, device, notebook_names)
+
     # Deletions are detected here rather than in each delete method.
     # Comparing the manifest against what exists now catches every route
     # that removes a record - the UI endpoint, the notebook cascade, a
@@ -362,6 +369,11 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             NOTES_DIR: [str(n.id) for n in notes],
             CARDS_DIR: [str(c.id) for c in cards],
             SOURCES_DIR: [str(s.id) for s in sources],
+            # Swept like every other kind. A session deleted on this
+            # device has to leave the same kind of mark a deleted note
+            # does, or the peer keeps offering it back forever and the
+            # conversation reappears with no action taken.
+            CHAT_DIR: list(chat_entries),
         },
     )
     removed += tombstones.sweep_notebooks(root, NOTEBOOKS, notebook_entries.keys())
@@ -376,6 +388,7 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             "revlog": len(revlog_rows or []),
             "notebooks": len(notebook_names),
             "tombstoned": len(removed),
+            "chats": len(chat_entries),
         },
         # Sources whose bytes this device does not hold. The blob channel
         # uses it to decide what to ask for; it is informational in git.
@@ -388,9 +401,132 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
                 and not resolve_blob_path(s.asset.sha256, s.asset.filename)
             )
         ),
+        # Transcripts this device names but does not hold - it heard of
+        # them from a peer and the bytes have not come back yet. The
+        # inverse of what the sources line says, and the one that tells
+        # the channel there is something to push.
+        #
+        # Keyed on the hash being present *and* unheld, not on the
+        # absence of `transcript_exported_by`: an empty conversation has
+        # no transcript at all, and counting that as awaiting would
+        # report a transfer outstanding for a session with nothing to
+        # send.
+        "chats_awaiting_blobs": sum(
+            1
+            for e in chat_entries.values()
+            if e.get("transcript_sha256") and not e.get("transcript_exported_by")
+        ),
     }
     _write_json(root / MANIFEST, manifest)
     return manifest
+
+
+async def _export_chats(
+    root: Path, device: str, notebook_names: Dict[str, str]
+) -> Dict[str, Dict[str, Any]]:
+    """Write one metadata file per chat session. Returns them by id.
+
+    The transcript is stored as a blob and only its hash is written
+    here. `transcript_exported_by` says which device holds the bytes, in
+    the same spirit as a source's `bytes_held_by`: "I know about this
+    conversation" and "I can read this conversation" are different
+    claims, and only the second one is worth anything.
+
+    All messages come back in one query and are bucketed by session,
+    rather than asking each session for its own transcript. This started
+    by calling `ChatMessage(**row).transcript()` on a *chat_session*
+    row, which built a message with no `session` set - so the lookup
+    matched nothing, every session exported with no hash, and the entire
+    blob path did nothing while looking like it had worked.
+    """
+    from open_notebook.domain.notebook import ChatMessage
+    from open_notebook.sync import chatsync
+
+    (root / CHAT_DIR).mkdir(parents=True, exist_ok=True)
+
+    rows = (
+        await repo_query("SELECT id, title, model_override, updated FROM chat_session")
+        or []
+    )
+    entries: Dict[str, Dict[str, Any]] = {}
+
+    by_session: Dict[str, List[ChatMessage]] = {}
+    for raw in (
+        await repo_query("SELECT * FROM chat_message ORDER BY seq ASC, created ASC")
+        or []
+    ):
+        message = ChatMessage(**raw)
+        by_session.setdefault(str(message.session or ""), []).append(message)
+
+    # What the last export claimed, read before anything is overwritten.
+    # A device that has imported a session but not yet its transcript has
+    # no messages to serialise - and writing `transcript_sha256: null`
+    # would drop the hash on the floor, so the peer would never learn
+    # there were bytes to send and the conversation would stay
+    # half-synced for good. Pull-then-export is the planned order, not an
+    # edge case.
+    previous: Dict[str, Dict[str, Any]] = {}
+    for existing_file in sorted((root / CHAT_DIR).glob("*.json")):
+        data = _read_json(existing_file)
+        if data and data.get("id"):
+            previous[str(data["id"])] = data
+
+    for row in rows:
+        session_id = str(row.get("id") or "")
+        if not session_id:
+            continue
+
+        messages = by_session.get(session_id, [])
+        blob_sha: Optional[str] = None
+        exported_by: Optional[str] = None
+        if messages:
+            # Stored unconditionally rather than only when it changed.
+            # Content addressing makes a repeat cheap - one hash, no
+            # write - and skipping the comparison would mean deciding
+            # "changed" against a field that does not exist.
+            ref = chatsync.store_transcript(session_id, messages)
+            if chatsync.blob_exists(ref.sha256):
+                blob_sha, exported_by = ref.sha256, device
+        else:
+            # No messages here, so nothing to store. Carry the hash the
+            # peer published instead, and deliberately do *not* claim to
+            # hold it: that is what tells the other device to push.
+            carried = previous.get(session_id, {}).get("transcript_sha256")
+            if carried:
+                blob_sha = str(carried)
+
+        notebook_slugs: set[str] = set()
+        for edge in (
+            await repo_query(
+                "SELECT out FROM refers_to WHERE in = $sid",  # noqa: S608
+                {"sid": ensure_record_id(session_id)},
+            )
+            or []
+        ):
+            slug = _slug(notebook_names.get(str(edge.get("out")), ""))
+            if slug:
+                notebook_slugs.add(slug)
+
+        stamped = _as_iso(row.get("updated"))
+        entries[session_id] = {
+            "id": session_id,
+            "title": row.get("title"),
+            "model_override": row.get("model_override"),
+            "updated": stamped.isoformat() if stamped else None,
+            "message_count": len(messages),
+            "notebook_slugs": sorted(notebook_slugs),
+            "transcript_sha256": blob_sha,
+            # Absent, not null, when this device does not hold the
+            # bytes - the same convention sources use.
+            **({"transcript_exported_by": exported_by} if exported_by else {}),
+            "exported_by": device,
+        }
+        _write_json(
+            root / CHAT_DIR / f"{session_id.replace(':', '-')}.json",
+            entries[session_id],
+        )
+
+    return entries
 
 
 def _source_kind(asset: Asset) -> str:
@@ -528,6 +664,10 @@ async def import_all(
     # local match was dropped into `missing_notebooks` and left there.
     notebooks_created, notebooks_updated = await _import_notebooks(root, dry_run)
 
+    # Sessions next, once notebooks exist - a session's notebook_slugs
+    # resolve against the same index the notes and sources use.
+    chats = await _import_chats(root, dry_run)
+
     result: Dict[str, Any] = {
         "notebooks_created": 0,
         "notebooks_updated": 0,
@@ -550,6 +690,15 @@ async def import_all(
         "missing_notebooks": [],
         "revlog_added": 0,
         "revlog_duplicates": 0,
+        # Chat sessions, and the two numbers that are not the same
+        # thing: `messages_added` counts messages that actually arrived,
+        # `chats_awaiting_blobs` counts sessions whose transcript is
+        # named in the manifest but not yet on this device.
+        "chats_created": chats["created"],
+        "chats_updated": chats["updated"],
+        "chats_skipped_stale": chats["skipped_stale"],
+        "chats_messages_added": chats["messages_added"],
+        "chats_awaiting_blobs": chats["awaiting_blobs"],
         # Deletions carried by the peer. `overridden_by_local_edit` is
         # the record coming back because this device edited it after the
         # delete - correct, and worth seeing rather than hiding.
@@ -760,6 +909,87 @@ async def import_all(
     return result
 
 
+async def _import_chats(root: Path, dry_run: bool) -> Dict[str, int]:
+    """Upsert chat sessions, and merge transcripts whose bytes are here.
+
+    A session whose transcript has not arrived still imports. Reporting
+    it as `awaiting_blobs` rather than failing is the point: metadata
+    and bytes travel by different routes, in that order, so "the manifest
+    knows about bytes I have not fetched" is the normal state of a device
+    between two syncs rather than an error to shout about.
+    """
+    from open_notebook.domain.notebook import ChatSession
+    from open_notebook.sync import chatsync
+
+    stats = {
+        "created": 0,
+        "updated": 0,
+        "skipped_stale": 0,
+        "messages_added": 0,
+        "awaiting_blobs": 0,
+    }
+    chat_dir = root / CHAT_DIR
+    if not chat_dir.is_dir():
+        return stats
+
+    for path in sorted(chat_dir.glob("*.json")):
+        data = _read_json(path)
+        if not data or not data.get("id"):
+            continue
+
+        session_id = str(data["id"])
+        existing = await _maybe_get(ChatSession, session_id)
+        is_stale = existing is not None and not _newer(
+            data.get("updated"), _iso_str(existing.updated)
+        )
+
+        if is_stale:
+            stats["skipped_stale"] += 1
+        elif not dry_run:
+            if existing is None:
+                await _create_with_id(
+                    ChatSession(
+                        title=data.get("title"),
+                        model_override=data.get("model_override"),
+                    ),
+                    session_id,
+                )
+                stats["created"] += 1
+            else:
+                existing.title = data.get("title")
+                existing.model_override = data.get("model_override")
+                await existing.update()
+                stats["updated"] += 1
+            await _apply_timestamp(
+                await _maybe_get(ChatSession, session_id) or ChatSession(),
+                data.get("updated"),
+            )
+
+        # Deliberately outside the branch above. Whether the metadata is
+        # stale says nothing about whether the bytes have arrived: the
+        # normal order is metadata first and blobs on a later pass, so a
+        # session whose title has not changed since the last import is
+        # exactly the one whose transcript is still missing. Skipping
+        # the transcript on a stale comparison left those permanently
+        # half-synced, with the blob sitting in the store and nothing
+        # ever reading it.
+        sha = data.get("transcript_sha256")
+        if not sha:
+            continue
+        if chatsync.transcript_pending(sha):
+            stats["awaiting_blobs"] += 1
+            continue
+        if not dry_run:
+            added, _seen = await chatsync.import_transcript(session_id, str(sha))
+            stats["messages_added"] += added
+
+    return stats
+
+
+def _iso_str(value: Any) -> Optional[str]:
+    return value.isoformat() if value is not None else None
+
+
 async def _import_notebooks(root: Path, dry_run: bool) -> Tuple[int, int]:
     """Create or rename notebooks to match the manifest.
 
@@ -890,13 +1120,21 @@ async def _apply_tombstones(
     happened on.
     """
     from open_notebook.domain.flashcard import Flashcard
-    from open_notebook.domain.notebook import Note
+    from open_notebook.domain.notebook import ChatSession, Note
 
     found = tombstones.load_tombstones(root)
     if not found:
         return
 
-    models = {NOTES_DIR: Note, CARDS_DIR: Flashcard, SOURCES_DIR: Source}
+    models = {
+        NOTES_DIR: Note,
+        CARDS_DIR: Flashcard,
+        SOURCES_DIR: Source,
+        # Sessions are tombstoned like any other record, so deleting a
+        # conversation on one device stops it being resurrected by the
+        # other's manifest on the next export.
+        CHAT_DIR: ChatSession,
+    }
 
     for record_id, tombstone in found.items():
         if tombstone.kind == tombstones.NOTEBOOKS_KIND:
@@ -934,14 +1172,67 @@ async def _apply_tombstones(
             result["tombstones_applied"] += 1
             continue
 
+        if tombstone.kind == CHAT_DIR:
+            await _delete_session_and_transcript(existing)
+
         # Delete the record, not the bytes, and say so explicitly rather
         # than inheriting the local auto_delete_files preference. A
         # tombstone is someone else's delete arriving here; this device
         # may hold the only copy of the file, and destroying it would turn
         # a tidy-up on the phone into permanent loss on the PC.
-        await existing.delete(keep_blob=True)
+        await _delete_preserving_blob(existing)
         result["tombstones_applied"] += 1
         logger.info(f"Applied tombstone: deleted {tombstone.kind} {record_id}")
+
+
+async def _delete_preserving_blob(record: Any) -> None:
+    """Delete *record*, asking it to keep its bytes if it has any.
+
+    Only `Source` has bytes, and only `Source.delete` accepts the flag.
+    Passing it unconditionally raised `TypeError` on every other kind -
+    note, flashcard, chat session - because they inherit
+    `ObjectModel.delete(self)`. That was reachable and untested: delete a
+    note on the phone and the PC's import died part-way through
+    applying the rest of the tombstones.
+
+    Checked rather than caught. A try/except around the call would
+    swallow a TypeError thrown from *inside* a delete for the wrong
+    reason and leave the record half-removed; inspecting the signature
+    only ever passes the argument to a delete that asked for it.
+    """
+    import inspect
+
+    try:
+        accepts = "keep_blob" in inspect.signature(record.delete).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if accepts:
+        await record.delete(keep_blob=True)
+    else:
+        await record.delete()
+
+
+async def _delete_session_and_transcript(session: Any) -> None:
+    """Remove a chat session's messages before the session itself.
+
+    `chat_message.session` is a plain `record<chat_session>` with no
+    ON DELETE CASCADE, so deleting the session leaves its rows behind.
+    They are invisible - every read is scoped by session - but not
+    harmless: a session id re-imported later adopts the orphans, and a
+    conversation the user deleted comes back with the parts they had
+    removed.
+    """
+    session_id = str(session.id)
+    try:
+        await repo_query(
+            "DELETE chat_message WHERE session = $sid",
+            {"sid": ensure_record_id(session_id)},
+        )
+    except Exception as exc:
+        # Reported, not raised. The session still has to go; leaving it
+        # because its messages could not be cleaned up would be a worse
+        # outcome than some rows surviving.
+        logger.warning(f"could not clear transcript of {session_id}: {exc}")
 
 
 def _blob_present(data: Dict[str, Any]) -> bool:
