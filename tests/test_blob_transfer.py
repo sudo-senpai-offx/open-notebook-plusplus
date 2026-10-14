@@ -393,6 +393,21 @@ class TestPutVerifiesTheDigest:
         assert response.status_code == 400
 
 
+@pytest.fixture
+def roots(store, monkeypatch):
+    """Point the storage roots at the temp store.
+
+    Without this the LFI guard rejects every path as being outside the
+    configured roots, and the test would be measuring the guard rather
+    than the resolution.
+    """
+    import api.routers.sources as routes
+
+    monkeypatch.setattr(routes, "BLOBS_FOLDER", str(store))
+    monkeypatch.setattr(routes, "UPLOADS_FOLDER", str(store / "uploads"))
+    return store
+
+
 class TestTheAppResolvesSyncedSources:
     """A synced source has a hash and no path. The app must cope.
 
@@ -402,20 +417,6 @@ class TestTheAppResolvesSyncedSources:
     consumer read `asset.file_path` instead of the derived
     `Source.local_file`. Storage worked; nothing above it did.
     """
-
-    @pytest.fixture
-    def roots(self, store, monkeypatch):
-        """Point the storage roots at the temp store.
-
-        Without this the LFI guard rejects every path as being outside
-        the configured roots, and the test would be measuring the guard
-        rather than the resolution.
-        """
-        import api.routers.sources as routes
-
-        monkeypatch.setattr(routes, "BLOBS_FOLDER", str(store))
-        monkeypatch.setattr(routes, "UPLOADS_FOLDER", str(store / "uploads"))
-        return store
 
     @pytest.fixture
     def synced(self, store, roots):
@@ -476,3 +477,60 @@ class TestTheAppResolvesSyncedSources:
         assert model.sha256 == ref.sha256
         assert model.filename == "Lecture.pdf"
         assert model.file_path == ref.path
+
+
+class TestListEndpointSerialisation:
+    """The list route builds its response straight from the query row.
+
+    It never goes through `_source_to_response`, so anything omitted
+    there simply does not reach the UI. That is how a synced source came
+    back with `sha256: null` and no `file_available` while its bytes sat
+    in the store - the detail route was fixed and the list route was
+    not, so the fix looked complete and was not.
+    """
+
+    def test_row_becomes_an_asset_with_its_identity(self, store, roots):
+        from api.routers.sources import _asset_from_row
+
+        ref = store_bytes(b"row content", "Row.pdf", root=store)
+        asset = _asset_from_row(
+            {"sha256": ref.sha256, "filename": "Row.pdf", "size": ref.size}
+        )
+        assert asset is not None
+        assert asset.sha256 == ref.sha256
+        assert asset.filename == "Row.pdf"
+        assert asset.file_path == ref.path
+
+    def test_row_availability_matches_the_instance_helper(self, store, roots):
+        import open_notebook.domain.notebook as nb
+        from api.routers.sources import _available_from_row, _is_source_file_available
+
+        ref = store_bytes(b"availability content", "Avail.pdf", root=store)
+        row = {"sha256": ref.sha256, "filename": "Avail.pdf", "size": ref.size}
+        source = nb.Source(title="x", asset=nb.Asset(**row))
+
+        assert _available_from_row(row) is True
+        assert _is_source_file_available(source) is True
+
+    def test_pending_transfer_reads_false_from_both_paths(self, store, roots):
+        from api.routers.sources import _available_from_row
+
+        row = {"sha256": "e" * 64, "filename": "Later.pdf", "size": 1}
+        assert _available_from_row(row) is False
+
+    def test_link_and_text_rows_read_none(self, store, roots):
+        from api.routers.sources import _available_from_row
+
+        assert _available_from_row(None) is None
+        assert _available_from_row({"url": "https://example.com"}) is None
+        assert _available_from_row({"filename": None, "sha256": None}) is None
+
+    def test_a_stored_path_still_works_for_legacy_rows(self, store, roots):
+        """Pre-blob rows have no hash; their path is all we have."""
+        from api.routers.sources import _asset_from_row
+
+        legacy = {"file_path": "/somewhere/old.pdf", "url": None}
+        asset = _asset_from_row(legacy)
+        assert asset is not None
+        assert asset.file_path == "/somewhere/old.pdf"
+        assert asset.sha256 is None

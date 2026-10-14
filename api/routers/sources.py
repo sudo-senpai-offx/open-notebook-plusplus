@@ -43,7 +43,7 @@ from open_notebook.exceptions import (
     OpenNotebookError,
     UnsupportedTypeException,
 )
-from open_notebook.storage.blobs import store_bytes
+from open_notebook.storage.blobs import resolve_blob_path, store_bytes
 
 router = APIRouter()
 
@@ -301,6 +301,43 @@ def parse_source_form_data(
     return source_data, file
 
 
+def _asset_from_row(asset: Optional[dict]) -> Optional[AssetModel]:
+    """Build the asset for a raw query row.
+
+    Mirrors what _source_to_response does for a Source instance. The list
+    endpoint goes straight from the database row to the response, so
+    anything omitted here simply does not reach the UI.
+    """
+    if not asset:
+        return None
+    sha = asset.get("sha256")
+    return AssetModel(
+        file_path=resolve_blob_path(sha, asset.get("filename"))
+        or asset.get("file_path"),
+        url=asset.get("url"),
+        sha256=sha,
+        filename=asset.get("filename"),
+        size=asset.get("size"),
+    )
+
+
+def _available_from_row(asset: Optional[dict]) -> Optional[bool]:
+    """Same three-way answer as _is_source_file_available, from a raw row.
+
+    True when the bytes are here, False when a hash says they should be
+    but are not, None when there is no file to wait for.
+    """
+    if not asset:
+        return None
+    sha = asset.get("sha256")
+    if not sha:
+        return None
+    local = resolve_blob_path(sha, asset.get("filename"))
+    if not local:
+        return False
+    return os.path.exists(local)
+
+
 @router.get("/sources", response_model=List[SourceListResponse])
 async def get_sources(
     notebook_id: Optional[str] = Query(None, description="Filter by notebook ID"),
@@ -400,17 +437,16 @@ async def get_sources(
                     id=row["id"],
                     title=row.get("title"),
                     topics=row.get("topics") or [],
-                    asset=AssetModel(
-                        file_path=row["asset"].get("file_path")
-                        if row.get("asset")
-                        else None,
-                        url=row["asset"].get("url") if row.get("asset") else None,
-                    )
-                    if row.get("asset")
-                    else None,
+                    asset=_asset_from_row(row.get("asset")),
                     embedded=row.get("embedded", False),
                     embedded_chunks=0,  # Not needed in list view
                     insights_count=row.get("insights_count", 0),
+                    # This endpoint serialises straight from the query row
+                    # rather than through _source_to_response, so it needs
+                    # the availability check too - without it every source
+                    # came back with file_available unset, including the
+                    # synced ones whose bytes were sitting in the store.
+                    file_available=_available_from_row(row.get("asset")),
                     created=str(row["created"]),
                     updated=str(row["updated"]),
                     # Status fields from fetched command
