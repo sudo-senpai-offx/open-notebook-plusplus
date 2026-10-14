@@ -349,9 +349,18 @@ async def add_source_to_notebook(notebook_id: str, source_id: str):
         await Notebook.get(notebook_id)
         await Source.get(source_id)
 
-        # Check if reference already exists (idempotency)
+        # Check if reference already exists (idempotency).
+        #
+        # `in` is the source and `out` is the notebook, matching the
+        # RELATE below and the direction every other reader assumes
+        # (`export_all` selects `out` where `in` is the source, and
+        # fn::vector_search scopes with `SELECT VALUE in FROM reference
+        # WHERE out IN $notebook_ids`).
+        #
+        # This check had the two swapped, so it never matched an existing
+        # edge and every call created another one.
         existing_ref = await repo_query(
-            "SELECT * FROM reference WHERE out = $source_id AND in = $notebook_id",
+            "SELECT * FROM reference WHERE in = $source_id AND out = $notebook_id",
             {
                 "notebook_id": ensure_record_id(notebook_id),
                 "source_id": ensure_record_id(source_id),

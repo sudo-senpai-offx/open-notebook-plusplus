@@ -932,3 +932,65 @@ sources sit under no notebook, so notebook-scoped retrieval returns
 nothing for them. This is the notebook-grouping item, and it now has a
 concrete cost rather than being cosmetic: until sources are grouped,
 chat retrieves nothing and always falls back.
+
+### Relinking the recovered sources
+
+The grouping the user described - a source added inside a notebook is
+filed there, one added outside is unlinked, and existing ones can be
+linked deliberately - **already exists and always worked**
+(`POST /notebooks/{id}/sources/{id}`). Nothing needed building.
+
+The problem was narrower. All 46 sources had been recreated by the
+recovery scripts, which read decoded records and wrote them straight
+into the database with no notebook context, so the manifest held **46
+sources, 7 notebooks and 0 reference edges**. And there was no folder
+evidence to recover the grouping from: every one of the 45 recovered
+files sat in a single flat `/app/data/uploads`, never filed into course
+folders in the first place.
+
+`recovery-2026-10-14/relink_sources.py` links only where the source's
+own **title** states the subject - substring terms like `genomic
+library`, `cdna library`, `crispr`. No content inference, no fuzzy
+matching. Anything it is not certain about is left alone and printed,
+because a source filed under the wrong course is worse than an
+unfiled one: it will be confidently retrieved for the wrong question.
+
+Applied:
+
+    GTB204 - Molecular Biology Techniques   14 sources
+    LHP412 - Effective Oral Presentation      2 sources
+    deleted                                  9 (8 fixture-throttle, 1 perf-big3)
+    left unplaced                           21 (web links, "Eiffel Tower", ...)
+
+37 sources remain, 16 reference edges.
+
+### What that unblocked
+
+Notebook-scoped retrieval resolves through `SELECT VALUE in FROM
+reference WHERE out IN $notebook_ids`, so before this every source was
+invisible to chat - fully embedded, entirely unfindable. Measured
+against GTB204 before and after:
+
+    how is a genomic library constructed
+      before: mode=empty, 0 documents
+      after:  Genomic library Construction                    0.62
+
+    what does gel electrophoresis separate molecules by
+      after:  Electrophoretic Techniques and Molecular Blotting 0.70
+
+### A bug found on the way
+
+The link route's idempotency check read
+
+    SELECT * FROM reference WHERE out = $source_id AND in = $notebook_id
+
+while the `RELATE` directly below it creates `in = source, out =
+notebook`. The two are opposites, so the check never matched an existing
+edge and every call created another one. SurrealDB accepts a duplicate
+`RELATE` silently, so nothing errored - the only symptom was sources
+appearing twice in a notebook and retrieval double-counting them.
+
+The orientation is confirmed by the two `artifact` edges that do exist
+(`in = note`, `out = notebook`) and is what `export_all` and
+`fn::vector_search` both assume. `tests/test_notebook_source_links.py`
+pins it; reverting the one-line fix makes it fail.
