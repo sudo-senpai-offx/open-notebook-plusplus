@@ -201,3 +201,193 @@ class TestTransfer:
         from open_notebook.storage.blobs import resolve_blob_path
 
         assert resolve_blob_path(claimed) is None
+
+
+class TestPushDirection:
+    """The direction this network actually needs.
+
+    The phone cannot open a connection to the PC, so it can never pull.
+    The PC has to push, and a channel with only `pull_from` is a channel
+    that does not work here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_push_delivers_bytes_to_the_peer(self, store, tmp_path, monkeypatch):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        payload = b"pushed across the network"
+        ref = store_bytes(payload, "push-me.pdf", root=store)
+
+        received: dict[str, bytes] = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                received[self.path] = body
+                self.send_response(201)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            from open_notebook.sync.blobtransfer import push_to
+
+            result = await push_to(
+                f"http://127.0.0.1:{server.server_port}", [ref.sha256]
+            )
+        finally:
+            server.shutdown()
+
+        assert result["sent"] == [ref.sha256]
+        assert result["failed"] == []
+        body = received[f"/api/sync/blobs/{ref.sha256}"]
+        assert body == payload, "the peer must receive the bytes, not a reference"
+
+    @pytest.mark.asyncio
+    async def test_push_skips_blobs_we_do_not_hold(self, store):
+        from open_notebook.sync.blobtransfer import push_to
+
+        out = await push_to("http://127.0.0.1:1", ["0" * 64])
+        assert out["offered"] == 1
+        assert out["sent"] == []
+        assert out["failed"] == [], "a blob we do not hold is skipped, not a failure"
+
+    @pytest.mark.asyncio
+    async def test_push_reports_a_refusal(self, store, tmp_path):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        ref = store_bytes(b"refused bytes", "r.bin", root=store)
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(403)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            from open_notebook.sync.blobtransfer import push_to
+
+            out = await push_to(f"http://127.0.0.1:{server.server_port}", [ref.sha256])
+        finally:
+            server.shutdown()
+
+        assert out["sent"] == []
+        assert out["failed"] == [ref.sha256], (
+            "a refusal must be reported, not swallowed"
+        )
+
+
+class TestPutVerifiesTheDigest:
+    """The upload endpoint must recompute the hash, not trust the name.
+
+    Accepting the caller's name would leave the store claiming a file is
+    one thing while it is another, and `Source.local_file` would resolve
+    to the wrong content with nothing to notice.
+    """
+
+    @pytest.fixture
+    def client(self, store, tmp_path, monkeypatch):
+        monkeypatch.setenv(SYNC_TOKEN_ENV, "unit-test-token")
+        import open_notebook.storage.blobs as blobmod
+
+        peer = tmp_path / "peer"
+        peer.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(blobmod, "_root", lambda override=None: peer)
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from api.routers.sync import router
+
+        app = FastAPI()
+        app.include_router(router, prefix="/api")
+        return TestClient(app), peer
+
+    def test_a_peer_cannot_store_mislabeled_bytes(self, client):
+        import hashlib
+
+        from open_notebook.storage.blobs import resolve_blob_path
+
+        api, peer = client
+        headers = {"X-Sync-Token": "unit-test-token"}
+        payload = b"honest bytes"
+        good = hashlib.sha256(payload).hexdigest()
+
+        assert (
+            api.post(
+                f"/api/sync/blobs/{good}", content=payload, headers=headers
+            ).status_code
+            == 200
+        )
+        assert resolve_blob_path(good) is not None
+
+        lie = "a" * 64
+        response = api.post(f"/api/sync/blobs/{lie}", content=payload, headers=headers)
+        assert response.status_code == 400
+        assert resolve_blob_path(lie) is None, (
+            "the impostor must not be filed under the claimed hash"
+        )
+
+    def test_a_rejected_upload_never_deletes_a_blob_it_did_not_create(self, client):
+        """Regression: punishing a liar must not destroy someone else's data.
+
+        The rejected bytes may hash to something already in the store -
+        legitimately stored by an earlier upload. Deleting that to clean
+        up after the liar would delete a valid file. Only remove the blob
+        if this request is what put it there.
+        """
+        import hashlib
+
+        from open_notebook.storage.blobs import resolve_blob_path
+
+        api, peer = client
+        headers = {"X-Sync-Token": "unit-test-token"}
+        payload = b"legitimately stored bytes"
+        good = hashlib.sha256(payload).hexdigest()
+
+        api.post(f"/api/sync/blobs/{good}", content=payload, headers=headers)
+        assert resolve_blob_path(good) is not None
+
+        # Same bytes, mislabelled. The blob already exists, so this must
+        # be rejected *without* touching it.
+        response = api.post(
+            f"/api/sync/blobs/{'c' * 64}", content=payload, headers=headers
+        )
+        assert response.status_code == 400
+        assert resolve_blob_path(good) is not None, (
+            "a rejected upload deleted a blob it did not create"
+        )
+
+        # A fresh impostor, which this request *did* create, is cleaned up.
+        api.post(
+            f"/api/sync/blobs/{'d' * 64}", content=b"new impostor", headers=headers
+        )
+        left = [p for p in peer.rglob("*") if p.is_file()]
+        assert len(left) == 1, f"impostor not cleaned up: {left}"
+
+    def test_upload_requires_a_token(self, client):
+        import hashlib
+
+        api, _ = client
+        good = hashlib.sha256(b"x").hexdigest()
+        response = api.post(f"/api/sync/blobs/{good}", content=b"x")
+        assert response.status_code == 403
+
+    def test_empty_body_is_rejected(self, client):
+        api, _ = client
+        response = api.post(
+            "/api/sync/blobs/" + "0" * 64,
+            content=b"",
+            headers={"X-Sync-Token": "unit-test-token"},
+        )
+        assert response.status_code == 400

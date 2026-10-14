@@ -162,10 +162,14 @@ cmd_blobs() {
         tr ',' '\n' | grep -E 'requested|fetched|failed' | sed 's/^/       /'
       ;;
     push)
-      echo "[blobs] offering our blobs to $peer"
-      curl -s -m 120 -X POST "$peer/api/sync/blobs/offer" "${auth[@]}" \
-        -H 'Content-Type: application/json' -d '{}' |
-        tr ',' '\n' | grep -E 'count|offered' | sed 's/^/       /'
+      # A real upload, not an offer. The offer endpoint only tells the
+      # peer what we hold, which is useless when the peer cannot open a
+      # connection back - the direction this network needs is PC to
+      # phone, so the bytes have to go.
+      echo "[blobs] pushing to $peer"
+      curl -s -m 900 -X POST "$API/api/sync/blobs/push" "${auth[@]}" \
+        -H 'Content-Type: application/json' -d "{\"peer\":\"$peer\"}" |
+        tr ',' '\n' | grep -E 'local|sent|failed' | sed 's/^/       /'
       ;;
     *)
       die "usage: $0 blobs <peer-url> pull|push"

@@ -7,14 +7,16 @@ someone else's repository on a timer is not something to enable by
 default.
 """
 
-from fastapi import APIRouter, Header, HTTPException
+from pathlib import Path
+
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from open_notebook.domain.notebook import Asset
 from open_notebook.exceptions import OpenNotebookError
-from open_notebook.storage.blobs import resolve_blob_path
+from open_notebook.storage.blobs import resolve_blob_path, store_bytes
 from open_notebook.sync.blobtransfer import (
     TOKEN_HEADER,
     SyncAuthError,
@@ -24,6 +26,7 @@ from open_notebook.sync.blobtransfer import (
     missing_hashes,
     offer_to,
     pull_from,
+    push_to,
 )
 from open_notebook.sync.exchange import (
     _read_json,
@@ -235,3 +238,63 @@ async def sync_blob_offer_local(
     ours = await local_hashes()
     ok = await offer_to(body.peer, ours, token=token)
     return {"peer": body.peer, "count": len(ours), "offered": ok}
+
+
+@router.post("/sync/blobs/{sha256}")
+async def sync_blob_put(
+    sha256: str, request: Request, token: str | None = Header(None, alias=TOKEN_HEADER)
+):
+    """Accept one blob, keyed by the hash of its own contents.
+
+    The digest is recomputed and compared rather than trusted. Storing
+    under a caller-supplied name is how a store ends up where the name and
+    the bytes disagree, and nothing downstream would notice - the file
+    would simply never hash to what the source claims.
+    """
+    try:
+        check_token(token)
+    except SyncAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty body")
+
+    ref = store_bytes(body, f"{sha256}.bin")
+    if ref.sha256 != sha256.lower():
+        # Remove the impostor, but only if this request created it. If
+        # the bytes were already present under their true hash then that
+        # is a legitimate blob someone else stored, and deleting it to
+        # punish a lying peer would be destroying someone else's data.
+        if not ref.deduped:
+            Path(ref.path).unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail=(f"content hashes to {ref.sha256}, not {sha256.lower()}"),
+        )
+
+    return {"sha256": ref.sha256, "size": ref.size, "deduped": ref.deduped}
+
+
+class SyncBlobPushRequest(BaseModel):
+    peer: str = Field(..., description="Base URL of the peer to push to")
+    limit: int = Field(0, description="Cap the transfer; 0 means everything")
+
+
+@router.post("/sync/blobs/push")
+async def sync_blob_push(
+    body: SyncBlobPushRequest, token: str | None = Header(None, alias=TOKEN_HEADER)
+):
+    """Push the blobs we hold to a peer that cannot reach us.
+
+    The direction the network requires: the PC can open a connection to
+    the phone, the phone cannot open one back.
+    """
+    try:
+        check_token(token)
+    except SyncAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    ours = await local_hashes()
+    result = await push_to(body.peer, ours, token=token, limit=body.limit)
+    return {"peer": body.peer, "local": len(ours), **result}

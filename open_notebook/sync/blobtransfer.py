@@ -203,3 +203,63 @@ async def missing_from_peer(base_url: str, token: Optional[str] = None) -> List[
     """Hashes the peer holds that this device does not."""
     ours = set(await local_hashes())
     return [h for h in await peer_hashes(base_url, token) if h not in ours]
+
+
+async def push_to(
+    base_url: str,
+    hashes: Sequence[str],
+    token: Optional[str] = None,
+    limit: int = 0,
+) -> Dict[str, object]:
+    """Upload blobs we hold to a peer.
+
+    This is the direction the network actually needs. The phone cannot
+    open a TCP connection to the PC - measured, ICMP succeeds and no SYN
+    arrives - so `pull_from` is useless to it in that direction and the
+    PC has to push instead. Offering first (`offer_to`) and pushing only
+    what the peer asked for keeps a 49 MB library from being uploaded to
+    a device that already has most of it.
+
+    One blob per request rather than a multipart batch: it keeps memory
+    flat for a large PDF and lets a single failure not sink the rest.
+    """
+    targets = list(hashes)
+    if limit and len(targets) > limit:
+        targets = targets[:limit]
+
+    sent: List[str] = []
+    failed: List[str] = []
+    for sha256 in targets:
+        local = resolve_blob_path(sha256)
+        if not local:
+            continue
+        try:
+            data = Path(local).read_bytes()
+        except OSError as exc:
+            logger.warning(f"cannot read {local}: {exc}")
+            failed.append(sha256)
+            continue
+
+        url = f"{base_url.rstrip('/')}/api/sync/blobs/{sha256}"
+        try:
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                response = await client.post(
+                    url,
+                    content=data,
+                    headers={
+                        **_headers(token),
+                        "Content-Type": "application/octet-stream",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            logger.warning(f"blob push failed for {sha256[:12]}: {exc}")
+            failed.append(sha256)
+            continue
+
+        if response.status_code in (200, 201, 204):
+            sent.append(sha256)
+        else:
+            logger.warning(f"peer refused {sha256[:12]} (HTTP {response.status_code})")
+            failed.append(sha256)
+
+    return {"offered": len(targets), "sent": sent, "failed": failed}
