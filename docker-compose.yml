@@ -45,6 +45,11 @@ services:
       - OPEN_NOTEBOOK_EMBEDDING_BATCH_SIZE=8
     volumes:
       - ./notebook_data:/app/data
+      # The sync manifest has to be readable by git on the host. Without
+      # this the API writes it to /app/sync *inside the container*, which
+      # no sync driver on the host can see - the export appears to
+      # succeed and produces nothing to commit.
+      - ./sync:/app/sync
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

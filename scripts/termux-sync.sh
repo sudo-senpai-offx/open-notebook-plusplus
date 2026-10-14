@@ -51,18 +51,23 @@ git_changes() {
 }
 
 cmd_init() {
+  # Optional, because the offline route has no URL. Requiring one made
+  # the command that exists to serve the no-internet case unusable for
+  # the no-internet case.
+  #
+  # With a remote, create it first, e.g.:
+  #   gh repo create on-notebook-sync --private --description 'Open Notebook content sync'
+  # then re-run with the URL it prints.
   remote="${1:-}"
-  [ -n "$remote" ] || die "usage: onb-sync init <remote-url>
-         Create the repo first, e.g.:
-           gh repo create on-notebook-sync --private --description 'Open Notebook content sync'
-         then re-run with the URL it prints."
   mkdir -p "$SYNC_DIR" || die "cannot create $SYNC_DIR"
   [ -d "$SYNC_DIR/.git" ] || git -C "$SYNC_DIR" init -q -b main
-  git -C "$SYNC_DIR" remote add origin "$remote" 2>/dev/null ||
-    git -C "$SYNC_DIR" remote set-url origin "$remote"
+  if [ -n "$remote" ]; then
+    git -C "$SYNC_DIR" remote add origin "$remote" 2>/dev/null ||
+      git -C "$SYNC_DIR" remote set-url origin "$remote"
+  fi
   git_sane
   echo "  sync dir : $SYNC_DIR"
-  echo "  remote   : $remote"
+  echo "  remote   : ${remote:-(none - offline via bundle)}"
   echo
   echo "  The app writes into that directory; it must see the same path."
   echo "  If it was created after the app started, restart it:"
@@ -222,6 +227,61 @@ cmd_status() {
   fi
 }
 
+# --- offline route ------------------------------------------------------
+#
+# A git bundle carried over adb. Needs no internet and no listening
+# socket at either end, which is the point: the phone cannot open a
+# connection to the PC on the LAN, so "just fetch it" is not on offer
+# without this.
+#
+# Blobs are not in here. A bundle carries the manifest and its hashes;
+# the bytes still need the tunnel. That split is deliberate - a manifest
+# can arrive hours before its bytes, and the import reports that as
+# pending rather than as a failure.
+
+cmd_bundle() {
+  path="${1:-}"
+  [ -n "$path" ] || die "usage: onb-sync bundle <path>"
+  [ -d "$SYNC_DIR/.git" ] || die "no git repo at $SYNC_DIR - run: onb-sync init <url>"
+  mkdir -p "$(dirname "$path")" 2>/dev/null
+  git -C "$SYNC_DIR" bundle create "$path" main || die "cannot write $path"
+  echo "  wrote $(du -h "$path" | cut -f1) to $path"
+  echo "  carry it with:  adb pull $path /data/local/tmp/sync.bundle"
+}
+
+cmd_fetch_bundle() {
+  path="${1:-}"
+  [ -n "$path" ] || die "usage: onb-sync fetch-bundle <path>"
+  [ -f "$path" ] || die "no bundle at $path
+         Copy it into the guest first, e.g.
+           cp /data/local/tmp/sync.bundle $PREFIX/var/lib/proot-distro/containers/ubuntu/rootfs/tmp/
+         then re-run with that path."
+  [ -d "$SYNC_DIR/.git" ] || die "no git repo at $SYNC_DIR - run: onb-sync init <url>"
+  git_sane
+
+  echo "[sync] fetching from $path"
+  git -C "$SYNC_DIR" fetch -q "$path" main || die "cannot read the bundle"
+  if git -C "$SYNC_DIR" merge -q --ff-only FETCH_HEAD 2>/dev/null; then
+    echo "[sync] fast-forwarded to $(git -C "$SYNC_DIR" rev-parse --short HEAD)"
+    return 0
+  fi
+  # Refuse rather than reset, and name the exact command. There is no
+  # interactive git here, so "inspect and decide" has to be spelled out
+  # rather than left as an instruction to go and look.
+  if git -C "$SYNC_DIR" log -q --oneline FETCH_HEAD..HEAD 2>/dev/null | grep -q .; then
+    echo "[sync] this device has commits the bundle does not:"
+    git -C "$SYNC_DIR" log --oneline FETCH_HEAD..HEAD | sed 's/^/         /'
+    echo "       If those are stale (e.g. rewritten history), reset with:"
+    echo "         proot-distro login ubuntu -- git -C $SYNC_DIR reset --hard FETCH_HEAD"
+    echo "       Inspect with (git lives in the guest, so it needs proot too):"
+    echo "         proot-distro login ubuntu -- git -C $SYNC_DIR log --oneline --graph -5"
+    echo "       If they are real edits, do NOT reset - rebase instead:"
+    echo "         git -C '$SYNC_DIR' pull --rebase $path main"
+    return 1
+  fi
+  echo "[sync] nothing to do - already current"
+}
+
 case "${1:-status}" in
   init) shift; cmd_init "${1:-}" ;;
   push) cmd_push ;;
@@ -230,9 +290,12 @@ case "${1:-status}" in
     cmd_pull --apply && cmd_push
     ;;
   blobs) shift; cmd_blobs "${1:-}" "${2:-}" ;;
+  bundle) shift; cmd_bundle "${1:-}" ;;
+  fetch-bundle) shift; cmd_fetch_bundle "${1:-}" ;;
   status) cmd_status ;;
   *)
-    echo "usage: $0 init <remote-url> | push | pull [--apply] | cycle | blobs <url> pull|push | status"
+    echo "usage: $0 init <remote-url> | push | pull [--apply] | cycle | blobs <url> pull|push"
+    echo "          | bundle <path> | fetch-bundle <path> | status"
     exit 1
     ;;
 esac

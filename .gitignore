@@ -7,6 +7,12 @@ sqlite-db/
 surreal-data/
 docker.env
 notebook_data/
+# The sync manifest. It is its own git repository with its own remote -
+# content travels between devices through that repo, never through the
+# app's. Left un-ignored it would also try to become a gitlink here, and
+# a transcript would end up in this repository's history, which is the
+# one thing the whole design exists to prevent.
+sync/
 ollama_data/
 whisper_models/
 sidecars/llamacpp-sse2/models/
