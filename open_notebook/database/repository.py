@@ -98,10 +98,94 @@ async def db_connection():
         await db.close()
 
 
+# --------------------------------------------------------------------------
+# destructive-query guard
+# --------------------------------------------------------------------------
+#
+# An unfiltered table delete is the one query in this codebase that can
+# destroy a library. It happened: `DELETE source` was run against the
+# operator's real namespace while clearing a scratch one, because the
+# namespace environment variable was left unset and defaulted to
+# `open_notebook`. 258 source records and 2,754 embeddings were lost,
+# and the database compacted them before a stop could be attempted.
+#
+# Every legitimate delete in this codebase is already scoped - by record
+# id, a WHERE clause, or a bound parameter - so refusing the unscoped
+# shape costs nothing and blocks the one query that cannot be undone.
+
+# Matches the target of a DELETE that is not immediately constrained by a
+# WHERE. `$id`, `type::thing(...)` and a trailing parameter all bind a
+# single record and are deliberately not matched.
+_UNSCOPED_DELETE = re.compile(
+    r"\bDELETE\s+(?:FROM\s+)?(?P<table>[a-z_][a-z0-9_]*)\s*(?P<rest>;|$)",
+    re.IGNORECASE,
+)
+
+# A delete that names a bound parameter as its target deletes at most one
+# record: `DELETE $id`, `DELETE type::thing('_sbl_migrations', $v)`.
+_BOUND_TARGET = re.compile(r"^\s*(?:type::thing\s*\(|\$)", re.IGNORECASE)
+
+# Namespaces that exist to be thrown away. Test fixtures and the local
+# scratch database may wipe a table without ceremony.
+_SCRATCH_NAMESPACE = re.compile(
+    r"^(?:tmp|test|synctest|scratch|throwaway)", re.IGNORECASE
+)
+
+# Deliberate opt-out, for the rare case where a bulk delete really is
+# intended on real data (a documented data purge, say).
+ALLOW_BULK_DELETE_ENV = "OPEN_NOTEBOOK_ALLOW_BULK_DELETE"
+
+
+class UnscopedDeleteError(RuntimeError):
+    """Raised when a delete would remove every row in a table.
+
+    Subclasses RuntimeError so existing `except Exception` handlers around
+    repo_query behave as they did before, rather than introducing a new
+    failure mode in callers that never expected one.
+    """
+
+
+def guard_destructive_query(query: str, namespace: str | None = None) -> None:
+    """Refuse a table-wide DELETE unless it is demonstrably safe.
+
+    Scoped deletes pass untouched. An unfiltered table delete raises,
+    unless the namespace looks like scratch space or the operator has
+    explicitly opted in via the environment.
+    """
+    if os.getenv(ALLOW_BULK_DELETE_ENV, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return
+
+    ns = namespace if namespace is not None else get_database_namespace()
+    if _SCRATCH_NAMESPACE.match(ns or ""):
+        return
+
+    for match in _UNSCOPED_DELETE.finditer(query or ""):
+        table = match.group("table")
+        rest = query[match.end("rest") :]
+        if "WHERE" in rest.upper():
+            continue
+        if _BOUND_TARGET.match(rest):
+            continue
+        raise UnscopedDeleteError(
+            f"Refusing to run unscoped DELETE against table {table!r} in "
+            f"namespace {ns!r}. A delete with no WHERE removes every row "
+            "in the table and cannot be undone. Scope it with a WHERE "
+            "clause, run it against a scratch namespace, or set "
+            f"{ALLOW_BULK_DELETE_ENV}=1 if this is genuinely intended."
+        )
+
+
 async def repo_query(
     query_str: str, vars: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
     """Execute a SurrealQL query and return the results"""
+
+    guard_destructive_query(query_str)
 
     async with db_connection() as connection:
         try:

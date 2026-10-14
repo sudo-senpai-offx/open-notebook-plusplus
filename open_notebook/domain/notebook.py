@@ -16,7 +16,7 @@ from open_notebook.exceptions import (
     InvalidInputError,
     NotFoundError,
 )
-from open_notebook.storage.blobs import unlink_if_unreferenced
+from open_notebook.storage.blobs import resolve_blob_path, unlink_if_unreferenced
 
 
 class Notebook(ObjectModel):
@@ -443,6 +443,47 @@ class Source(ObjectModel):
         if isinstance(value, str) and value:
             return ensure_record_id(value)
         return value
+
+    @property
+    def local_file(self) -> Optional[str]:
+        """The source's file on *this* device, or None when absent.
+
+        A source that arrived by sync has a content hash but no local
+        path — the path on the device that created it means nothing
+        here. So the path is derived from the hash on every access, and
+        stays None until a blob transfer brings the bytes. Callers get a
+        truthful answer without needing to know whether this source was
+        ingested locally or imported.
+        """
+        if not self.asset:
+            return None
+        if self.asset.file_path:
+            return self.asset.file_path
+        return resolve_blob_path(self.asset.sha256, self.asset.filename)
+
+    @property
+    def has_local_file(self) -> bool:
+        """True when the bytes for this source are present on this device."""
+        path = self.local_file
+        return bool(path) and os.path.exists(path)
+
+    async def link_local_file(self) -> bool:
+        """Point ``asset.file_path`` at the local blob when one exists.
+
+        Called after a blob transfer so the stored path stops being
+        redundant with the hash. Never overwrites a path that already
+        resolves — an uploaded source's path is as authoritative as its
+        hash.
+        """
+        if not self.asset or not self.asset.sha256:
+            return False
+        if self.asset.file_path and os.path.exists(self.asset.file_path):
+            return True
+        resolved = resolve_blob_path(self.asset.sha256, self.asset.filename)
+        if not resolved:
+            return False
+        self.asset.file_path = resolved
+        return True
 
     @field_validator("site_id", mode="before")
     @classmethod

@@ -23,6 +23,7 @@ from open_notebook.sync.exchange import (
     NOTES_DIR,
     REVLOG,
     SCHEMA_VERSION,
+    SOURCES_DIR,
     _newer,
 )
 
@@ -102,10 +103,11 @@ class TestRevlogDedupeKey:
 
 class TestLayout:
     def test_layout_is_declared(self):
-        assert SCHEMA_VERSION == 1
-        assert (NOTES_DIR, CARDS_DIR, REVLOG) == (
+        assert SCHEMA_VERSION == 2
+        assert (NOTES_DIR, CARDS_DIR, SOURCES_DIR, REVLOG) == (
             "notes",
             "cards",
+            "sources",
             "revlog/revlog.jsonl",
         )
 

@@ -11,8 +11,16 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from open_notebook.domain.notebook import Asset
 from open_notebook.exceptions import OpenNotebookError
-from open_notebook.sync.exchange import export_all, import_all, sync_dir
+from open_notebook.storage.blobs import resolve_blob_path
+from open_notebook.sync.exchange import (
+    _read_json,
+    _source_kind,
+    export_all,
+    import_all,
+    sync_dir,
+)
 
 router = APIRouter()
 
@@ -37,23 +45,52 @@ class SyncImportRequest(BaseModel):
 
 @router.get("/sync/status")
 async def sync_status():
-    """Where sync reads and writes, and whether that directory exists."""
+    """Where sync reads and writes, and what is waiting there.
+
+    ``sources_awaiting_blobs`` is the number that matters operationally:
+    a source whose metadata has synced but whose bytes have not is not
+    an error state, it is an outstanding transfer. Reporting it
+    separately keeps "sync is broken" distinct from "sync is waiting on
+    the blob channel".
+    """
     root = sync_dir()
+    if not root.is_dir():
+        return {
+            "sync_dir": str(root),
+            "exists": False,
+            "notes_present": 0,
+            "cards_present": 0,
+            "sources_present": 0,
+            "sources_awaiting_blobs": 0,
+        }
+
+    notes = sorted((root / "notes").glob("*.json"))
+    cards = sorted((root / "cards").glob("*.json"))
+    sources = sorted((root / "sources").glob("*.json"))
+
+    awaiting = 0
+    for path in sources:
+        entry = _read_json(path)
+        if not entry or not entry.get("sha256"):
+            continue
+        if _source_kind(Asset(sha256=entry["sha256"], url=entry.get("url"))) != "file":
+            continue
+        if resolve_blob_path(entry["sha256"], entry.get("filename")) is None:
+            awaiting += 1
+
     return {
         "sync_dir": str(root),
-        "exists": root.is_dir(),
-        "notes_present": len(list((root / "notes").glob("*.json")))
-        if root.is_dir()
-        else 0,
-        "cards_present": len(list((root / "cards").glob("*.json")))
-        if root.is_dir()
-        else 0,
+        "exists": True,
+        "notes_present": len(notes),
+        "cards_present": len(cards),
+        "sources_present": len(sources),
+        "sources_awaiting_blobs": awaiting,
     }
 
 
 @router.post("/sync/export")
 async def sync_export(body: SyncExportRequest):
-    """Write every note, card and revlog row into the sync directory."""
+    """Write every note, source, card and revlog row into the sync directory."""
     try:
         manifest = await export_all(body.device)
         return {"ok": True, **manifest, "sync_dir": str(sync_dir())}

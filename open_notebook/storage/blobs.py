@@ -151,6 +151,43 @@ def blob_exists(sha256: str, root: Path | str | None = None) -> bool:
     return any(shard.glob(f"{digest}*"))
 
 
+def resolve_blob_path(
+    sha256: str | None,
+    filename: str | None = None,
+    root: Path | str | None = None,
+) -> str | None:
+    """Find the local file for a hash, or None when the bytes are absent.
+
+    This is the half of sync that needs no network. A source imported
+    from another device arrives as a hash with no ``file_path`` — giving
+    it the *other* device's path would name a file that does not exist
+    here. So the path is derived from the hash each time it is needed and
+    resolves to None until a blob transfer brings the bytes.
+
+    The suffix is tried first when the original filename is known, then
+    without one, so a blob stored before extensions were preserved is
+    still found.
+    """
+    if not sha256:
+        return None
+    try:
+        digest = _validate_hash(sha256)
+    except ValueError:
+        return None
+
+    suffix = _safe_suffix(filename or "")
+    exact = _root(root) / digest[:2] / f"{digest}{suffix}"
+    if exact.is_file():
+        return str(exact)
+
+    shard = _root(root) / digest[:2]
+    if shard.is_dir():
+        for candidate in sorted(shard.glob(f"{digest}.*")):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def _hash_stream(file_obj: object) -> tuple[str, int]:
     """Hash a binary file object, returning ``(hexdigest, byte_count)``."""
     digest = hashlib.sha256()

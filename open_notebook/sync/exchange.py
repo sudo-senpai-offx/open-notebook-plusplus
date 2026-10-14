@@ -56,14 +56,22 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from loguru import logger
+from pydantic import BaseModel
 
 from open_notebook.database.repository import ensure_record_id, repo_query
+from open_notebook.domain.notebook import Asset, Source
+from open_notebook.storage.blobs import resolve_blob_path
 
-SCHEMA_VERSION = 1
+# Bumped to 2 when sources entered the manifest. A v1 repo simply has no
+# `sources/` directory, which imports as "no sources" rather than an
+# error, so an older repo stays readable and a newer one is simply
+# ignored by an older build.
+SCHEMA_VERSION = 2
 MANIFEST = "manifest.json"
 NOTES_DIR = "notes"
 NOTEBOOKS = "notebooks/index.json"
 CARDS_DIR = "cards"
+SOURCES_DIR = "sources"
 REVLOG = "revlog/revlog.jsonl"
 
 
@@ -127,7 +135,7 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
 
 
 async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]:
-    """Write every note, card and revlog row to `root`.
+    """Write every note, source, card and revlog row to `root`.
 
     Files are named from the record id, so re-exporting is idempotent and
     two devices exporting the same note produce the same filename and
@@ -144,6 +152,28 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     Provenance lives in the git commit instead - the author and message
     already say which device pushed. Keeping either field produced a
     commit per cycle, which is churn by another name.
+
+    ### Sources carry a hash, never bytes
+
+    A source entry is metadata plus `sha256`. Three things are
+    deliberately absent, and each is regenerable on the receiving device
+    rather than transported:
+
+      * the file bytes - delivered by the blob channel, keyed by hash;
+      * `full_text` - re-extracted from the file once it arrives;
+      * embeddings and chunk text - recomputed from `full_text` with the
+        local embedding model.
+
+    That last point is why sources can sync at all. The earlier reason
+    for excluding them - "vectors live outside the record" - was wrong:
+    `source_embedding` holds the vector and the chunk text, both inside
+    the database. Neither should ever be synced. The real blocker was
+    that a synced source arrived with no file behind it, and a hash plus
+    a blob transfer solves exactly that.
+
+    A source whose file is still on the legacy uploads path exports with
+    `sha256: null`, since nothing has hashed it yet. It still imports as
+    metadata; only the bytes are missing.
     """
     from open_notebook.domain.flashcard import Flashcard
     from open_notebook.domain.notebook import Note
@@ -151,9 +181,11 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     root = root or sync_dir()
     (root / NOTES_DIR).mkdir(parents=True, exist_ok=True)
     (root / CARDS_DIR).mkdir(parents=True, exist_ok=True)
+    (root / SOURCES_DIR).mkdir(parents=True, exist_ok=True)
 
     notes: List[Note] = await Note.get_all()
     cards: List[Flashcard] = await Flashcard.get_all()
+    sources: List[Source] = await Source.get_all()
 
     # Notebooks are referenced by slug, not id: a record id is per-database
     # and means nothing on the other device. One query each rather than
@@ -204,6 +236,44 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             },
         )
 
+    for source in sources:
+        asset = source.asset or Asset()
+        # A source can hang off a notebook by two edge types depending on
+        # how it was added - sources use `reference`, notes `artifact`.
+        # Read both so a source's grouping survives the round trip
+        # whichever path put it there.
+        slugs: set[str] = set()
+        for edge_type in ("artifact", "reference"):
+            edges = (
+                await repo_query(
+                    f"SELECT out FROM {edge_type} WHERE in = $sid",  # noqa: S608
+                    {"sid": ensure_record_id(str(source.id))},
+                )
+                or []
+            )
+            for edge in edges:
+                slug = _slug(notebook_names.get(str(edge.get("out")), ""))
+                if slug:
+                    slugs.add(slug)
+
+        _write_json(
+            root / SOURCES_DIR / f"{str(source.id).replace(':', '-')}.json",
+            {
+                "id": str(source.id),
+                "title": source.title,
+                "topics": list(source.topics or []),
+                "updated": source.updated.isoformat() if source.updated else None,
+                # kind lets the receiver tell "needs bytes fetched" from
+                # "is a link, nothing to fetch".
+                "kind": _source_kind(asset),
+                "url": asset.url,
+                "sha256": asset.sha256,
+                "filename": asset.filename,
+                "size": asset.size,
+                "notebook_slugs": sorted(slugs),
+            },
+        )
+
     for card in cards:
         _write_json(
             root / CARDS_DIR / f"{str(card.id).replace(':', '-')}.json",
@@ -240,12 +310,37 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
         "counts": {
             "notes": len(notes),
             "cards": len(cards),
+            "sources": len(sources),
             "revlog": len(revlog_rows or []),
             "notebooks": len(notebook_names),
         },
+        # Sources whose bytes this device does not hold. The blob channel
+        # uses it to decide what to ask for; it is informational in git.
+        "sources_awaiting_blobs": sum(
+            1
+            for s in sources
+            if (
+                s.asset
+                and s.asset.sha256
+                and not resolve_blob_path(s.asset.sha256, s.asset.filename)
+            )
+        ),
     }
     _write_json(root / MANIFEST, manifest)
     return manifest
+
+
+def _source_kind(asset: Asset) -> str:
+    """Classify a source so the receiver knows whether to fetch bytes.
+
+    A file source needs a blob transfer. A link and a text source do
+    not: the receiver already holds everything that defines them.
+    """
+    if asset.sha256 or asset.file_path:
+        return "file"
+    if asset.url:
+        return "link"
+    return "text"
 
 
 # --------------------------------------------------------------------------
@@ -291,8 +386,18 @@ async def _create_with_id(instance, record_id: str) -> None:
     )
     row = (rows or [{}])[0] or {}
     for key, value in row.items():
-        if key != "id" and hasattr(instance, key):
-            setattr(instance, key, value)
+        if key == "id" or not hasattr(instance, key):
+            continue
+        current = getattr(instance, key)
+        # A nested model (Source.asset) must not be replaced by the raw
+        # dict the database returned. setattr does not re-validate, so the
+        # instance would carry a plain dict where callers expect
+        # `asset.sha256`. Found by the live round-trip test; latent for
+        # notes and cards too, which never happened to do attribute
+        # access on a nested field.
+        if isinstance(current, BaseModel) and isinstance(value, dict):
+            value = type(current)(**value)
+        setattr(instance, key, value)
     instance.id = ensure_record_id(record_id)
 
 
@@ -340,7 +445,7 @@ async def import_all(
     is counted as `skipped_stale` rather than silently applied.
     """
     from open_notebook.domain.flashcard import Flashcard
-    from open_notebook.domain.notebook import Note
+    from open_notebook.domain.notebook import Note, Source
 
     root = root or sync_dir()
 
@@ -357,6 +462,14 @@ async def import_all(
         "cards_created": 0,
         "cards_updated": 0,
         "cards_skipped_stale": 0,
+        "sources_created": 0,
+        "sources_updated": 0,
+        "sources_skipped_stale": 0,
+        # Sources whose metadata landed but whose bytes are not on this
+        # device yet. Reported rather than hidden: an imported source
+        # that cannot be opened is not the same as one that failed, and
+        # the operator needs to know a blob transfer is outstanding.
+        "sources_awaiting_blobs": 0,
         "notes_attached": 0,
         "notes_unattached": 0,
         "missing_notebooks": [],
@@ -474,11 +587,103 @@ async def import_all(
         await _apply_timestamp(card, data.get("updated"))
         result["cards_updated" if existing_card else "cards_created"] += 1
 
+    for path in sorted((root / SOURCES_DIR).glob("*.json")):
+        data = _read_json(path)
+        if not data or not data.get("id"):
+            result["errors"].append(f"{path.name}: no id")
+            continue
+        record_id = data["id"]
+        existing_source: Optional[Source] = await _maybe_get(Source, record_id)
+
+        local_updated = (
+            existing_source.updated.isoformat()
+            if (existing_source and existing_source.updated)
+            else None
+        )
+        if existing_source and not _newer(data.get("updated"), local_updated):
+            result["sources_skipped_stale"] += 1
+            # Still count an outstanding blob: staleness is about the
+            # metadata, not about whether this device can open the file.
+            if _needs_blob(existing_source):
+                result["sources_awaiting_blobs"] += 1
+            continue
+        if dry_run:
+            result["sources_created" if not existing_source else "sources_updated"] += 1
+            if data.get("sha256") and not _blob_present(data):
+                result["sources_awaiting_blobs"] += 1
+            continue
+
+        # file_path is deliberately NOT taken from the manifest. It is a
+        # path on the *sending* device and means nothing here; the local
+        # path is derived from sha256 (see Source.local_file) once a blob
+        # transfer delivers the bytes. An imported source therefore has
+        # no file until then, which is truthful.
+        incoming_asset = Asset(
+            url=data.get("url"),
+            sha256=data.get("sha256"),
+            filename=data.get("filename"),
+            size=data.get("size"),
+        )
+        source = existing_source or Source(title=data.get("title"))
+        source.title = data.get("title")
+        source.topics = list(data.get("topics") or [])
+        # full_text is not transported - it is re-extracted from the
+        # file. Never overwrite a local extraction with nothing.
+        if data.get("kind") == "text" and not source.full_text:
+            source.full_text = None
+        source.asset = incoming_asset
+        if existing_source:
+            await source.save()
+        else:
+            await _create_with_id(source, record_id)
+        await _apply_timestamp(source, data.get("updated"))
+        result["sources_updated" if existing_source else "sources_created"] += 1
+        if _needs_blob(source):
+            result["sources_awaiting_blobs"] += 1
+
+        slugs = data.get("notebook_slugs") or []
+        if not slugs:
+            continue
+        for slug in slugs:
+            nb_id = local_notebooks.get(slug)
+            if not nb_id:
+                missing.add(slug)
+                continue
+            if dry_run:
+                continue
+            try:
+                await repo_query(
+                    "RELATE $sid->artifact->$nid",
+                    {
+                        "sid": ensure_record_id(record_id),
+                        "nid": ensure_record_id(nb_id),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad edge is not fatal
+                logger.warning(f"sync: could not attach source {record_id}: {exc}")
+
     revlog_result = await _import_revlog(root, dry_run)
     result["revlog_added"] = revlog_result[0]
     result["revlog_duplicates"] = revlog_result[1]
     result["missing_notebooks"] = sorted(missing)
     return result
+
+
+def _blob_present(data: Dict[str, Any]) -> bool:
+    """True when this device already holds the bytes a manifest names."""
+    return resolve_blob_path(data.get("sha256"), data.get("filename")) is not None
+
+
+def _needs_blob(source: Source) -> bool:
+    """True when a source wants bytes this device does not have.
+
+    Only file sources ever want bytes. A link or a text source is fully
+    described by its manifest entry, so counting it as awaiting a blob
+    would be a permanent false alarm.
+    """
+    if not source.asset or not source.asset.sha256:
+        return False
+    return _source_kind(source.asset) == "file" and not source.has_local_file
 
 
 def _revlog_key(row: Dict[str, Any]) -> Tuple[Any, str, str, Any]:
