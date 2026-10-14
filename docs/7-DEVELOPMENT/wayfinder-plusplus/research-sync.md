@@ -429,3 +429,113 @@ phone's single one in the file. This is informational only — resolution
 uses the per-note `notebook_slugs`, which are correct on both sides. A
 true union would need a merge, which git cannot do for a single
 whole-file rewrite.
+
+---
+
+## 13. Content-addressed storage: sources were four copies of one thing
+
+### What was actually there
+
+Measured on the operator's PC, not assumed:
+
+| Representation | Where | Size |
+|---|---|---|
+| original bytes | `data/uploads/<uuid>.pdf` | 49 MB over 258 sources |
+| extracted text | `source.full_text` | — |
+| the same text, chunked | `source_embedding.content` | 2,826,569 chars |
+| vectors | `source_embedding.embedding` | 2,754 × 384 ≈ 4.2 MB |
+
+The text was stored twice and the file was a third representation of
+it. Editing a source regenerated all four. Nothing was shared, and
+`notebook_data/.cache` added 20 GB of HF model weights on top — not
+content, but another reason the data directory cannot simply be copied
+to a phone.
+
+### Why sources were excluded from sync
+
+The earlier note said sources were excluded "because vectors live
+outside the record." That was wrong: `source_embedding` holds the
+vector *and* the chunk text, both inside the database. Neither should
+ever sync — both are regenerable from the file plus a local embedding
+model. The real blocker was that a synced source arrived with no file
+behind it, because the file was identified by a local path.
+
+### The design
+
+`data/blobs/<ab>/<sha256><ext>`. Identity is the content hash, so:
+
+- identical bytes occupy one path, with no lookup required — the second
+  write finds the file already there;
+- the hash is what crosses devices, where a path means nothing;
+- processing opens the blob in place, so there is no second copy during
+  extraction;
+- extension is preserved because `_assert_file_supported()` and the PDF
+  text-layer probe both branch on it.
+
+Sharded two levels because a flat directory of tens of thousands of
+entries is pathological on `sdcardfs`. Writes go to a temp file and are
+`os.replace`d, which is atomic.
+
+Content addressing also dissolves the TOCTOU race the old
+`generate_unique_filename()` guarded: with a deterministic name, "is this
+name free?" and "claim the name" are the same step. Two concurrent
+uploads of identical bytes now both compute the same path and write the
+same content, so whichever `replace` wins the result is correct. That
+function and its dedicated test were removed rather than left as dead
+code asserting a fix to a mechanism that no longer runs.
+
+### Dedup makes delete dangerous, and two bugs followed
+
+Two sources sharing a blob means deleting one must not unlink bytes the
+other still reads. Two places did a bare `os.unlink`: `Source.delete()`
+and the extraction graph's `delete_source` cleanup. Both are now
+reference-aware.
+
+The test suite passed while both were still broken, because stubs cannot
+express a shared reference. Against a live SurrealDB 2.7.0:
+
+1. **`unlink_if_unreferenced` passed the blob *path* where a *hash* was
+   expected.** `is_referenced` queries `asset.sha256`, so the filter
+   could never match and every blob looked unreferenced — the exact data
+   loss the check existed to prevent. The hash is now a separate
+   parameter.
+
+2. **`id != $exclude` silently matches nothing when `$exclude` is a
+   string.** Measured on the live server: excluding `source:one` by
+   string returned `n=2`, by `RecordID` returned `n=1`. Every source
+   counted as its own referrer, so blobs were *never* collected — a
+   silent disk leak, failing in the direction that looks safe. Now
+   coerced with `ensure_record_id()`, with a regression test asserting
+   the parameter type.
+
+A third, lower-severity issue: the reference check fails **safe**. If
+the database is unreachable it reports "referenced" and keeps the file.
+Leaking an orphan blob is recoverable; deleting study material during a
+brief DB outage is not.
+
+Verified end to end on a live database: two sources sharing a blob →
+deleting one keeps it → deleting the last collects it → re-ingesting the
+same bytes returns the same path.
+
+### What research contributed
+
+Two references were reachable (`websearch` returned nothing on this box
+and `docs.syncthing.net` timed out):
+
+- **Anki** keys media by *filename*, and its docs are explicit that it
+  "will not notice if you have made edits to existing files" — you must
+  delete and re-add to push a content change. Addressing by hash gets
+  edit-detection for free. Anki also only propagates deletions once media
+  is fully in sync, which is the same resurrection problem as our
+  missing tombstones, solved there by sequencing.
+- **CAS** gives the dedup property, and names its own limit honestly: it
+  suits static documents, because every edit yields a new address. That
+  is correct here — a source file is immutable once ingested; edits
+  create a new source.
+
+### Not done yet
+
+Sources still do not sync. This step is storage only. Still outstanding:
+the manifest half (hash + metadata, no bytes), the blob transfer channel,
+LAN first with git as the offline-tolerant queue, and tombstones so a
+delete on one device is not resurrected by the next export.

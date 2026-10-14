@@ -1,6 +1,7 @@
 import asyncio
+import hashlib
 import os
-from pathlib import Path
+import re
 from typing import Any, List, Optional
 
 from content_core import check_file_support
@@ -32,7 +33,7 @@ from api.models import (
     SourceUpdate,
 )
 from commands.source_commands import SourceProcessingInput
-from open_notebook.config import UPLOADS_FOLDER
+from open_notebook.config import BLOBS_FOLDER, UPLOADS_FOLDER
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Asset, Notebook, Source
 from open_notebook.domain.transformation import Transformation
@@ -42,6 +43,7 @@ from open_notebook.exceptions import (
     OpenNotebookError,
     UnsupportedTypeException,
 )
+from open_notebook.storage.blobs import store_bytes
 
 router = APIRouter()
 
@@ -114,68 +116,113 @@ async def _stamp_source_view(source_id: str) -> None:
         logger.warning(f"Failed to stamp last_viewed_at for source {source_id}: {e}")
 
 
-def generate_unique_filename(original_filename: str, upload_folder: str) -> str:
-    """Generate unique filename like Streamlit app (append counter if file exists),
-    atomically reserving it so two concurrent uploads that land on the same
-    candidate name can't both pass the check and then clobber each other -
-    the loser's claim attempt fails and moves on to the next candidate."""
-    file_path = Path(upload_folder)
-    file_path.mkdir(parents=True, exist_ok=True)
+_BLOB_NAME = re.compile(r"^([0-9a-f]{64})(\.[A-Za-z0-9]{1,16})?$")
 
-    # Strip directory components to prevent path traversal
-    safe_filename = os.path.basename(original_filename)
-    if not safe_filename:
-        raise ValueError("Invalid filename")
 
-    # Split filename and extension
-    stem = Path(safe_filename).stem
-    suffix = Path(safe_filename).suffix
-    safe_root = file_path.resolve()
+def _blob_identity(file_path: Optional[str]) -> dict[str, Any]:
+    """Best-effort Asset kwargs describing a stored file.
 
-    # Find and atomically claim a unique name
-    counter = 0
-    while True:
-        if counter == 0:
-            new_filename = safe_filename
-        else:
-            new_filename = f"{stem} ({counter}){suffix}"
+    Content-addressed files already carry their hash in the name, so
+    identifying one costs a stat and no read. Legacy uploads predate the
+    blob store, so they are hashed on the spot - this upgrades them for
+    free the first time they are touched, which is what makes delete-
+    safety work for old rows too.
 
-        full_path = file_path / new_filename
-        # Verify resolved path stays within upload folder
-        resolved = full_path.resolve()
-        if not str(resolved).startswith(str(safe_root) + os.sep):
-            raise ValueError("Invalid filename: path traversal detected")
+    Returns ``{}`` when nothing can be derived: the path may belong to a
+    row being replayed in a test, or a file may have been removed out
+    from under the record. Neither should fail the request - the Asset
+    still has ``file_path``, which is all the pre-blob code needs.
+    """
+    if not file_path:
+        return {}
 
+    name = os.path.basename(file_path)
+
+    # Content-addressed: the name *is* the hash.
+    match = _BLOB_NAME.match(name)
+    if match:
+        identity: dict[str, Any] = {"sha256": match.group(1), "filename": name}
+    else:
+        identity = {}
+
+    try:
+        stat = os.stat(file_path)
+    except OSError:
+        return identity
+
+    identity["size"] = stat.st_size
+    if "filename" not in identity:
+        identity["filename"] = name
+    if "sha256" not in identity:
         try:
-            # O_EXCL via touch(exist_ok=False): atomically create-or-fail,
-            # instead of exists() (check) followed by a separate write
-            # (act) elsewhere with a race window in between.
-            resolved.touch(exist_ok=False)
-            return str(resolved)
-        except FileExistsError:
-            counter += 1
+            with open(file_path, "rb") as handle:
+                digest = hashlib.sha256()
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+            identity["sha256"] = digest.hexdigest()
+        except OSError:
+            # Size and name are still worth recording; the hash is what
+            # makes delete safe, and its absence just falls back to the
+            # legacy unlink-if-exists behaviour.
+            pass
+    return identity
+
+
+def _storage_roots() -> list[str]:
+    """Realpath'd roots that may legitimately hold source files.
+
+    Both the legacy uploads folder and the content-addressed blob store.
+    Callers must treat a miss here as untrusted input - it is the LFI
+    guard for every path that reaches the filesystem from a request.
+    """
+    return [os.path.realpath(UPLOADS_FOLDER), os.path.realpath(BLOBS_FOLDER)]
+
+
+def _is_within_storage_roots(candidate: str) -> bool:
+    """True when *candidate* resolves inside one of the storage roots.
+
+    Compared with ``os.path.commonpath`` rather than a ``startswith``
+    prefix test: ``startswith('/data/uploads-evil')`` is true for a
+    sibling directory that is not inside the root at all. ``commonpath``
+    raises on mixed absolute/relative input, which is a rejection here.
+    """
+    try:
+        resolved = os.path.realpath(candidate)
+    except (OSError, ValueError):
+        return False
+    for root in _storage_roots():
+        try:
+            if os.path.commonpath([resolved, root]) == root:
+                return True
+        except ValueError:
+            # Different drives or a relative/absolute mix: not contained.
+            continue
+    return False
 
 
 def _write_uploaded_file(filename: str, content: bytes) -> str:
     """Sync filesystem work for save_uploaded_file() - run via asyncio.to_thread
-    so a large upload doesn't block the event loop for other requests."""
-    file_path = generate_unique_filename(filename, UPLOADS_FOLDER)
-    try:
-        with open(file_path, "wb") as f:
-            f.write(content)
+    so a large upload doesn't block the event loop for other requests.
 
-        logger.info(f"Saved uploaded file to: {file_path}")
-        return file_path
+    Stored by content hash, so re-uploading a file already on disk writes
+    nothing. Replaces the previous unique-filename counter, which could
+    not detect a duplicate and produced a second copy on disk.
+    """
+    try:
+        ref = store_bytes(content, filename)
     except Exception as e:
         logger.error(f"Failed to save uploaded file: {e}")
-        # Clean up partial file if it exists
-        if os.path.exists(file_path):
-            os.unlink(file_path)
         raise
+
+    if ref.deduped:
+        logger.info(f"Uploaded file already stored: {ref.path}")
+    else:
+        logger.info(f"Saved uploaded file to: {ref.path}")
+    return ref.path
 
 
 async def save_uploaded_file(upload_file: UploadFile) -> str:
-    """Save uploaded file to uploads folder and return file path."""
+    """Save uploaded file to the blob store and return file path."""
     if not upload_file.filename:
         raise ValueError("No filename provided")
 
@@ -508,13 +555,14 @@ async def _build_content_state(
                 status_code=400,
                 detail="File upload or file_path is required for upload type",
             )
-        # Validate file_path is within the uploads directory to prevent LFI
-        uploads_resolved = Path(UPLOADS_FOLDER).resolve()
-        file_resolved = Path(final_file_path).resolve()
-        if not str(file_resolved).startswith(str(uploads_resolved) + os.sep):
+        # Validate file_path is within a storage root to prevent LFI.
+        # Both roots are accepted: data/blobs holds new content-addressed
+        # ingestions, data/uploads still holds files added before the
+        # switch, and neither may move until they are re-ingested.
+        if not _is_within_storage_roots(final_file_path):
             raise HTTPException(
                 status_code=400,
-                detail="Invalid file path: must be within the uploads directory",
+                detail="Invalid file path: must be within a storage directory",
             )
         # Reject unsupported files before enqueueing a doomed background job.
         await _assert_file_supported(final_file_path)
@@ -549,7 +597,14 @@ async def _create_source_async_path(
     if source_data.type == "link":
         source_asset = Asset(url=source_data.url)
     elif source_data.type == "upload":
-        source_asset = Asset(file_path=file_path or source_data.file_path)
+        identity = _blob_identity(file_path or source_data.file_path)
+        # The blob is named by hash, so without this the user's own
+        # filename would be lost on download.
+        identity["filename"] = content_state.get("filename") or identity.get("filename")
+        source_asset = Asset(
+            file_path=file_path or source_data.file_path,
+            **{k: v for k, v in identity.items() if v is not None},
+        )
     else:
         source_asset = None
 
@@ -726,6 +781,16 @@ async def create_source(
 
         # Prepare content_state for processing (type validation + SSRF/LFI guards)
         content_state = await _build_content_state(source_data, file_path)
+        if upload_file and upload_file.filename:
+            # Survives the hash-named blob: the user downloaded their
+            # PDF as "report (1).pdf", not as a sha256.
+            content_state["filename"] = os.path.basename(upload_file.filename)
+        # The extraction graph needs the hash too, so its delete_source
+        # cleanup can tell whether this blob is shared with another
+        # source before it unlinks anything.
+        sha256 = _blob_identity(file_path).get("sha256")
+        if sha256:
+            content_state["sha256"] = sha256
 
         # Validate transformations exist
         transformation_ids = source_data.transformations or []
@@ -781,19 +846,22 @@ async def _resolve_source_file(source_id: str) -> tuple[str, str]:
     if not file_path:
         raise HTTPException(status_code=404, detail="Source has no file to download")
 
-    safe_root = os.path.realpath(UPLOADS_FOLDER)
     resolved_path = os.path.realpath(file_path)
 
-    if resolved_path != safe_root and not resolved_path.startswith(safe_root + os.sep):
+    if not _is_within_storage_roots(file_path):
         logger.warning(
-            f"Blocked download outside uploads directory for source {source_id}: {resolved_path}"
+            f"Blocked download outside storage directories for source {source_id}: {resolved_path}"
         )
         raise HTTPException(status_code=403, detail="Access to file denied")
 
     if not os.path.exists(resolved_path):
         raise HTTPException(status_code=404, detail="File not found on server")
 
-    filename = os.path.basename(resolved_path)
+    # Prefer the stored original name: blobs are named by hash, so
+    # basename() would hand the user "a3f9….pdf" as a download name.
+    filename = (source.asset.filename if source.asset else None) or os.path.basename(
+        resolved_path
+    )
     return resolved_path, filename
 
 
@@ -801,14 +869,10 @@ def _is_source_file_available(source: Source) -> Optional[bool]:
     if not source or not source.asset or not source.asset.file_path:
         return None
 
-    file_path = source.asset.file_path
-    safe_root = os.path.realpath(UPLOADS_FOLDER)
-    resolved_path = os.path.realpath(file_path)
-
-    if resolved_path != safe_root and not resolved_path.startswith(safe_root + os.sep):
+    if not _is_within_storage_roots(source.asset.file_path):
         return False
 
-    return os.path.exists(resolved_path)
+    return os.path.exists(source.asset.file_path)
 
 
 @router.get("/sources/{source_id}", response_model=SourceResponse)

@@ -13,6 +13,16 @@ LANGGRAPH_CHECKPOINT_FILE = f"{sqlite_folder}/checkpoints.sqlite"
 UPLOADS_FOLDER = f"{DATA_FOLDER}/uploads"
 os.makedirs(UPLOADS_FOLDER, exist_ok=True)
 
+# BLOBS FOLDER - content-addressed store for source files.
+#
+# Replaces UPLOADS_FOLDER for new ingestions. Files are named by the
+# sha256 of their contents, so a file added twice occupies one path and
+# the hash is the identity that survives crossing to another device.
+# UPLOADS_FOLDER stays defined because sources already on disk live
+# there; nothing moves until they are re-ingested.
+BLOBS_FOLDER = f"{DATA_FOLDER}/blobs"
+os.makedirs(BLOBS_FOLDER, exist_ok=True)
+
 # PODCASTS FOLDER
 # Matches the root that build_episode_output_dir() (commands/podcast_commands.py)
 # creates episode directories under when called with DATA_FOLDER in production.

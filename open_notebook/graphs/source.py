@@ -18,6 +18,7 @@ from open_notebook.domain.content_settings import ContentSettings
 from open_notebook.domain.notebook import Asset, Source
 from open_notebook.domain.transformation import Transformation
 from open_notebook.graphs.transformation import graph as transform_graph
+from open_notebook.storage.blobs import unlink_if_unreferenced
 from open_notebook.utils.job_control import (
     get_current_command_id,
     raise_if_cancelled,
@@ -357,10 +358,24 @@ async def content_process(state: SourceState) -> dict:
     # content-core 2.x no longer deletes the uploaded source file after
     # extraction (the delete_source flag it used to honor is gone). Preserve the
     # previous auto-delete behavior on our side.
+    #
+    # Reference-aware: content-addressed storage means two sources can
+    # share one blob, and a bare unlink here would delete bytes the other
+    # source still needs - losing a file *during* extraction, with the
+    # source row left pointing at a path that no longer exists.
     if content_state.get("delete_source") and content_state.get("file_path"):
         file_path = content_state["file_path"]
+        sha256 = content_state.get("sha256")
         try:
-            os.unlink(file_path)
+            if sha256:
+                removed = await unlink_if_unreferenced(file_path, sha256)
+                if not removed and os.path.exists(file_path):
+                    logger.info(
+                        f"Kept {file_path} after extraction: still referenced "
+                        "by another source"
+                    )
+            else:
+                os.unlink(file_path)
         except FileNotFoundError:
             logger.warning(f"File not found while trying to delete: {file_path}")
         except Exception as e:
@@ -382,8 +397,19 @@ async def save_source(state: SourceState) -> dict:
 
     # Update the source with processed content. content-core's ExtractionOutput
     # does not echo url/file_path back, so carry them from the input state.
+    #
+    # Preserve the existing asset's content identity (sha256, filename,
+    # size). Rebuilding Asset() from scratch would drop it: the blob is
+    # named by hash, so losing the hash loses the only record of which
+    # bytes this source was built from, and losing the filename means the
+    # download is served as "<sha>.pdf".
+    previous = source.asset or Asset()
     source.asset = Asset(
-        url=content_state.get("url"), file_path=content_state.get("file_path")
+        url=content_state.get("url"),
+        file_path=content_state.get("file_path"),
+        sha256=previous.sha256,
+        filename=content_state.get("filename") or previous.filename,
+        size=previous.size,
     )
     source.full_text = extraction.content
 

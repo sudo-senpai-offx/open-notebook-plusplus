@@ -201,6 +201,7 @@ class TestSaveSourceTitlePreservation:
         from open_notebook.graphs.source import SourceState, save_source
 
         mock_source = MagicMock(spec=Source)
+        mock_source.asset = None  # save_source now preserves asset identity
         mock_source.title = "My Custom Research Title"
         mock_source.save = AsyncMock()
         mock_get.return_value = mock_source
@@ -228,6 +229,7 @@ class TestSaveSourceTitlePreservation:
         from open_notebook.graphs.source import SourceState, save_source
 
         mock_source = MagicMock(spec=Source)
+        mock_source.asset = None  # save_source now preserves asset identity
         mock_source.title = "Processing..."
         mock_source.save = AsyncMock()
         mock_get.return_value = mock_source
@@ -257,6 +259,7 @@ class TestSaveSourceTitlePreservation:
         from open_notebook.graphs.source import SourceState, save_source
 
         mock_source = MagicMock(spec=Source)
+        mock_source.asset = None  # save_source now preserves asset identity
         mock_source.title = None
         mock_source.save = AsyncMock()
         mock_get.return_value = mock_source
@@ -284,6 +287,7 @@ class TestSaveSourceTitlePreservation:
         from open_notebook.graphs.source import SourceState, save_source
 
         mock_source = MagicMock(spec=Source)
+        mock_source.asset = None  # save_source now preserves asset identity
         mock_source.title = ""
         mock_source.save = AsyncMock()
         mock_get.return_value = mock_source

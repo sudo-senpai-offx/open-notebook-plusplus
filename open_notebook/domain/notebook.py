@@ -16,6 +16,7 @@ from open_notebook.exceptions import (
     InvalidInputError,
     NotFoundError,
 )
+from open_notebook.storage.blobs import unlink_if_unreferenced
 
 
 class Notebook(ObjectModel):
@@ -321,8 +322,23 @@ class Notebook(ObjectModel):
 
 
 class Asset(BaseModel):
+    """Where a source's content lives.
+
+    ``sha256`` is the content address: the same bytes always produce the
+    same value, on every device, which is what lets a sync manifest name
+    a file without trusting the sender's path. ``filename`` preserves the
+    name the user recognises - the stored blob is named by hash, so
+    without it every download would be ``a3f9….pdf``.
+
+    ``file_path`` remains authoritative locally because extraction, the
+    PDF text-layer probe and the download route all read it directly.
+    """
+
     file_path: Optional[str] = None
     url: Optional[str] = None
+    sha256: Optional[str] = None
+    filename: Optional[str] = None
+    size: Optional[int] = None
 
 
 class SourceEmbedding(ObjectModel):
@@ -670,21 +686,38 @@ class Source(ObjectModel):
 
     async def delete(self) -> bool:
         """Delete source and clean up associated file, embeddings, and insights."""
-        # Clean up uploaded file if it exists
+        # Clean up the backing file, but only if nothing else still needs
+        # it. Content-addressed storage means two sources can share one
+        # blob, and the unconditional unlink this replaces would have
+        # deleted bytes the surviving source still reads from.
         if self.asset and self.asset.file_path:
             file_path = Path(self.asset.file_path)
-            if file_path.exists():
-                try:
+            sha256 = self.asset.sha256
+            try:
+                if sha256:
+                    removed = await unlink_if_unreferenced(
+                        str(file_path), sha256, str(self.id)
+                    )
+                    if removed:
+                        logger.info(f"Deleted blob for source {self.id}: {file_path}")
+                    elif file_path.exists():
+                        logger.info(
+                            f"Kept blob for source {self.id}: {file_path} "
+                            "is still referenced by another source"
+                        )
+                elif file_path.exists():
+                    # Pre-blob source: no hash, so nothing can be sharing
+                    # the path. Old behaviour, kept for existing rows.
                     os.unlink(file_path)
                     logger.info(f"Deleted file for source {self.id}: {file_path}")
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to delete file {file_path} for source {self.id}: {e}. "
-                        "Continuing with database deletion."
+                else:
+                    logger.debug(
+                        f"File {file_path} not found for source {self.id}, skipping cleanup"
                     )
-            else:
-                logger.debug(
-                    f"File {file_path} not found for source {self.id}, skipping cleanup"
+            except Exception as e:
+                logger.warning(
+                    f"Failed to delete file {file_path} for source {self.id}: {e}. "
+                    "Continuing with database deletion."
                 )
 
         # Delete associated embeddings and insights to prevent orphaned records
