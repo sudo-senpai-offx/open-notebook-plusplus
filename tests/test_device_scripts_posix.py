@@ -47,24 +47,34 @@ def _shellcheck() -> str | None:
     return str(candidate) if candidate.exists() else None
 
 
-SHELLCHECK = _shellcheck()
+@pytest.fixture(scope="module")
+def shellcheck() -> str:
+    """The shellcheck binary, or skip.
+
+    A fixture rather than a module constant paired with `skipif`: mypy
+    cannot narrow a module-level `str | None` through a skipif, so the
+    constant leaked Optional into the subprocess argument list.
+    """
+    found = _shellcheck()
+    if found is None:
+        pytest.skip("shellcheck not installed")
+    return found
 
 
-@pytest.mark.skipif(SHELLCHECK is None, reason="shellcheck not installed")
 class TestDeviceScriptsArePosix:
     @pytest.mark.parametrize("name", DEVICE_SCRIPTS)
     def test_script_exists(self, name):
         assert (SCRIPTS / name).is_file(), f"{name} is installed onto the device"
 
     @pytest.mark.parametrize("name", DEVICE_SCRIPTS)
-    def test_parses_as_posix_sh(self, name):
+    def test_parses_as_posix_sh(self, name, shellcheck):
         """`sh -n` is not enough - /bin/sh here is bash.
 
         Bash parses bash-only constructs happily, so this check has to be
         told the dialect or it agrees with the bug.
         """
         result = subprocess.run(
-            [SHELLCHECK, "-s", "sh", "-S", "error", str(SCRIPTS / name)],
+            [shellcheck, "-s", "sh", "-S", "error", str(SCRIPTS / name)],
             capture_output=True,
             text=True,
         )
@@ -73,9 +83,9 @@ class TestDeviceScriptsArePosix:
         )
 
     @pytest.mark.parametrize("name", DEVICE_SCRIPTS)
-    def test_no_warnings(self, name):
+    def test_no_warnings(self, name, shellcheck):
         result = subprocess.run(
-            [SHELLCHECK, "-s", "sh", "-S", "warning", str(SCRIPTS / name)],
+            [shellcheck, "-s", "sh", "-S", "warning", str(SCRIPTS / name)],
             capture_output=True,
             text=True,
         )
