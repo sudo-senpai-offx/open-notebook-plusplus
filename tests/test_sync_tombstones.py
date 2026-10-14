@@ -26,6 +26,7 @@ import pytest
 
 from open_notebook.sync.tombstones import (
     TOMBSTONES_DIR,
+    is_deletable,
     load_tombstones,
     prune_tombstones,
     sweep,
@@ -41,6 +42,30 @@ def _seed(root: Path, name: str, record_id: str, **fields) -> None:
     payload = {"id": record_id, "updated": STAMP, **fields}
     (root / "sources" / f"{record_id.replace(':', '-')}.json").write_text(
         json.dumps(payload)
+    )
+
+
+@pytest.fixture(autouse=True)
+def synced_device(monkeypatch, request):
+    """Arm the sweep for tests that are not about the watermark.
+
+    A device that has completed an import is the precondition for any
+    tombstone existing at all. Tests written before the watermark
+    assumed an always-armed device; this makes that explicit instead of
+    restoring the old, unsafe assumption. The watermark tests override it.
+    """
+    # The watermark tests set the watermark themselves - including to
+    # "none" and to real values - so arming it here would overwrite the
+    # thing under test.
+    if request.node.cls is TestSyncWatermark:
+        return
+
+    from open_notebook.sync import tombstones
+
+    monkeypatch.setattr(
+        tombstones,
+        "read_watermark",
+        lambda: _parse("2099-01-01T00:00:00+00:00"),
     )
 
 
@@ -553,3 +578,102 @@ async def _get_notebook(name: str):
 async def _notebook_exists(name: str) -> bool:
     rows = await _query(f"SELECT * FROM notebook WHERE name = '{name}'")
     return bool(rows)
+
+
+class TestSyncWatermark:
+    """A device that never imported must not tombstone its peer's library.
+
+    The failure this prevents is real, not hypothetical. The phone was
+    running a build with no notebook sync, held zero notebooks, and the
+    manifest carried seven. Its first export would have answered "the
+    manifest has 7 notebooks, I have 0" as "all 7 were deleted here" -
+    and the PC would have applied that as a deletion, cascading notes
+    with it.
+
+    So a tombstone is only evidence if the tombstoning device once *had*
+    the record. The watermark is when that was.
+
+    `is_deletable` takes the watermark as an argument, so none of this
+    needs patching and no test can be decided by a watermark file left
+    behind by another one.
+    """
+
+    def test_never_imported_means_nothing_is_deletable(self):
+        assert is_deletable("2026-01-01T00:00:00+00:00", None) is False
+
+    def test_an_entry_newer_than_the_import_has_not_arrived_yet(self):
+        # The peer created it after our last import: it has not arrived
+        # yet, which is not the same as having been deleted.
+        # STAMP is 2026-10-14; a peer entry dated after it has not
+        # arrived yet. One dated before it was known here and may since
+        # have been deleted.
+        assert is_deletable("2026-12-01T00:00:00+00:00", _parse(STAMP)) is False
+        assert is_deletable("2026-06-01T00:00:00+00:00", _parse(STAMP)) is True
+        assert is_deletable(STAMP, _parse(STAMP)) is True
+
+    def test_an_entry_with_no_timestamp_is_never_deletable(self):
+        """An old manifest cannot prove the record arrived here."""
+        far_future = _parse("2030-01-01T00:00:00+00:00")
+        assert is_deletable(None, far_future) is False
+        assert is_deletable("", far_future) is False
+
+    def test_a_device_without_a_watermark_sweeps_nothing(self, monkeypatch, tmp_path):
+        """End to end: 7 notebooks in the manifest, 0 held, no import yet."""
+        from open_notebook.sync import tombstones
+
+        index = tmp_path / "notebooks" / "index.json"
+        index.parent.mkdir(parents=True)
+        index.write_text(
+            json.dumps(
+                {
+                    "notebooks": [
+                        {"slug": f"course-{i}", "name": f"Course {i}", "updated": STAMP}
+                        for i in range(7)
+                    ]
+                }
+            )
+        )
+        _seed(tmp_path, "sources", "source:from_peer", updated=STAMP)
+        monkeypatch.setattr(tombstones, "read_watermark", lambda: None)
+
+        written = tombstones.sweep(tmp_path, {"sources": []})
+        written += tombstones.sweep_notebooks(tmp_path, "notebooks/index.json", [])
+
+        assert written == [], "a device that never imported must delete nothing"
+
+    def test_the_watermark_lives_outside_the_shared_repo(self, monkeypatch, tmp_path):
+        """A per-device fact must never be committed to the peer's repo."""
+        from open_notebook.sync import tombstones
+
+        monkeypatch.setenv("DATA_FOLDER", str(tmp_path / "data"))
+        assert str(tombstones._watermark_path()).startswith(str(tmp_path / "data"))
+
+    def test_the_watermark_never_moves_backwards(self, monkeypatch, tmp_path):
+        import datetime as dt
+
+        from open_notebook.sync import tombstones
+
+        monkeypatch.setenv("DATA_FOLDER", str(tmp_path / "data"))
+        later = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
+        earlier = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+
+        tombstones.write_watermark(later)
+        tombstones.write_watermark(earlier)
+
+        assert tombstones.read_watermark() == later
+
+    def test_an_import_arms_the_sweep(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("DATA_FOLDER", str(tmp_path / "data"))
+        from open_notebook.sync import tombstones
+
+        assert tombstones.read_watermark() is None
+        tombstones.write_watermark(_parse(STAMP))
+
+        assert tombstones.read_watermark() == _parse(STAMP)
+        assert is_deletable(STAMP, tombstones.read_watermark()) is True
+
+
+def _parse(value):
+    from datetime import datetime
+
+    return datetime.fromisoformat(value) if value else None

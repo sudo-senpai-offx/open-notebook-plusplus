@@ -750,6 +750,13 @@ async def import_all(
     result["notebooks_created"] = notebooks_created
     result["notebooks_updated"] = notebooks_updated
     await _apply_tombstones(root, result, dry_run, local_notebooks)
+
+    # Only a completed import arms the export sweep. Until this runs,
+    # nothing on this device may be tombstoned - see `is_deletable`,
+    # which explains what happens otherwise.
+    if not dry_run:
+        tombstones.write_watermark()
+
     return result
 
 

@@ -994,3 +994,52 @@ The orientation is confirmed by the two `artifact` edges that do exist
 (`in = note`, `out = notebook`) and is what `export_all` and
 `fn::vector_search` both assume. `tests/test_notebook_source_links.py`
 pins it; reverting the one-line fix makes it fail.
+
+### The sweep conflated "deleted" with "never received"
+
+Found by calling the phone's own `/sync/export` after it had been
+updated, and reading what came back:
+
+    {"counts": {..., "notebooks": 0, "tombstoned": 0}, ...}
+
+`tombstoned: 0` - but only because the phone's manifest had never held
+a notebooks index. Had it pulled the PC's manifest first (seven
+notebooks) and exported before importing, `sweep_notebooks` would have
+compared "seven in the manifest" against "zero held", concluded all
+seven were deleted, and written seven tombstones. The PC would then have
+applied them - cascading notes with them.
+
+This is not hypothetical. The phone ran a build with no notebook sync
+and held zero notebooks while the manifest carried seven, which is
+exactly the state that triggers it. The same trap applies to any device
+that has not yet completed a first import, and to any record the peer
+created after this device's last sync.
+
+**The fix is a sync watermark.** A tombstone is evidence of a deletion
+only if the tombstoning device once *had* the record. `import_all`
+records when it last completed; the sweep may only tombstone entries
+whose `updated` is at or before that mark.
+
+  * never imported -> nothing is deletable
+  * entry newer than the last import -> has not arrived yet, not deleted
+  * entry with no `updated` -> deletable never; an old manifest cannot
+    prove the record arrived, and "cannot prove" must not mean "destroy"
+
+The watermark lives in `DATA_FOLDER`, not in the sync directory. The
+sync directory is the shared git repo, and committing a per-device fact
+would hand the peer a lie about our history.
+
+`is_deletable` takes the watermark as a parameter with a sentinel, so it
+is a pure function. Overloading `None` for both "never imported" and
+"go and read it" meant the one case the tests most needed to pin was
+decided by whatever a previous run left in `data/`.
+
+### Provenance, verified on the device
+
+After the phone exported, `/api/sources` on it returned:
+
+    21st_century_communication_z_library_sk   origin=file  exported_by=phone  held_by=phone  avail=True
+    Electrophoretic Techniques and Molecular   origin=text  exported_by=phone  held_by=None    avail=None
+
+which is the distinction that matters: the record is present either
+way, but only one of them can be opened.

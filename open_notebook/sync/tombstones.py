@@ -52,6 +52,7 @@ cannot lose a deletion.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -223,6 +224,8 @@ def sweep(
             record_id = str(data.get("id") or "")
             if not record_id or record_id in keep:
                 continue
+            if not is_deletable(data.get("updated")):
+                continue
 
                 # The hash comes from the manifest file, not from the
             # record: the record is gone and cannot be asked what it
@@ -283,7 +286,7 @@ def sweep_notebooks(
 
     for entry in entries:
         slug = str(entry.get("slug") or "")
-        if slug and slug not in live:
+        if slug and slug not in live and is_deletable(entry.get("updated")):
             written.append(
                 write_tombstone(
                     root,
@@ -327,3 +330,98 @@ def prune_tombstones(root: Path, older_than_days: int) -> List[str]:
             path.unlink(missing_ok=True)
             removed.append(tombstone.id)
     return removed
+
+
+# --- the sync watermark --------------------------------------------------
+#
+# The sweep answers "what is in the manifest that this device no longer
+# has?" and treats the answer as "was deleted here". Those are not the
+# same question, and the difference is data loss.
+#
+# A device that has never completed an import sees the peer's whole
+# library as "records I do not have" and would tombstone all of it on
+# its first export. Concretely: the phone was running a build with no
+# notebook sync, held zero notebooks, and the manifest carried seven.
+# Its first export would have declared all seven deleted - and the PC
+# would have applied that as a deletion, cascading notes with it.
+#
+# A tombstone is only evidence of a deletion if the tombstoning device
+# once *had* the record. The watermark records when this device last
+# successfully imported; anything the manifest gained after that point
+# has not arrived yet and is therefore not a deletion.
+
+WATERMARK_FILE = "sync-watermark.json"
+
+
+def _watermark_path() -> Path:
+    """Deliberately outside the sync directory.
+
+    The sync directory is the shared git repo. A watermark is a fact
+    about *this* installation - when this device last synced - and
+    committing it would hand the peer a lie about our history.
+    """
+    return Path(os.getenv("DATA_FOLDER", "./data")) / WATERMARK_FILE
+
+
+def read_watermark() -> Optional[datetime]:
+    """When this device last completed an import, or None if never."""
+    try:
+        payload = json.loads(_watermark_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return _parse(payload.get("last_import_at"))
+
+
+def write_watermark(when: Optional[datetime] = None) -> None:
+    """Mark a completed import. Never moves backwards."""
+    previous = read_watermark()
+    stamp = when or datetime.now(timezone.utc)
+    if previous is not None and previous > stamp:
+        stamp = previous
+    path = _watermark_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"last_import_at": stamp.isoformat()}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+class _Unset:
+    """Sentinel, because `None` already means "this device never imported".
+
+    Overloading None for both left `is_deletable(stamp, None)` silently
+    reading the on-disk watermark, so the one case the tests most need to
+    pin - a device that has never synced - was decided by whatever a
+    previous test run happened to leave in `data/`.
+    """
+
+    def __repr__(self) -> str:
+        return "<unset>"
+
+
+_UNSET = _Unset()
+
+
+def is_deletable(
+    updated: Optional[str], watermark: Optional[datetime] | _Unset = _UNSET
+) -> bool:
+    """Whether a manifest entry may be tombstoned on this device.
+
+    False when this device has never imported, so nothing can be
+    considered deleted here. False when the entry is *newer* than the
+    last import, because it has not arrived yet. False when it carries
+    no timestamp at all - an older manifest cannot prove the record
+    reached this device, and the safe reading of "cannot prove" is
+    "do not destroy".
+    """
+    # Passed in so this is a pure function and can be reasoned about
+    # without touching module state. Only the caller that genuinely
+    # means "this device's own" leaves it unset.
+    if isinstance(watermark, _Unset):
+        watermark = read_watermark()
+    if watermark is None:
+        return False
+    stamp = _parse(updated)
+    if stamp is None:
+        return False
+    return stamp <= watermark
