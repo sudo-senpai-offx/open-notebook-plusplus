@@ -16,8 +16,9 @@
 ## Not restored
 
 - 258 source records existed; 46 exist now. 212 are gone for good.
-- 2,754 embeddings. Regenerable, but only once an embedding model is
-  reachable; none is running on the PC at present.
+- 2,754 embeddings. **Rebuilt**: 45 sources re-embedded with the local
+  `bge-m3` via Ollama, producing 698 `source_embedding` rows at 1024
+  dimensions. Run `recovery-2026-10-14/reembed.py`.
 - All `reference` edges, so nothing is filed under a notebook. The
   grouping has to be redone in the UI.
 

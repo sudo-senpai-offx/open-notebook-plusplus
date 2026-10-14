@@ -7,6 +7,8 @@
 #   sh ~/bin/onb-sync pull                  pull  -> import
 #   sh ~/bin/onb-sync pull --apply          import for real (default: dry run)
 #   sh ~/bin/onb-sync cycle                 pull --apply, then push
+#   sh ~/bin/onb-sync blobs <peer-url> pull   fetch missing file bytes
+#   sh ~/bin/onb-sync blobs <peer-url> push   offer ours to a peer
 #   sh ~/bin/onb-sync status
 #
 # Why the app is a black box here: this script never reads the database.
@@ -127,6 +129,50 @@ cmd_pull() {
   echo "[sync] done"
 }
 
+# Transfer the actual file bytes. The manifest moves hashes; this moves
+# the PDFs behind them. Separate because they carry different risk and
+# fail independently - a source can be imported and simply not openable
+# until its bytes arrive, and that has to be a visible state.
+#
+#   sh ~/bin/onb-sync blobs <peer-url> pull   fetch what we are missing
+#   sh ~/bin/onb-sync blobs <peer-url> push   tell the peer what we hold
+#
+# Direction depends on the network: this phone cannot open a connection
+# to the PC (measured), so on a LAN the PC pulls *from* the phone. Both
+# verbs exist anyway - over USB or a cloud relay the other way works.
+cmd_blobs() {
+  peer="${1:-}"; action="${2:-}"
+  [ -n "$peer" ] || die "usage: $0 blobs <peer-url> pull|push"
+  api_up
+
+  token="${SYNC_TOKEN:-}"
+  auth=()
+  [ -n "$token" ] && auth=(-H "X-Sync-Token: $token")
+  [ -n "$token" ] || echo "  note: SYNC_TOKEN unset - the peer will refuse if it requires one"
+
+  case "$action" in
+    pull)
+      echo "[blobs] asking $peer what we are missing"
+      curl -s -m 120 "${auth[@]}" "$peer/api/sync/blobs" > "$TMPDIR/blobs-hold.json" 2>/dev/null ||
+        die "cannot reach $peer"
+      echo "[blobs] downloading"
+      curl -s -m 300 -X POST "$API/api/sync/blobs/pull" "${auth[@]}" \
+        -H 'Content-Type: application/json' \
+        -d "{\"peer\":\"$peer\"}" |
+        tr ',' '\n' | grep -E 'requested|fetched|failed' | sed 's/^/       /'
+      ;;
+    push)
+      echo "[blobs] offering our blobs to $peer"
+      curl -s -m 120 -X POST "$peer/api/sync/blobs/offer" "${auth[@]}" \
+        -H 'Content-Type: application/json' -d '{}' |
+        tr ',' '\n' | grep -E 'count|offered' | sed 's/^/       /'
+      ;;
+    *)
+      die "usage: $0 blobs <peer-url> pull|push"
+      ;;
+  esac
+}
+
 cmd_status() {
   echo "  sync dir : $SYNC_DIR"
   echo "  api      : $API"
@@ -153,9 +199,10 @@ case "${1:-status}" in
   cycle)
     cmd_pull --apply && cmd_push
     ;;
+  blobs) shift; cmd_blobs "${1:-}" "${2:-}" ;;
   status) cmd_status ;;
   *)
-    echo "usage: $0 init <remote-url> | push | pull [--apply] | cycle | status"
+    echo "usage: $0 init <remote-url> | push | pull [--apply] | cycle | blobs <url> pull|push | status"
     exit 1
     ;;
 esac
