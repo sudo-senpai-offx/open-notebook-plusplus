@@ -24,8 +24,15 @@ about is left alone and reported, because a source filed under the
 wrong course is worse than an unfiled one: it will be confidently
 retrieved for the wrong question.
 
-    python relink_sources.py            # dry run, changes nothing
+    python relink_sources.py                  # dry run, changes nothing
     python relink_sources.py --apply
+    python relink_sources.py --delete-unplaced --apply
+
+`--delete-unplaced` removes the sources that matched no course. Unlike
+the others these hold no file - they are crawled links whose URL is the
+entire content - so deleting them is not reversible by any means, only
+undoable by re-crawling the URL. That is why it is a separate flag and
+not part of `--apply`.
 
 Deletes are `Source.delete()`, the same call the UI makes, so the blob
 survives (auto_delete_files defaults to no) and the next export
@@ -112,7 +119,7 @@ async def already_linked(source_id: str, notebook_id: str) -> bool:
     return bool(rows)
 
 
-async def main(apply: bool) -> int:
+async def main(apply: bool, delete_unplaced: bool = False) -> int:
     targets: Dict[str, str] = {}
     missing: List[str] = []
     for name in (GTB204, LHP412):
@@ -135,7 +142,10 @@ async def main(apply: bool) -> int:
         title = (row.get("title") or "").strip()
         verdict = classify(title)
         if not verdict:
-            unplaced.append(title)
+            if delete_unplaced:
+                plan.append((str(row["id"]), title, "delete-unplaced"))
+            else:
+                unplaced.append(title)
             continue
         plan.append((str(row["id"]), title, verdict))
 
@@ -149,7 +159,7 @@ async def main(apply: bool) -> int:
         print("  DRY RUN - nothing changed. Re-run with --apply.\n")
 
     for source_id, title, verdict in plan:
-        if verdict == "delete":
+        if verdict in ("delete", "delete-unplaced"):
             print(f"  DELETE   {title[:62]}")
             if apply:
                 await (await Source.get(source_id)).delete()
@@ -169,14 +179,20 @@ async def main(apply: bool) -> int:
             )
 
     print()
-    print(f"  left unplaced ({len(unplaced)}):")
-    for title in sorted(unplaced):
-        print(f"      {title[:70]}")
+    if unplaced:
+        print(f"  left unplaced ({len(unplaced)}):")
+        for title in sorted(unplaced):
+            print(f"      {title[:70]}")
     return 0
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="actually write")
+    parser.add_argument(
+        "--delete-unplaced",
+        action="store_true",
+        help="also delete sources that matched no course (irreversible: they are links)",
+    )
     args = parser.parse_args()
-    raise SystemExit(asyncio.run(main(args.apply)))
+    raise SystemExit(asyncio.run(main(args.apply, args.delete_unplaced)))
