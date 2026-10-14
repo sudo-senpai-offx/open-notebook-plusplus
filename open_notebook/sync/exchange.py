@@ -298,6 +298,25 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
                 "filename": asset.filename,
                 "size": asset.size,
                 "notebook_slugs": sorted(slugs),
+                # Provenance. `kind` says whether this is a file or a
+                # link; these say *which device* wrote the entry and,
+                # when it is a file, which device actually holds the
+                # bytes right now.
+                #
+                # Necessary because the file and the metadata travel by
+                # different routes: metadata over git, bytes over the
+                # blob channel. So "I have this source" and "I can open
+                # this source" are different claims, and only the second
+                # one is worth anything. `bytes_held_by` is omitted when
+                # the exporting device does not have the file, which is
+                # the normal state for a link and the honest state for
+                # a file that has not been pushed yet.
+                "exported_by": device,
+                **(
+                    {"bytes_held_by": device}
+                    if asset.sha256 and resolve_blob_path(asset.sha256, asset.filename)
+                    else {}
+                ),
             },
         )
 
@@ -1028,3 +1047,45 @@ def iter_sync_files(root: Optional[Path] = None) -> Iterable[Path]:
     root = root or sync_dir()
     yield from sorted((root / NOTES_DIR).glob("*.json"))
     yield from sorted((root / CARDS_DIR).glob("*.json"))
+
+
+def load_provenance(
+    root: Optional[Path] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Which device last wrote each source entry, and who holds its bytes.
+
+    Read from the manifest rather than the database, because provenance
+    is a property of the *sync*, not of the record: two devices can hold
+    the same record and disagree about who has the file, and only the
+    manifest knows which one exported last.
+
+    Returns {} when the sync directory does not exist yet, so a fresh
+    install is not an error.
+    """
+    base = root or sync_dir()
+    directory = base / SOURCES_DIR
+    if not directory.is_dir():
+        return {}
+
+    found: Dict[str, Dict[str, Any]] = {}
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        record_id = data.get("id")
+        if not record_id:
+            continue
+        entry: Dict[str, Any] = {
+            "origin": data.get("kind"),
+            "exported_by": data.get("exported_by"),
+            "bytes_held_by": data.get("bytes_held_by"),
+        }
+        # Preserve an older entry's holder when the newest export did not
+        # claim one. Omission means "this device does not have it", not
+        # "nobody has it" - the file may well be sitting on the peer.
+        previous = found.get(str(record_id))
+        if previous and previous.get("bytes_held_by") and not entry["bytes_held_by"]:
+            entry["bytes_held_by"] = previous["bytes_held_by"]
+        found[str(record_id)] = entry
+    return found

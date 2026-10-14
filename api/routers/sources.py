@@ -44,6 +44,7 @@ from open_notebook.exceptions import (
     UnsupportedTypeException,
 )
 from open_notebook.storage.blobs import resolve_blob_path, store_bytes
+from open_notebook.sync.exchange import load_provenance
 
 router = APIRouter()
 
@@ -402,6 +403,10 @@ async def get_sources(
 
         # Convert result to response model
         # Command data is already fetched via FETCH command clause
+        # Read once per request rather than per row. Sixteen small files
+        # is nothing, but a phone reading them from an sdcard thousands
+        # of times per page load is not.
+        provenance = load_provenance()
         response_list = []
         for row in result:
             command = row.get("command")
@@ -447,6 +452,11 @@ async def get_sources(
                     # came back with file_available unset, including the
                     # synced ones whose bytes were sitting in the store.
                     file_available=_available_from_row(row.get("asset")),
+                    # Provenance from the sync manifest: which device
+                    # last wrote this entry, and whether this device
+                    # holds the bytes. Optional, so a device with no sync
+                    # directory simply returns nothing here.
+                    **provenance.get(str(row["id"]), {}),
                     created=str(row["created"]),
                     updated=str(row["updated"]),
                     # Status fields from fetched command

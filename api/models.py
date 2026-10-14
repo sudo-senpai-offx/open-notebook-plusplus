@@ -408,6 +408,13 @@ class SourceResponse(BaseModel):
     embedded: bool
     embedded_chunks: int
     file_available: Optional[bool] = None
+    # Provenance, as last written into the sync manifest by whichever
+    # device exported most recently. `origin` is "file", "link" or
+    # "text"; `bytes_held_by` names the device that actually has the
+    # file. None when the entry has never been exported.
+    origin: Optional[str] = None
+    exported_by: Optional[str] = None
+    bytes_held_by: Optional[str] = None
     created: str
     updated: str
     # New fields for async processing
@@ -429,6 +436,13 @@ class SourceListResponse(BaseModel):
     created: str
     updated: str
     file_available: Optional[bool] = None
+    # Provenance, as last written into the sync manifest by whichever
+    # device exported most recently. `origin` is "file", "link" or
+    # "text"; `bytes_held_by` names the device that actually has the
+    # file. None when the entry has never been exported.
+    origin: Optional[str] = None
+    exported_by: Optional[str] = None
+    bytes_held_by: Optional[str] = None
     # Status fields for async processing
     command_id: Optional[str] = None
     status: Optional[str] = None
