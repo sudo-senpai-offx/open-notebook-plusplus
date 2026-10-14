@@ -15,7 +15,11 @@ from api.routers._chat_shared import (
     get_session_or_404,
 )
 from open_notebook.database.repository import ensure_record_id, repo_query
-from open_notebook.domain.notebook import ChatSession, Notebook
+from open_notebook.domain.notebook import (
+    ChatSession,
+    Notebook,
+    persist_chat_messages,
+)
 from open_notebook.exceptions import (
     NotFoundError,
     OpenNotebookError,
@@ -217,10 +221,66 @@ async def get_session(session_id: str):
             config=RunnableConfig(configurable={"thread_id": full_session_id}),
         )
 
-        # Extract messages from state
+        # The durable transcript first; the checkpoint only as a fallback.
+        #
+        # They disagree for exactly one reason: a conversation that
+        # predates the chat_message table is still only in the
+        # checkpoint. So an empty table is read as "not migrated yet",
+        # not as "no messages" - otherwise every old session would come
+        # back empty and the user would think the history was lost.
+        #
+        # Backfilling on read means an old conversation becomes syncable
+        # the first time it is opened, with no migration step.
+        # Tolerates the table not existing yet. An app update can land
+        # before its migration has run - the two ship separately and the
+        # phone pulls code and migrates on next start - and a missing
+        # table must degrade to "no stored transcript", not a 500 on the
+        # one page the user is trying to read.
+        stored = []
+        try:
+            stored = await repo_query(
+                "SELECT * FROM chat_message WHERE session = $sid ORDER BY seq ASC, created ASC",
+                {"sid": ensure_record_id(full_session_id)},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"chat_message unavailable for {full_session_id}, reading the "
+                f"checkpoint instead: {type(exc).__name__}: {exc}"
+            )
+
         messages: list[ChatMessage] = []
-        if thread_state and thread_state.values and "messages" in thread_state.values:
+        if stored:
+            # Filtered rather than trusted: a row missing `id` or
+            # `content` would raise inside the comprehension and take the
+            # whole page down with a 500. A partial row is a degraded
+            # message, not a failed request.
+            for row in stored:
+                if not isinstance(row, dict) or not row.get("id"):
+                    continue
+                messages.append(
+                    ChatMessage(
+                        id=str(row["id"]).split(":", 1)[-1],
+                        type=str(row.get("role") or "unknown"),
+                        content=str(row.get("content") or ""),
+                        timestamp=(
+                            str(row.get("created")) if row.get("created") else None
+                        ),
+                    )
+                )
+        if not messages and thread_state and "messages" in (thread_state.values or {}):
             messages = extract_chat_messages(thread_state.values["messages"])
+            # Backfill, so this session can sync from now on.
+            try:
+                backfilled = await persist_chat_messages(
+                    full_session_id, thread_state.values["messages"]
+                )
+                if backfilled:
+                    logger.info(
+                        f"Backfilled {backfilled} message(s) for legacy session "
+                        f"{full_session_id}"
+                    )
+            except Exception as exc:  # noqa: BLE001 - reading must not fail
+                logger.warning(f"Could not backfill {full_session_id}: {exc}")
 
         # Find notebook_id (we need to query the relationship)
         notebook_query = await repo_query(
@@ -391,8 +451,26 @@ async def execute_chat(request: ExecuteChatRequest):
         # Update session timestamp
         await session.save()
 
+        # Make the transcript durable. The checkpoint keeps working as a
+        # resume cache; this is the copy that can be merged, and so the
+        # copy that can cross to the other device. Idempotent, so a
+        # conversation that predates this table backfills on first use.
+        turn_messages = result.get("messages", [])
+        try:
+            added = await persist_chat_messages(full_session_id, turn_messages)
+            if added:
+                logger.info(f"Persisted {added} chat message(s) for {full_session_id}")
+        except Exception as exc:  # noqa: BLE001 - the turn already succeeded
+            # Never fail a completed turn over bookkeeping. The checkpoint
+            # still holds the conversation, so the worst case is that it
+            # does not sync until the migration has run.
+            logger.warning(
+                f"Could not persist chat messages for {full_session_id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
         # Convert messages to response format
-        messages = extract_chat_messages(result.get("messages", []))
+        messages = extract_chat_messages(turn_messages)
 
         return ExecuteChatResponse(session_id=request.session_id, messages=messages)
     except NotFoundError:

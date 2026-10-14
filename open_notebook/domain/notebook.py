@@ -2,7 +2,8 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+from typing import Any, ClassVar, Dict, Iterable, List, Literal, Optional, Union
+from uuid import uuid4
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -1088,3 +1089,131 @@ async def vector_search(
         logger.error(f"Error performing vector search: {str(e)}")
         logger.exception(e)
         raise DatabaseOperationError(e)
+
+
+class ChatMessage(ObjectModel):
+    """One turn of a conversation, stored where it can be merged.
+
+    A transcript used to exist only inside the LangGraph checkpoint, which
+    is opaque and unmergeable - so a session could not cross devices at
+    all. This is the durable copy. The checkpoint stays as a resume cache
+    for long conversations; this is what syncs.
+
+    The record id is the merge key. It is minted once, when the message
+    is written, and carried unchanged across devices, so two devices
+    appending to the same session produce a union rather than a conflict.
+
+    `seq` is for display order only. Two devices appending independently
+    will hand out overlapping sequence numbers - that is expected, and
+    ordering falls back to `created` then to id.
+    """
+
+    table_name: ClassVar[str] = "chat_message"
+    nullable_fields: ClassVar[set[str]] = set()
+
+    session: Optional[Union[str, RecordID]] = None
+    seq: int = 0
+    role: str = "human"
+    content: str = ""
+
+    @field_validator("session", mode="before")
+    @classmethod
+    def parse_session(cls, value):
+        return ensure_record_id(value) if value else value
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _normalise_role(cls, value: str) -> str:
+        """Map LangChain's vocabulary onto the three the table asserts.
+
+        A value outside this set is rejected by the schema, so a message
+        type LangChain invents later cannot become a write that fails
+        mid-turn.
+        """
+        mapping = {
+            "human": "human",
+            "ai": "ai",
+            "system": "system",
+        }
+        return mapping.get(str(value), "system")
+
+    async def transcript(self) -> List["ChatMessage"]:
+        """Every message in this session, in the order they happened.
+
+        Returns empty for a message with no session rather than raising.
+        The schema makes `session` optional, so a partially-loaded row is
+        representable; failing the read over it would turn a cosmetic gap
+        into a 500 on a page the user is trying to read.
+        """
+        if not self.session:
+            return []
+        rows = await repo_query(
+            "SELECT * FROM chat_message WHERE session = $sid ORDER BY seq ASC, created ASC",
+            {"sid": ensure_record_id(str(self.session))},
+        )
+        return [ChatMessage(**row) for row in (rows or [])]
+
+
+async def persist_chat_messages(
+    session_id: str,
+    messages: Iterable[Any],
+) -> int:
+    """Write messages that are not stored yet. Returns how many were added.
+
+    Idempotent by record id, so it is safe to call on every turn and on
+    every read: a conversation opened on a device that predates this
+    table backfills itself the first time it is loaded, and a message
+    that arrived by sync is not written twice.
+
+    The checkpoint is left alone. It stays the resume cache; this only
+    makes the transcript durable and mergeable.
+    """
+    existing = await repo_query(
+        "SELECT VALUE id FROM chat_message WHERE session = $sid",
+        {"sid": ensure_record_id(session_id)},
+    )
+    # Compared as full record ids. Matching the bare key against the
+    # stored `chat_message:<key>` never succeeds, so every turn re-wrote
+    # the whole transcript and the conversation doubled each time.
+    have = {str(r) for r in (existing or [])}
+    added = 0
+
+    for index, message in enumerate(messages or []):
+        raw_id = getattr(message, "id", None)
+        # The positional fallback used by the response serialiser is not
+        # stable across devices - it is index-based - so it is replaced
+        # with a minted id. Anything already carrying a real one keeps it,
+        # which is what makes a sync replay idempotent.
+        key = (
+            str(raw_id)
+            if raw_id and not str(raw_id).startswith("msg_")
+            else str(uuid4())
+        )
+        record_id = f"chat_message:{key}"
+        if record_id in have:
+            continue
+        have.add(record_id)
+
+        content = getattr(message, "content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        if not content.strip():
+            continue
+
+        await repo_query(
+            """
+            CREATE $id CONTENT {
+                session: $sid, seq: $seq, role: $role,
+                content: $content, updated: time::now()
+            }
+            """,
+            {
+                "id": ensure_record_id(record_id),
+                "sid": ensure_record_id(session_id),
+                "seq": index,
+                "role": getattr(message, "type", "human"),
+                "content": content,
+            },
+        )
+        added += 1
+    return added

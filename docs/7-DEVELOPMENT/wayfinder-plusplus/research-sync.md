@@ -1129,3 +1129,78 @@ each would have made the suite lie: the fake guest was built with
 refuses a bundle from), and the "divergent repo" test committed on a
 side branch and checked `main` out again - leaving main perfectly
 fast-forwardable, so the test passed for entirely the wrong reason.
+
+---
+
+## 18. Chat transcripts as records
+
+### The blocker
+
+A conversation lived only in `data/sqlite-db/checkpoints.sqlite`, read
+through `chat_graph.get_state()`. That is a LangGraph-internal
+serialisation: opaque, keyed by internal channel names, coupled to the
+installed LangGraph version. **There is no union over a checkpoint**, so
+a session could not cross devices at all - it had to be retyped. (On the
+PC that file was 0 bytes after the recovery; the checkpoint did not
+survive it.)
+
+This is not "add another directory to the manifest". The data has to
+move somewhere mergeable before it can sync at all.
+
+### Migration 36
+
+    chat_message: id (merge key), session, seq, role, content, created
+
+The checkpoint is **not** removed. It stays the resume cache that makes
+a long conversation cheap to continue; it just stops being the only copy.
+
+`id` is generated once, at creation, and carried across devices, so
+syncing is an append-only union on record id - the shape the revlog
+already uses for review history, and the reason both devices can append
+to one conversation with no conflict. `seq` is display order only: two
+devices appending independently hand out overlapping values, which is
+expected, and ordering falls back to `created` then id.
+
+`GET /chat/sessions/{id}` prefers the table and falls back to the
+checkpoint, backfilling as it goes, so a pre-existing conversation
+becomes syncable the first time it is opened with no migration step.
+
+### The bug a live database caught
+
+    have = {str(r) for r in existing}     # "chat_message:u1"
+    record_id = "u1"                      # bare key
+    if record_id in have:                 # never true
+
+The stored id carries the table prefix and the comparison used the bare
+key, so **nothing was ever skipped and every turn rewrote the entire
+transcript** - a conversation would double each time you sent a message.
+Reading it, it looks obviously correct. It was caught by running it
+against a real SurrealDB, where `CREATE` failed on the duplicate id.
+
+### Two more, from the same run
+
+**Migration 36 was never going to run.** `AsyncMigrationManager` keeps
+hand-maintained up/down lists, and adding the `.surrealql` file does
+nothing on its own - the schema it was supposed to create simply would
+not exist. `tests/test_migrations_registered.py` now pins that every
+file on disk is referenced, that nothing references a missing file, and
+that up/down are paired and numbered without gaps.
+
+Same shape as the `~/bin` wrappers drifting from `scripts/termux-*.sh`:
+a file that exists in one place and is wired up in another, where the
+wire-up is the part that rots.
+
+**The app can update before its migration runs.** The two ship
+separately, and the phone pulls code and migrates on next start. Both
+read and write paths now tolerate `chat_message` being absent - falling
+back to the checkpoint, and never failing a completed turn over
+bookkeeping.
+
+### One more from a test mock
+
+The characterisation suite stubs `repo_query` with a single return
+value, so the new read call received a `{"out": ...}` row and `row["id"]`
+raised, 500-ing the chat page. The mock was unrealistic - but so was the
+code, which trusted its rows. Both are fixed: the read filters malformed
+rows instead of raising inside a comprehension, and a partial row is a
+degraded message rather than a failed request.

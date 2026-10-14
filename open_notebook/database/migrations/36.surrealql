@@ -1,0 +1,45 @@
+-- Migration 36: chat transcripts become records, not a checkpoint blob.
+--
+-- Why
+--
+-- A conversation lives only in `data/sqlite-db/checkpoints.sqlite`, read
+-- through `chat_graph.get_state()`. That is a LangGraph-internal
+-- serialisation: opaque, keyed by internal channel names, and coupled to
+-- the installed LangGraph version. Two of them cannot be merged - there
+-- is no union over a checkpoint - which means a chat session cannot be
+-- synced at all, only discarded and re-typed on the other device.
+--
+-- The checkpoint is not going away. It remains the resume cache that
+-- makes a long conversation cheap to continue; it just stops being the
+-- only copy. This table is the durable, mergeable record.
+--
+-- `id` is the merge key. It is generated once, at creation, and carried
+-- across devices, so syncing is an append-only union on record id -
+-- the same shape the revlog already uses for review history, and the
+-- reason both devices can append to one conversation with no conflict.
+--
+-- `seq` is the position within the session at write time. It orders a
+-- transcript for display; it is NOT a merge key. Two devices appending
+-- to the same conversation assign overlapping `seq` values, and that is
+-- expected - order falls back to `created`, then to id.
+
+-- Plain SCHEMAFULL, like every other table here. FLEXIBLE is for object
+-- *fields* in this schema (migration 15); a table declaring it is a parse
+-- error on SurrealDB 2.7. Every field below is declared, so nothing
+-- can be dropped silently.
+DEFINE TABLE IF NOT EXISTS chat_message SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS session ON chat_message TYPE record<chat_session>;
+DEFINE FIELD IF NOT EXISTS seq ON chat_message TYPE int;
+DEFINE FIELD IF NOT EXISTS role ON chat_message TYPE string
+    ASSERT $value IN ['human', 'ai', 'system'];
+DEFINE FIELD IF NOT EXISTS content ON chat_message TYPE string;
+DEFINE FIELD IF NOT EXISTS created ON chat_message TYPE datetime
+    DEFAULT time::now() VALUE time::now();
+
+-- One row per id, so a union merge can never create a duplicate even if
+-- the same message arrives twice.
+DEFINE INDEX IF NOT EXISTS chat_message_id ON chat_message FIELDS id UNIQUE;
+
+-- Every read is "this session's messages, in order".
+DEFINE INDEX IF NOT EXISTS chat_message_session ON chat_message FIELDS session;

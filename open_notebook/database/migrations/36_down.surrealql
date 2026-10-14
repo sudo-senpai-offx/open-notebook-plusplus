@@ -1,0 +1,16 @@
+-- Migration 36 rollback: drop the durable transcript table.
+--
+-- Faithful about the cost: this does not lose the conversations, because
+-- the LangGraph checkpoint still holds them. It does make them
+-- unsyncable again, and any transcript the checkpoint has since been
+-- compacted away is gone for good. Nothing else in the schema depends
+-- on this table, so the rollback is otherwise clean.
+
+DEFINE INDEX IF NOT EXISTS chat_message_session ON chat_message FIELDS session;
+DEFINE INDEX IF NOT EXISTS chat_message_id ON chat_message FIELDS id UNIQUE;
+DEFINE FIELD OVERWRITE created ON chat_message TYPE datetime;
+DEFINE FIELD OVERWRITE content ON chat_message TYPE string;
+DEFINE FIELD OVERWRITE role ON chat_message TYPE string;
+DEFINE FIELD OVERWRITE seq ON chat_message TYPE int;
+DEFINE FIELD OVERWRITE session ON chat_message TYPE record<chat_session>;
+REMOVE TABLE IF EXISTS chat_message;
