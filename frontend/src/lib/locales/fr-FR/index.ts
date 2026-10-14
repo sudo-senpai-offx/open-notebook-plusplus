@@ -366,7 +366,6 @@ export const frFR = {
     allSourcesDescShort: "Affichez toutes vos sources ici.",
     cannotSaveNoteNoNotebook: "Impossible d'enregistrer la note : ID du carnet non disponible",
     createFirstSource: "Ajoutez votre première source pour commencer à bâtir votre base de connaissances.",
-    deleteSourceConfirm: "Êtes-vous sûr de vouloir supprimer cette source ?",
     deleteConfirm: "Êtes-vous sûr de vouloir supprimer cet élément ?",
     deleteConfirmWithTitle: "Êtes-vous sûr de vouloir supprimer \"{{title}}\" ?",
     deleteSuccess: "Source supprimée avec succès. Note : Pour supprimer le fichier du stockage, vous devez activer l'option \"supprimer le fichier\" dans la page des paramètres.",

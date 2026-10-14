@@ -366,7 +366,6 @@ export const caES = {
     allSourcesDescShort: "Consulta aquí totes les teves fonts.",
     cannotSaveNoteNoNotebook: "No es pot desar la nota: l'ID del quadern no està disponible",
     createFirstSource: "Afegeix la primera font per començar a construir la teva base de coneixement.",
-    deleteSourceConfirm: "Segur que vols suprimir aquesta font?",
     deleteConfirm: "Segur que vols suprimir aquest element?",
     deleteConfirmWithTitle: "Segur que vols suprimir «{{title}}»?",
     deleteSuccess: "S'ha suprimit la font correctament. Nota: per suprimir el fitxer de l'emmagatzematge, cal activar l'opció «suprimeix el fitxer» a la pàgina de configuració.",

@@ -366,7 +366,6 @@ export const zhTW = {
     allSourcesDescShort: "在此檢視所有來源。",
     cannotSaveNoteNoNotebook: "無法儲存筆記：缺少筆記本 ID",
     createFirstSource: "新增您的第一個來源開始構建知識庫。",
-    deleteSourceConfirm: "確定要刪除此來源嗎？",
     deleteConfirm: "確定要刪除嗎？",
     deleteConfirmWithTitle: "確定要刪除 \"{{title}}\" 嗎？",
     deleteSuccess: "來源刪除成功。注意：要從儲存中刪除檔案，必須在設定頁面中啟用「刪除檔案」選項。",

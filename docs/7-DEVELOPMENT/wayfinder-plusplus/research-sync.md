@@ -789,3 +789,63 @@ module-level `pytestmark` skipif - which skipped the unit tests above it
 too. The suite reported green while testing nothing. The marker is now
 scoped to the five live tests, so the file reports 18 passed without a
 server and 23 with one.
+
+### Deleting a source: forget, and let the setting decide
+
+`Source.delete()` reads `auto_delete_files` rather than hard-coding an
+answer, so one switch governs:
+
+    auto_delete_files = "no"   (new default)  record goes, bytes stay
+    auto_delete_files = "yes"                 record goes, bytes unlinked
+
+The default flipped from "yes". A delete syncs, so the device applying
+it may be the last one holding the file; unlinking there turns someone
+else's tidy-up into permanent data loss. The setting still works for
+anyone who wants the disk back.
+
+Two deliberate asymmetries:
+
+  * a tombstone application passes `keep_blob=True` explicitly, ignoring
+    the local preference. A tombstone is *someone else's* delete
+    arriving here, and this device may hold the only copy.
+  * reading the setting fails closed toward keeping the file. An
+    unreadable preference must not become a destructive one.
+
+The polarity was inverted once on the way in - `keep_blob` was assigned
+the helper's return value directly, so "auto delete = yes" ended up
+meaning "keep". A test caught it immediately, which is the argument for
+having pinned the setting in the test at all rather than inheriting
+whatever the developer's database held.
+
+### Two unit tests that had been reading the developer's database
+
+`test_source_delete_without_file` and
+`test_source_delete_continues_on_file_error` call `Source.delete()` with
+no argument, so they now reach the settings singleton. That record is
+real, holds whatever the developer chose, and leaks: with a live
+SurrealDB the suite failed on an assertion about
+`default_embedding_option`, three fields away from anything under test.
+
+Unit tests must not depend on a developer's saved settings. All three
+default-path tests now patch `_auto_delete_files_enabled`.
+
+### Delete confirmation
+
+Audited rather than added to. Confirmation already existed in every
+destructive path - the sources list, notebooks, notes, sources column,
+transformations, sites, podcasts, credentials each have their own
+dialog - and adding more would have been churn, especially with key
+parity enforced across fourteen locales.
+
+The one genuine gap: `SourceDetailContent` used native `window.confirm`.
+It cannot be styled, has no destructive button, and says nothing about
+*which* source is about to disappear - which matters more now, because a
+delete propagates. It now uses the app's `ConfirmDialog` with the same
+title-based message the list page uses.
+
+Three tests pin the property: the first click does not delete, confirming
+does, cancelling does not. Radix's dropdown needs `PointerEvent`, which
+jsdom lacks, so the menu is mocked to plain markup like `select` and
+`tabs` already are in that file. Its removal left
+`sources.deleteSourceConfirm` unused, which a test enforces - dropped
+from all fourteen locales rather than left as dead weight.

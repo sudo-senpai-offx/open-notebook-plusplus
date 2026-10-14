@@ -420,6 +420,25 @@ class SourceInsight(ObjectModel):
         return note
 
 
+async def _auto_delete_files_enabled() -> bool:
+    """Whether the operator asked for uploaded files to be removed on delete.
+
+    Fails closed toward *keeping* the file: if the settings record cannot
+    be read, an unreadable preference must not become a destructive one.
+    """
+    from open_notebook.domain.content_settings import ContentSettings
+
+    try:
+        settings = await ContentSettings.get_instance()
+    except Exception as exc:  # noqa: BLE001 - a missing preference is not fatal
+        logger.warning(
+            f"Could not read auto_delete_files, keeping the file: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
+    return (settings.auto_delete_files or "no") == "yes"
+
+
 class Source(ObjectModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -725,25 +744,38 @@ class Source(ObjectModel):
 
         return data
 
-    async def delete(self, keep_blob: bool = True) -> bool:
+    async def delete(self, keep_blob: Optional[bool] = None) -> bool:
         """Delete source and clean up associated file, embeddings, and insights.
 
-        `keep_blob` defaults to True because deleting a source means
-        *forget it*, not *destroy it*. The record goes; the bytes stay.
-        Two reasons, and the second is the deciding one:
+        Deleting a source means *forget it*, not *destroy it*. The record
+        goes; the bytes stay unless the operator has asked otherwise.
+
+        `keep_blob` defaults to the `auto_delete_files` setting, which
+        itself now defaults to "no". Two reasons for that default:
 
           * a delete syncs. When the other device's tombstone lands here,
             this device may be the last one holding the file, and
-            unlinking would turn a delete into data loss;
+            unlinking would turn someone else's delete into permanent
+            data loss;
           * the user is reminded before deleting, so a deletion is a
-            decision rather than an accident, and a decision is
+            decision rather than an accident - and a decision stays
             reversible for as long as the file is on disk.
 
-        The cost is that `data/blobs` grows and is never reclaimed by
-        this path. Storage is cheap and portable; a wrongly destroyed
-        lecture PDF is neither. Pass keep_blob=False from an explicit
-        purge if that trade ever goes the other way.
+        The setting still exists and still works; set it to "yes" to
+        reclaim disk on delete. The cost of the default is that
+        `data/blobs` grows and is never reclaimed by this path, which
+        seems the right trade for lecture material.
+
+        Passing keep_blob explicitly overrides the setting, which is how
+        a tombstone application can guarantee it never destroys bytes
+        regardless of local preference.
         """
+        if keep_blob is None:
+            # Inverted deliberately: the setting says whether to *remove*
+            # the file, this argument says whether to *keep* it, and the
+            # setting's default of "no" has to mean "keep".
+            keep_blob = not await _auto_delete_files_enabled()
+
         # Clean up the backing file, but only if nothing else still needs
         # it. Content-addressed storage means two sources can share one
         # blob, and the unconditional unlink this replaces would have

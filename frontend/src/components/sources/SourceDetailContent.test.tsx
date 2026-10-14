@@ -14,6 +14,7 @@ import { toast } from 'sonner'
 vi.mock('@/lib/api/sources', () => ({
   sourcesApi: {
     get: vi.fn(),
+    delete: vi.fn(),
   },
 }))
 
@@ -61,6 +62,22 @@ vi.mock('@/components/ui/select', () => ({
   ),
 }))
 
+// Radix's dropdown needs PointerEvent, which jsdom does not implement, so
+// the menu can never actually be opened here. Mocked down to plain markup
+// like `select` and `tabs` already are. The menu content then renders
+// unconditionally, which is fine: what these tests care about is that the
+// delete item opens a dialog instead of deleting - not that Radix toggles.
+vi.mock('@/components/ui/dropdown-menu', () => ({
+  DropdownMenu: ({ children }: React.PropsWithChildren) => <>{children}</>,
+  DropdownMenuTrigger: ({ children }: React.PropsWithChildren) => <>{children}</>,
+  DropdownMenuContent: ({ children }: React.PropsWithChildren) => <div>{children}</div>,
+  DropdownMenuItem: ({ children, onClick }: React.PropsWithChildren<{ onClick?: () => void }>) => (
+    <button onClick={onClick}>{children}</button>
+  ),
+  DropdownMenuSeparator: () => <hr />,
+  DropdownMenuLabel: ({ children }: React.PropsWithChildren) => <div>{children}</div>,
+}))
+
 vi.mock('@/components/ui/tabs', () => ({
   Tabs: ({ children }: React.PropsWithChildren) => <div>{children}</div>,
   TabsList: ({ children }: React.PropsWithChildren) => <div>{children}</div>,
@@ -76,6 +93,7 @@ vi.mock('sonner', () => ({
 }))
 
 const mockSourcesGet = vi.mocked(sourcesApi.get)
+const mockSourcesDelete = vi.mocked(sourcesApi.delete)
 const mockListInsights = vi.mocked(insightsApi.listForSource)
 const mockCreateInsight = vi.mocked(insightsApi.create)
 const mockWaitForCommand = vi.mocked(insightsApi.waitForCommand)
@@ -135,6 +153,56 @@ describe('SourceDetailContent', () => {
       created: '2026-01-01T00:00:00Z',
       updated: '2026-01-01T00:00:00Z',
     }])
+  })
+
+  it('does not delete on the first click - it asks first', async () => {
+    // The property that matters: a delete must never fire from the menu
+    // click itself. This used to be window.confirm, which is invisible to
+    // the DOM and so to every test; ConfirmDialog can be asserted on.
+    mockSourcesGet.mockResolvedValue(loadedSource)
+    mockSourcesDelete.mockResolvedValue(undefined as never)
+
+    renderContent()
+
+    await screen.findByText('Loaded source')
+
+    const deleteItem = await screen.findByText('sources.deleteSource')
+    fireEvent.click(deleteItem)
+
+    expect(mockSourcesDelete).not.toHaveBeenCalled()
+    // The dialog is open and names the source, so the user knows what
+    // they are about to lose.
+    expect(await screen.findByText('sources.deleteConfirmWithTitle')).toBeInTheDocument()
+  })
+
+  it('deletes only after the dialog is confirmed', async () => {
+    mockSourcesGet.mockResolvedValue(loadedSource)
+    mockSourcesDelete.mockResolvedValue(undefined as never)
+    const onClose = vi.fn()
+
+    renderContent(onClose)
+
+    await screen.findByText('Loaded source')
+    fireEvent.click(await screen.findByText('sources.deleteSource'))
+    fireEvent.click(await screen.findByText('common.delete'))
+
+    await waitFor(() => {
+      expect(mockSourcesDelete).toHaveBeenCalledWith('source:loaded')
+    })
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('cancelling the dialog leaves the source alone', async () => {
+    mockSourcesGet.mockResolvedValue(loadedSource)
+    mockSourcesDelete.mockResolvedValue(undefined as never)
+
+    renderContent()
+
+    await screen.findByText('Loaded source')
+    fireEvent.click(await screen.findByText('sources.deleteSource'))
+    fireEvent.click(await screen.findByText('common.cancel'))
+
+    expect(mockSourcesDelete).not.toHaveBeenCalled()
   })
 
   it('shows the shared not-found state when the source returns 404', async () => {

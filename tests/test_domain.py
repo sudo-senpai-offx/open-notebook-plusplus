@@ -286,7 +286,14 @@ class TestSourceDomain:
 
     @pytest.mark.asyncio
     async def test_source_delete_keeps_the_file(self):
-        """Deleting a source forgets it; it does not destroy the bytes."""
+        """Deleting a source forgets it; it does not destroy the bytes.
+
+        The `auto_delete_files` setting decides, so the setting is
+        pinned rather than inherited - the developer's own database may
+        legitimately hold the opposite preference, and a test that
+        depends on that is a test that changes meaning by running it
+        from a different machine.
+        """
         # Create a temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp_file:
             tmp_file.write(b"Test content")
@@ -304,9 +311,15 @@ class TestSourceDomain:
             assert tmp_path.exists()
 
             # Mock the parent delete method to avoid database operations
-            with patch.object(
-                Source.__bases__[0], "delete", new_callable=AsyncMock
-            ) as mock_delete:
+            with (
+                patch(
+                    "open_notebook.domain.notebook._auto_delete_files_enabled",
+                    new=AsyncMock(return_value=False),
+                ),
+                patch.object(
+                    Source.__bases__[0], "delete", new_callable=AsyncMock
+                ) as mock_delete,
+            ):
                 mock_delete.return_value = True
 
                 # Delete the source
@@ -356,9 +369,15 @@ class TestSourceDomain:
         source = Source(id="source:test_no_file", title="Test Source", asset=None)
 
         # Mock the parent delete method
-        with patch.object(
-            Source.__bases__[0], "delete", new_callable=AsyncMock
-        ) as mock_delete:
+        with (
+            patch(
+                "open_notebook.domain.notebook._auto_delete_files_enabled",
+                new=AsyncMock(return_value=False),
+            ),
+            patch.object(
+                Source.__bases__[0], "delete", new_callable=AsyncMock
+            ) as mock_delete,
+        ):
             mock_delete.return_value = True
 
             # Delete should complete without error
@@ -377,9 +396,15 @@ class TestSourceDomain:
         )
 
         # Mock the parent delete method
-        with patch.object(
-            Source.__bases__[0], "delete", new_callable=AsyncMock
-        ) as mock_delete:
+        with (
+            patch(
+                "open_notebook.domain.notebook._auto_delete_files_enabled",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(
+                Source.__bases__[0], "delete", new_callable=AsyncMock
+            ) as mock_delete,
+        ):
             mock_delete.return_value = True
 
             # Delete should complete even though file doesn't exist
@@ -635,7 +660,10 @@ class TestContentSettings:
         assert settings.record_id == "open_notebook:content_settings"
         assert settings.default_content_processing_engine_doc in ("auto", "simple")
         assert settings.default_embedding_option == "ask"
-        assert settings.auto_delete_files == "yes"
+        # "no", not "yes": a source delete means forget the record, not
+        # destroy the bytes, because the delete syncs and this device may
+        # hold the only copy.
+        assert settings.auto_delete_files == "no"
         assert settings.youtube_preferred_languages is not None
         assert len(settings.youtube_preferred_languages) > 0
 

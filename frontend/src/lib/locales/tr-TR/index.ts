@@ -366,7 +366,6 @@ export const trTR = {
     allSourcesDescShort: "Tüm kaynaklarınızı burada görüntüleyin.",
     cannotSaveNoteNoNotebook: "Not kaydedilemiyor: defter kimliği mevcut değil",
     createFirstSource: "Bilgi tabanınızı oluşturmaya başlamak için ilk kaynağınızı ekleyin.",
-    deleteSourceConfirm: "Bu kaynağı silmek istediğinizden emin misiniz?",
     deleteConfirm: "Bunu silmek istediğinizden emin misiniz?",
     deleteConfirmWithTitle: "\"{{title}}\" öğesini silmek istediğinizden emin misiniz?",
     deleteSuccess: "Kaynak başarıyla silindi. Not: Dosyayı depolamadan silmek için ayarlar sayfasında \"dosyayı sil\" seçeneğini etkinleştirmeniz gerekir.",

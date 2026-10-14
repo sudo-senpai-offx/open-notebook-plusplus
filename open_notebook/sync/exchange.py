@@ -908,10 +908,12 @@ async def _apply_tombstones(
             result["tombstones_applied"] += 1
             continue
 
-        # Delete the record, not the bytes. A tombstone means "forget
-        # this", not "destroy this": the file may be the last copy on
-        # this device, and the peer that issued the delete still has it.
-        await existing.delete()
+        # Delete the record, not the bytes, and say so explicitly rather
+        # than inheriting the local auto_delete_files preference. A
+        # tombstone is someone else's delete arriving here; this device
+        # may hold the only copy of the file, and destroying it would turn
+        # a tidy-up on the phone into permanent loss on the PC.
+        await existing.delete(keep_blob=True)
         result["tombstones_applied"] += 1
         logger.info(f"Applied tombstone: deleted {tombstone.kind} {record_id}")
 

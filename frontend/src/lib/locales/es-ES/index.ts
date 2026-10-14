@@ -366,7 +366,6 @@ export const esES = {
     allSourcesDescShort: "Ve todas tus fuentes aquí.",
     cannotSaveNoteNoNotebook: "No se puede guardar la nota: ID de cuaderno no disponible",
     createFirstSource: "Agrega tu primera fuente para comenzar a construir tu base de conocimiento.",
-    deleteSourceConfirm: "¿Estás seguro de que quieres eliminar esta fuente?",
     deleteConfirm: "¿Estás seguro de que quieres eliminar esto?",
     deleteConfirmWithTitle: "¿Estás seguro de que quieres eliminar \"{{title}}\"?",
     deleteSuccess: "Fuente eliminada exitosamente. Nota: Para eliminar el archivo del almacenamiento, debes habilitar la opción \"eliminar archivo\" en la página de configuración.",

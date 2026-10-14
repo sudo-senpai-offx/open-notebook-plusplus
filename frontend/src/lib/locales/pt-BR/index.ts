@@ -366,7 +366,6 @@ export const ptBR = {
     allSourcesDescShort: "Veja todas as suas fontes aqui.",
     cannotSaveNoteNoNotebook: "Não é possível salvar nota: ID do caderno não disponível",
     createFirstSource: "Adicione sua primeira fonte para começar a construir sua base de conhecimento.",
-    deleteSourceConfirm: "Tem certeza que deseja excluir esta fonte?",
     deleteConfirm: "Tem certeza que deseja excluir isto?",
     deleteConfirmWithTitle: "Tem certeza que deseja excluir \"{{title}}\"?",
     deleteSuccess: "Fonte excluída com sucesso. Nota: Para excluir o arquivo do armazenamento, você deve habilitar a opção \"excluir arquivo\" na página de configurações.",

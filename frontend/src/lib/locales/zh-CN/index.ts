@@ -366,7 +366,6 @@ export const zhCN = {
     allSourcesDescShort: "在此查看所有来源。",
     cannotSaveNoteNoNotebook: "无法保存笔记：缺少笔记本 ID",
     createFirstSource: "添加您的第一个来源开始构建知识库。",
-    deleteSourceConfirm: "确定要删除此来源吗？",
     deleteConfirm: "确定要删除吗？",
     deleteConfirmWithTitle: "确定要删除 \"{{title}}\" 吗？",
     deleteSuccess: "来源删除成功。注意：要从存储中删除文件，必须在设置页面中启用“删除文件”选项。",

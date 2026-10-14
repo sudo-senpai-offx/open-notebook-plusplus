@@ -15,6 +15,7 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { ContentUnavailable } from '@/components/common/ContentUnavailable'
 import { getApiErrorMessage, isNotFoundError } from '@/lib/utils/error-handler'
 import { InlineEdit } from '@/components/common/InlineEdit'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
@@ -123,6 +124,7 @@ function SourceDetailContentInner({
   const loadError = loadQueryError ? (isNotFoundError(loadQueryError) ? 'not-found' : 'error') : null
   const updateSource = useUpdateSource()
   const deleteSource = useDeleteSource()
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 
   // file_available comes from the source payload; downloads may flip it later,
   // so keep it as local state synced from the query data.
@@ -402,19 +404,24 @@ function SourceDetailContentInner({
     return getYouTubeVideoId(externalHref)
   }, [externalHref])
 
+  // Confirmation is a dialog rather than window.confirm, which every
+  // other delete in the app had already moved off. Two reasons beyond
+  // consistency: the native prompt cannot be styled, cannot show a
+  // destructive button, and says nothing about *which* source is about
+  // to disappear - which matters more than usual now, because a delete
+  // propagates to the other device.
   const handleDelete = async () => {
     if (!source) return
 
-    if (confirm(t('sources.deleteSourceConfirm') || t('common.confirm'))) {
-      try {
-        // The mutation hook shows the toasts and invalidates the source
-        // queries, so a reopened dialog can't serve the deleted source from
-        // the cache.
-        await deleteSource.mutateAsync(source.id)
-        onClose?.()
-      } catch (error) {
-        console.error('Failed to delete source:', error)
-      }
+    try {
+      // The mutation hook shows the toasts and invalidates the source
+      // queries, so a reopened dialog can't serve the deleted source from
+      // the cache.
+      await deleteSource.mutateAsync(source.id)
+      setDeleteDialogOpen(false)
+      onClose?.()
+    } catch (error) {
+      console.error('Failed to delete source:', error)
     }
   }
 
@@ -473,7 +480,7 @@ function SourceDetailContentInner({
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon">
+                <Button variant="ghost" size="icon" data-testid="source-actions-menu">
                   <MoreVertical className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
@@ -504,7 +511,7 @@ function SourceDetailContentInner({
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   className="text-destructive"
-                  onClick={handleDelete}
+                  onClick={() => setDeleteDialogOpen(true)}
                 >
                   <Trash2 className="mr-2 h-4 w-4" />
                   {t('sources.deleteSource')}
@@ -873,6 +880,19 @@ function SourceDetailContentInner({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        title={t('sources.delete')}
+        description={t('sources.deleteConfirmWithTitle', {
+          title: source?.title || t('sources.untitledSource'),
+        })}
+        confirmText={t('common.delete')}
+        confirmVariant="destructive"
+        onConfirm={handleDelete}
+        isLoading={deleteSource.isPending}
+      />
     </div>
   )
 }

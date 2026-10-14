@@ -366,7 +366,6 @@ export const itIT = {
     allSourcesDescShort: "Visualizza tutte le tue fonti qui.",
     cannotSaveNoteNoNotebook: "Impossibile salvare la nota: ID quaderno non disponibile",
     createFirstSource: "Aggiungi la tua prima fonte per iniziare a costruire la tua base di conoscenza.",
-    deleteSourceConfirm: "Sei sicuro di voler eliminare questa fonte?",
     deleteConfirm: "Sei sicuro di voler eliminare questo elemento?",
     deleteConfirmWithTitle: "Sei sicuro di voler eliminare \"{{title}}\"?",
     deleteSuccess: "Fonte eliminata con successo. Nota: Per eliminare il file dallo storage, devi abilitare l'opzione \"elimina file\" nella pagina impostazioni.",

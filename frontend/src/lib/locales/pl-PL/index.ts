@@ -366,7 +366,6 @@ export const plPL = {
     allSourcesDescShort: "Tutaj zobaczysz wszystkie swoje źródła.",
     cannotSaveNoteNoNotebook: "Nie można zapisać notatki: brak dostępnego identyfikatora notatnika",
     createFirstSource: "Dodaj pierwsze źródło, aby zacząć budować bazę wiedzy.",
-    deleteSourceConfirm: "Czy na pewno chcesz usunąć to źródło?",
     deleteConfirm: "Czy na pewno chcesz to usunąć?",
     deleteConfirmWithTitle: "Czy na pewno chcesz usunąć „{{title}}”?",
     deleteSuccess: "Źródło usunięte pomyślnie. Uwaga: aby usunąć plik z magazynu, musisz włączyć opcję „usuń plik” na stronie ustawień.",

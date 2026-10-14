@@ -17,7 +17,12 @@ class ContentSettings(RecordModel):
         "ask", description="Default Embedding Option for Vector Search"
     )
     auto_delete_files: Optional[Literal["yes", "no"]] = Field(
-        "yes", description="Auto Delete Uploaded Files"
+        "no",
+        description=(
+            "Auto Delete Uploaded Files. Defaults to no: a source "
+            "delete means forget the record, not destroy the bytes, because "
+            "the delete syncs and this device may hold the only copy."
+        ),
     )
     docling_ocr: Optional[bool] = Field(
         True,

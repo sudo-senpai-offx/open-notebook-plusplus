@@ -364,7 +364,6 @@ export const enUS = {
     allSourcesDescShort: "View all your sources here.",
     cannotSaveNoteNoNotebook: "Cannot save note: notebook ID not available",
     createFirstSource: "Add your first source to start building your knowledge base.",
-    deleteSourceConfirm: "Are you sure you want to delete this source?",
     deleteConfirm: "Are you sure you want to delete this?",
     deleteConfirmWithTitle: "Are you sure you want to delete \"{{title}}\"?",
     deleteSuccess: "Source deleted successfully. Note: To delete the file from storage, you must enable checking the \"delete file\" option in the settings page.",

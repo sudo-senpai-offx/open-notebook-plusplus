@@ -366,7 +366,6 @@ export const jaJP = {
     allSourcesDescShort: "すべてのソースを表示します。",
     cannotSaveNoteNoNotebook: "ノートを保存できません：ノートブックIDが利用できません",
     createFirstSource: "最初のソースを追加してナレッジベースの構築を始めましょう。",
-    deleteSourceConfirm: "このソースを削除しますか？",
     deleteConfirm: "削除しますか？",
     deleteConfirmWithTitle: "「{{title}}」を削除しますか？",
     deleteSuccess: "ソースを削除しました。注意：ストレージからファイルを削除するには、設定ページで「ファイルを削除」オプションを有効にする必要があります。",

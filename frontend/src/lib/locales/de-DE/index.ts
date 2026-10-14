@@ -369,7 +369,6 @@ export const deDE = {
     allSourcesDescShort: "Hier findest du alle deine Quellen.",
     cannotSaveNoteNoNotebook: "Notiz kann nicht gespeichert werden: Notebook-ID nicht verfügbar",
     createFirstSource: "Füge deine erste Quelle hinzu, um deine Wissensbasis aufzubauen.",
-    deleteSourceConfirm: "Möchtest du diese Quelle wirklich löschen?",
     deleteConfirm: "Möchtest du das wirklich löschen?",
     deleteConfirmWithTitle: "Möchtest du „{{title}}“ wirklich löschen?",
     deleteSuccess: "Quelle erfolgreich gelöscht. Hinweis: Um die Datei auch aus dem Speicher zu löschen, musst du in den Einstellungen die Option „Datei löschen“ aktivieren.",
