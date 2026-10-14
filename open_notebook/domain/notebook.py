@@ -725,13 +725,30 @@ class Source(ObjectModel):
 
         return data
 
-    async def delete(self) -> bool:
-        """Delete source and clean up associated file, embeddings, and insights."""
+    async def delete(self, keep_blob: bool = True) -> bool:
+        """Delete source and clean up associated file, embeddings, and insights.
+
+        `keep_blob` defaults to True because deleting a source means
+        *forget it*, not *destroy it*. The record goes; the bytes stay.
+        Two reasons, and the second is the deciding one:
+
+          * a delete syncs. When the other device's tombstone lands here,
+            this device may be the last one holding the file, and
+            unlinking would turn a delete into data loss;
+          * the user is reminded before deleting, so a deletion is a
+            decision rather than an accident, and a decision is
+            reversible for as long as the file is on disk.
+
+        The cost is that `data/blobs` grows and is never reclaimed by
+        this path. Storage is cheap and portable; a wrongly destroyed
+        lecture PDF is neither. Pass keep_blob=False from an explicit
+        purge if that trade ever goes the other way.
+        """
         # Clean up the backing file, but only if nothing else still needs
         # it. Content-addressed storage means two sources can share one
         # blob, and the unconditional unlink this replaces would have
         # deleted bytes the surviving source still reads from.
-        if self.asset and self.asset.file_path:
+        if self.asset and self.asset.file_path and not keep_blob:
             file_path = Path(self.asset.file_path)
             sha256 = self.asset.sha256
             try:

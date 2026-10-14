@@ -145,6 +145,12 @@ class TestGuardIsWiredIn:
 
         monkeypatch.delenv(repo.ALLOW_BULK_DELETE_ENV, raising=False)
         monkeypatch.setenv("SURREAL_NAMESPACE", REAL)
+        # Point at a closed port rather than relying on SURREAL_URL being
+        # absent. When a developer or CI exports a live URL, the query
+        # succeeds, nothing raises, and this test fails for a reason that
+        # has nothing to do with the guard - which is how a battery stops
+        # being worth reading.
+        monkeypatch.setenv("SURREAL_URL", "ws://127.0.0.1:9/rpc")
 
         # No UnscopedDeleteError: whatever happens next is the database
         # being unavailable, which is exactly the point - the guard let

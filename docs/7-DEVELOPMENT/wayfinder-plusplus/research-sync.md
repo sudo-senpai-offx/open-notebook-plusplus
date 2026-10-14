@@ -632,3 +632,112 @@ real lecture content at confidence 88, in about a minute for 42 pages.
     OPEN_NOTEBOOK_OCR_BIN=tesseract    binary to exec
     OPEN_NOTEBOOK_OCR_DPI=200          clamped to 150-400
     OPEN_NOTEBOOK_OCR_TIMEOUT=300
+
+---
+
+## 15. Tombstones: making a deletion survive the round trip
+
+### The bug
+
+Delete a source on the phone, sync, and it comes back. The PC never
+learned of the deletion, so it exported its copy again and the import
+recreated the record. The user watches their own delete silently
+un-happen, and the second time they lose trust in every other delete.
+
+### Why not just diff the manifest
+
+Because absence is not information. Git cannot tell "never exported"
+from "deleted", and neither can a file listing. A deletion has to be
+written down explicitly.
+
+    tombstones/source-abc123.json
+    {"id": "source:abc123", "kind": "sources",
+     "updated": "2026-10-14T18:30:00+00:00", "deleted": true,
+     "sha256": "9f2c..."}
+
+### Where they come from: the export sweep
+
+Not from the delete methods. `export_all` compares the records that
+exist now against the json files the manifest already holds, and
+tombstones everything that vanished - then removes the stale file so
+the manifest stops carrying a record that no longer exists.
+
+This was the deliberate choice. Poking `Source.delete()`,
+`Notebook.delete()`, the notebook cascade, the UI routes and whatever
+script the user writes next would cover the four paths already known
+about and miss the fifth without a sound. The sweep catches every
+route, including ones nobody remembered to instrument, and it lives in
+one place instead of five.
+
+### How they resolve
+
+By the rule that was already there. `import_all` is last-write-wins on
+`updated`; a tombstone is compared the same way.
+
+  * tombstone newer than the local record -> delete it
+  * local record newer than the tombstone -> ignore the tombstone
+
+That second case is the point of the design rather than a caveat. Delete
+is a write like any other, so the most recent activity wins whichever
+device it happened on - and editing a source after someone else deleted
+it brings it back. `tombstones_overridden_by_local_edit` is reported
+rather than hidden, because "my delete came back" needs to be
+distinguishable from "the delete never arrived".
+
+### The clock problem
+
+Two devices, two clocks. A tombstone stamped with a naive `now()` loses
+to a record the other device touched a minute ago if this device's clock
+runs an hour behind - so the user's own deletion bounces back.
+
+Tombstones are therefore stamped `max(now, record.updated + 1s)`,
+reading the timestamp from the manifest file being tombstoned. This
+makes the local delete authoritative regardless of what the other
+clock says.
+
+### Forget, not destroy
+
+`Source.delete()` used to unlink the blob, refcounted against other
+sources sharing it. That is now opt-in (`keep_blob=False`); the default
+keeps the bytes, because a delete that syncs means the device applying
+it may be the last one holding the file. Unlinking would turn someone
+else's delete into permanent data loss.
+
+The cost is that `data/blobs` is never reclaimed by this path. Storage
+is cheap and portable; a wrongly destroyed lecture PDF is neither.
+
+### Retention: forever, deliberately
+
+Tombstones are a few dozen bytes and they ride in git, so the cost of
+keeping them is noise. The reason not to prune is not disk - it is that
+a purged tombstone cannot protect against a device that was offline
+while it existed. That device re-exports its stale copy, finds nothing
+local to compare against, and the record comes back from the dead.
+Forever is the only setting that cannot lose a deletion.
+`prune_tombstones()` exists but is wired to nothing automatic.
+
+### A gap, stated plainly
+
+Notebooks sync by slug through a single `notebooks/index.json` and
+carry no timestamp of their own, so they get no recency comparison and
+no tombstone kind is resolved for them yet. Notes, cards and sources -
+the things with an `updated` - are covered. A deleted notebook still
+resurrects on the next import.
+
+### Verified
+
+`tests/test_sync_tombstones.py` runs against a live SurrealDB with two
+namespaces standing in for two devices, because a mocked `repo_query`
+agrees with everything interesting. Two failures during development
+were both the test's fault rather than the code's, and both are worth
+recording because they would have made the suite lie:
+
+  * switching to the "phone" namespace *before* running the PC's export,
+    so the export shipped an empty manifest;
+  * a fixture that minted a fresh namespace on every call, making
+    "switch back to the PC" land in an empty database - the deletion
+    then reported `already_absent` and the real behaviour went untested.
+
+A third was real: the assertion compared a tombstone stamped 12:00
+against a save made at 10:35 UTC, so the ordering depended on the wall
+clock rather than on the rule being tested.

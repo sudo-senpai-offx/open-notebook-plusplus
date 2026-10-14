@@ -20,17 +20,24 @@ mistake this module avoids:
   * Markdown is Obsidian interop (see `api/routers/notes.py` export and
     `open_notebook/vault/ingest.py`). Useful to a human, lossy for us.
 
-Sources are NOT synced here. They are ingested documents whose vectors
-live outside the record, so a JSON copy would arrive with no embeddings
-and no way to tell whether the original still exists. Files already have
-a better transport: the vault ingest. Duplicating that here would create
-orphaned embeddings and near-duplicate content.
+Sources sync as metadata plus a content hash; the bytes travel over the
+blob channel and are keyed by that hash. Embeddings and chunk text are
+never transported - they are recomputed from `full_text` with whatever
+embedding model the receiving device runs. See `export_all` for why
+excluding sources outright was the wrong call.
+
+Deletions are tombstoned. Absence is not information, so a record that
+went away is written down explicitly and resolved by the same
+last-write-wins rule as everything else. See `sync.tombstones`.
 
 Conflict policy, and its one acknowledged hole:
 
   * Note: the record with the later `updated` wins. Two devices editing
     the same note in the same instant lose one edit; `updated` is
     second-resolution and there is no merge.
+  * Deletion: a tombstone, compared by the same rule. Newer tombstone
+    deletes the record; a record edited after the delete comes back.
+    Delete is a write like any other, not a permanent verdict.
   * Card content: last-write-wins, same rule.
   * Card schedule: the revlog is a **union**, deduplicated on
     (card_id, reviewed_at, rating, duration_ms), because review history
@@ -61,6 +68,7 @@ from pydantic import BaseModel
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Asset, Source
 from open_notebook.storage.blobs import resolve_blob_path
+from open_notebook.sync import tombstones
 
 # Bumped to 2 when sources entered the manifest. A v1 repo simply has no
 # `sources/` directory, which imports as "no sources" rather than an
@@ -304,6 +312,21 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
         encoding="utf-8",
     )
 
+    # Deletions are detected here rather than in each delete method.
+    # Comparing the manifest against what exists now catches every route
+    # that removes a record - the UI endpoint, the notebook cascade, a
+    # script - including ones nobody remembered to instrument. Poking
+    # the delete methods would cover the ones already known about and
+    # miss the next one silently.
+    removed = tombstones.sweep(
+        root,
+        {
+            NOTES_DIR: [str(n.id) for n in notes],
+            CARDS_DIR: [str(c.id) for c in cards],
+            SOURCES_DIR: [str(s.id) for s in sources],
+        },
+    )
+
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "device": device,
@@ -313,6 +336,7 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             "sources": len(sources),
             "revlog": len(revlog_rows or []),
             "notebooks": len(notebook_names),
+            "tombstoned": len(removed),
         },
         # Sources whose bytes this device does not hold. The blob channel
         # uses it to decide what to ask for; it is informational in git.
@@ -475,6 +499,12 @@ async def import_all(
         "missing_notebooks": [],
         "revlog_added": 0,
         "revlog_duplicates": 0,
+        # Deletions carried by the peer. `overridden_by_local_edit` is
+        # the record coming back because this device edited it after the
+        # delete - correct, and worth seeing rather than hiding.
+        "tombstones_applied": 0,
+        "tombstones_overridden_by_local_edit": 0,
+        "tombstones_already_absent": 0,
         "errors": [],
         "dry_run": dry_run,
     }
@@ -666,7 +696,67 @@ async def import_all(
     result["revlog_added"] = revlog_result[0]
     result["revlog_duplicates"] = revlog_result[1]
     result["missing_notebooks"] = sorted(missing)
+    await _apply_tombstones(root, result, dry_run)
     return result
+
+
+async def _apply_tombstones(root: Path, result: Dict[str, Any], dry_run: bool) -> None:
+    """Delete the records the peer says are gone.
+
+    Resolved by the same last-write-wins rule as everything else: a
+    tombstone newer than the local record deletes it, and a local record
+    newer than the tombstone ignores it. That second case is what makes
+    "edit after a delete brings it back" work, which is the behaviour
+    the user asked for - most recent activity wins, whichever device it
+    happened on.
+    """
+    from open_notebook.domain.flashcard import Flashcard
+    from open_notebook.domain.notebook import Note
+
+    found = tombstones.load_tombstones(root)
+    if not found:
+        return
+
+    models = {NOTES_DIR: Note, CARDS_DIR: Flashcard, SOURCES_DIR: Source}
+
+    for record_id, tombstone in found.items():
+        model = models.get(tombstone.kind)
+        if model is None:
+            # Notebooks sync by slug in a single index file and carry no
+            # timestamp of their own, so they get no recency comparison.
+            result["errors"].append(
+                f"tombstone {record_id}: unknown kind {tombstone.kind!r}"
+            )
+            continue
+
+        existing = await _maybe_get(model, record_id)
+        if existing is None:
+            result["tombstones_already_absent"] += 1
+            continue
+
+        local_updated = (
+            existing.updated.isoformat() if existing.updated is not None else None
+        )
+        if not _newer(tombstone.updated, local_updated):
+            # Edited on this device after the peer deleted it. The edit
+            # is the newer fact, so the record stays.
+            result["tombstones_overridden_by_local_edit"] += 1
+            logger.info(
+                f"Tombstone for {record_id} ignored: edited locally at "
+                f"{local_updated} after the delete at {tombstone.updated}"
+            )
+            continue
+
+        if dry_run:
+            result["tombstones_applied"] += 1
+            continue
+
+        # Delete the record, not the bytes. A tombstone means "forget
+        # this", not "destroy this": the file may be the last copy on
+        # this device, and the peer that issued the delete still has it.
+        await existing.delete()
+        result["tombstones_applied"] += 1
+        logger.info(f"Applied tombstone: deleted {tombstone.kind} {record_id}")
 
 
 def _blob_present(data: Dict[str, Any]) -> bool:

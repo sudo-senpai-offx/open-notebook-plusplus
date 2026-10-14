@@ -285,8 +285,8 @@ class TestSourceDomain:
         assert "command" in save_data
 
     @pytest.mark.asyncio
-    async def test_source_delete_cleans_up_file(self):
-        """Test that deleting a source removes the associated file."""
+    async def test_source_delete_keeps_the_file(self):
+        """Deleting a source forgets it; it does not destroy the bytes."""
         # Create a temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp_file:
             tmp_file.write(b"Test content")
@@ -316,13 +316,38 @@ class TestSourceDomain:
                 mock_delete.assert_called_once()
                 assert result is True
 
-            # Verify file was deleted
-            assert not tmp_path.exists()
+            # Verify the file survives: delete means forget, not destroy.
+            # A delete syncs, so the device applying it may be the last
+            # one holding the bytes - unlinking would turn someone
+            # else's deletion into permanent data loss.
+            assert tmp_path.exists()
 
         finally:
             # Cleanup in case test fails
             if tmp_path.exists():
                 tmp_path.unlink()
+
+    @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    async def test_source_delete_can_be_told_to_remove_the_file(self, tmp_path):
+        """The opt-out, for an explicit purge.
+
+        The default keeps the bytes because a synced delete must not be
+        able to destroy the only local copy. `keep_blob=False` exists for
+        a deliberate reclaim, and this pins that it still works.
+        """
+        file_path = tmp_path / "purgeable.txt"
+        file_path.write_text("bytes to reclaim")
+        source = Source(id="source:test_purge", asset=Asset(file_path=str(file_path)))
+
+        with patch.object(
+            Source.__bases__[0], "delete", new_callable=AsyncMock
+        ) as mock_delete:
+            mock_delete.return_value = True
+            result = await source.delete(keep_blob=False)
+
+        assert result is True
+        assert not file_path.exists()
 
     @pytest.mark.asyncio
     async def test_source_delete_without_file(self):
