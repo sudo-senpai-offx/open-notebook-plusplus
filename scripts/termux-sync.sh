@@ -145,21 +145,41 @@ cmd_blobs() {
   [ -n "$peer" ] || die "usage: $0 blobs <peer-url> pull|push"
   api_up
 
-  token="${SYNC_TOKEN:-}"
-  auth=()
-  [ -n "$token" ] && auth=(-H "X-Sync-Token: $token")
-  [ -n "$token" ] || echo "  note: SYNC_TOKEN unset - the peer will refuse if it requires one"
+  # POSIX, not bash. This runs under Termux's sh, which rejects array
+  # assignment outright - `auth=()` is a hard syntax error there and it
+  # takes the whole script down rather than one branch.
+  #
+  # Headers are passed as quoted strings rather than through an
+  # unquoted variable: splitting a header on whitespace is exactly how a
+  # token containing a space would turn into two curl arguments and a
+  # confusing failure at the peer.
+  if [ -n "${SYNC_TOKEN:-}" ]; then
+    tok_hdr="X-Sync-Token: $SYNC_TOKEN"
+  else
+    tok_hdr=""
+    echo "  note: SYNC_TOKEN unset - the peer will refuse if it requires one"
+  fi
 
   case "$action" in
     pull)
       echo "[blobs] asking $peer what we are missing"
-      curl -s -m 120 "${auth[@]}" "$peer/api/sync/blobs" > "$TMPDIR/blobs-hold.json" 2>/dev/null ||
-        die "cannot reach $peer"
+      if [ -n "$tok_hdr" ]; then
+        curl -s -m 120 -H "$tok_hdr" "$peer/api/sync/blobs" \
+          > "$TMPDIR/blobs-hold.json" 2>/dev/null || die "cannot reach $peer"
+      else
+        curl -s -m 120 "$peer/api/sync/blobs" \
+          > "$TMPDIR/blobs-hold.json" 2>/dev/null || die "cannot reach $peer"
+      fi
       echo "[blobs] downloading"
-      curl -s -m 300 -X POST "$API/api/sync/blobs/pull" "${auth[@]}" \
-        -H 'Content-Type: application/json' \
-        -d "{\"peer\":\"$peer\"}" |
-        tr ',' '\n' | grep -E 'requested|fetched|failed' | sed 's/^/       /'
+      if [ -n "$tok_hdr" ]; then
+        curl -s -m 300 -X POST "$API/api/sync/blobs/pull" -H "$tok_hdr" \
+          -H 'Content-Type: application/json' -d "{\"peer\":\"$peer\"}" |
+          tr ',' '\n' | grep -E 'requested|fetched|failed' | sed 's/^/       /'
+      else
+        curl -s -m 300 -X POST "$API/api/sync/blobs/pull" \
+          -H 'Content-Type: application/json' -d "{\"peer\":\"$peer\"}" |
+          tr ',' '\n' | grep -E 'requested|fetched|failed' | sed 's/^/       /'
+      fi
       ;;
     push)
       # A real upload, not an offer. The offer endpoint only tells the
@@ -167,9 +187,15 @@ cmd_blobs() {
       # connection back - the direction this network needs is PC to
       # phone, so the bytes have to go.
       echo "[blobs] pushing to $peer"
-      curl -s -m 900 -X POST "$API/api/sync/blobs/push" "${auth[@]}" \
-        -H 'Content-Type: application/json' -d "{\"peer\":\"$peer\"}" |
-        tr ',' '\n' | grep -E 'local|sent|failed' | sed 's/^/       /'
+      if [ -n "$tok_hdr" ]; then
+        curl -s -m 900 -X POST "$API/api/sync/blobs/push" -H "$tok_hdr" \
+          -H 'Content-Type: application/json' -d "{\"peer\":\"$peer\"}" |
+          tr ',' '\n' | grep -E 'local|sent|failed' | sed 's/^/       /'
+      else
+        curl -s -m 900 -X POST "$API/api/sync/blobs/push" \
+          -H 'Content-Type: application/json' -d "{\"peer\":\"$peer\"}" |
+          tr ',' '\n' | grep -E 'local|sent|failed' | sed 's/^/       /'
+      fi
       ;;
     *)
       die "usage: $0 blobs <peer-url> pull|push"
