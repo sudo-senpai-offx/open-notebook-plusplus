@@ -391,3 +391,88 @@ class TestPutVerifiesTheDigest:
             headers={"X-Sync-Token": "unit-test-token"},
         )
         assert response.status_code == 400
+
+
+class TestTheAppResolvesSyncedSources:
+    """A synced source has a hash and no path. The app must cope.
+
+    This is the gap that made the whole feature look broken: the blob
+    channel delivered 51 MB, the store held every byte, and the API still
+    reported `file_available: None` for all 46 sources because every
+    consumer read `asset.file_path` instead of the derived
+    `Source.local_file`. Storage worked; nothing above it did.
+    """
+
+    @pytest.fixture
+    def roots(self, store, monkeypatch):
+        """Point the storage roots at the temp store.
+
+        Without this the LFI guard rejects every path as being outside
+        the configured roots, and the test would be measuring the guard
+        rather than the resolution.
+        """
+        import api.routers.sources as routes
+
+        monkeypatch.setattr(routes, "BLOBS_FOLDER", str(store))
+        monkeypatch.setattr(routes, "UPLOADS_FOLDER", str(store / "uploads"))
+        return store
+
+    @pytest.fixture
+    def synced(self, store, roots):
+        """A source exactly as import leaves it: hash, no path."""
+        import open_notebook.domain.notebook as nb
+
+        ref = store_bytes(b"a lecture, delivered by the blob channel", "Lecture.pdf")
+        return ref, nb.Source(
+            title="Lecture",
+            asset=nb.Asset(sha256=ref.sha256, filename="Lecture.pdf", size=ref.size),
+        )
+
+    def test_no_stored_path_yet_the_file_resolves(self, synced):
+        ref, source = synced
+        assert source.asset.file_path is None, "precondition: import stores no path"
+        assert source.local_file == ref.path
+        assert source.has_local_file is True
+
+    def test_availability_is_not_none(self, synced):
+        """The value the API hands the UI."""
+        from api.routers.sources import _is_source_file_available
+
+        _ref, source = synced
+        assert _is_source_file_available(source) is True
+
+    def test_availability_is_false_when_the_blob_is_missing(self, store, roots):
+        import open_notebook.domain.notebook as nb
+
+        absent = "d" * 64
+        source = nb.Source(
+            title="Not fetched yet",
+            asset=nb.Asset(sha256=absent, filename="Later.pdf", size=10),
+        )
+        from api.routers.sources import _is_source_file_available
+
+        assert _is_source_file_available(source) is False
+
+    def test_link_source_still_reports_none(self):
+        """A link has no file and no hash; that is not an error."""
+        import open_notebook.domain.notebook as nb
+        from api.routers.sources import _is_source_file_available
+
+        source = nb.Source(title="A link", asset=nb.Asset(url="https://example.com/x"))
+        assert _is_source_file_available(source) is None
+
+    def test_the_api_response_carries_the_identity(self, synced):
+        """The UI needs the filename - blobs are stored under their hash."""
+        from api.models import AssetModel
+
+        ref, source = synced
+        model = AssetModel(
+            file_path=source.local_file,
+            url=source.asset.url,
+            sha256=source.asset.sha256,
+            filename=source.asset.filename,
+            size=source.asset.size,
+        )
+        assert model.sha256 == ref.sha256
+        assert model.filename == "Lecture.pdf"
+        assert model.file_path == ref.path

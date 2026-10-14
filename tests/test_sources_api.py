@@ -167,7 +167,17 @@ class TestRetrySourceProcessing:
         source.title = "My source"
         source.topics = []
         source.full_text = None
-        source.asset = MagicMock(file_path=None, url="https://example.com/post")
+        source.asset = MagicMock(
+            file_path=None,
+            url="https://example.com/post",
+            sha256=None,
+            filename=None,
+            size=None,
+        )
+        # local_file is the derived local path the retry route reads. A
+        # bare MagicMock returns another mock for it, which then fails the
+        # file-support check - a link source has no file, so None.
+        source.local_file = None
         source.save = AsyncMock()
         source.get_embedded_chunks = AsyncMock(return_value=0)
         mock_get.return_value = source

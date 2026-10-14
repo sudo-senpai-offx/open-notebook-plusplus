@@ -324,8 +324,17 @@ class SettingsUpdate(BaseModel):
 
 # Sources API models
 class AssetModel(BaseModel):
+    # file_path is the path on *this* device, or None when the bytes have
+    # not arrived yet. sha256 and filename are what identify the content
+    # across devices: the path is derived from the hash and is meaningless
+    # anywhere else, while the filename is the one the user recognises -
+    # blobs are stored under their hash, so without it a download would
+    # be offered as "a3f9....pdf".
     file_path: Optional[str] = None
     url: Optional[str] = None
+    sha256: Optional[str] = None
+    filename: Optional[str] = None
+    size: Optional[int] = None
 
 
 class SourceCreate(BaseModel):

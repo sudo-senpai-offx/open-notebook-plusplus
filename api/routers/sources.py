@@ -501,8 +501,11 @@ def _source_to_response(
         "title": source.title,
         "topics": source.topics or [],
         "asset": AssetModel(
-            file_path=source.asset.file_path,
+            file_path=source.local_file,
             url=source.asset.url,
+            sha256=source.asset.sha256,
+            filename=source.asset.filename,
+            size=source.asset.size,
         )
         if source.asset
         else None,
@@ -842,7 +845,9 @@ async def _resolve_source_file(source_id: str) -> tuple[str, str]:
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
 
-    file_path = source.asset.file_path if source.asset else None
+    # Derived from the content hash when there is no stored path, so a
+    # synced source downloads once its bytes have arrived.
+    file_path = source.local_file
     if not file_path:
         raise HTTPException(status_code=404, detail="Source has no file to download")
 
@@ -866,13 +871,30 @@ async def _resolve_source_file(source_id: str) -> tuple[str, str]:
 
 
 def _is_source_file_available(source: Source) -> Optional[bool]:
-    if not source or not source.asset or not source.asset.file_path:
+    """Whether this device can open the source's file right now.
+
+    Goes through ``Source.local_file`` rather than reading
+    ``asset.file_path``. A source that arrived by sync has a content hash
+    and no path - copying the sending device's path would name a file
+    that does not exist here - so the path is derived from the hash. A
+    check that only looked at the stored path reported "no file" for
+    every imported source even with the bytes sitting in the blob store.
+    """
+    if not source or not source.asset:
         return None
 
-    if not _is_within_storage_roots(source.asset.file_path):
+    local = source.local_file
+    if not local:
+        # A hash that resolves to nothing means the bytes have not
+        # arrived yet - "unavailable", not "not a file". The two mean
+        # different things to the UI: one is a transfer still pending,
+        # the other means there is nothing to wait for.
+        return False if source.asset.sha256 else None
+
+    if not _is_within_storage_roots(local):
         return False
 
-    return os.path.exists(source.asset.file_path)
+    return os.path.exists(local)
 
 
 @router.get("/sources/{source_id}", response_model=SourceResponse)
@@ -1096,11 +1118,18 @@ async def retry_source_processing(source_id: str):
         # Prepare content_state based on source asset
         content_state = {}
         if source.asset:
-            if source.asset.file_path:
+            # local_file, not asset.file_path: a synced source carries a
+            # hash and no stored path, and re-processing it needs the real
+            # local one. Without this the retry route 400s on every source
+            # that came from another device.
+            local = source.local_file
+            if local:
                 # Don't re-queue a retry for a file content-core can't extract.
-                await _assert_file_supported(source.asset.file_path)
+                await _assert_file_supported(local)
                 content_state = {
-                    "file_path": source.asset.file_path,
+                    "file_path": local,
+                    "sha256": source.asset.sha256,
+                    "filename": source.asset.filename,
                     "delete_source": False,  # Don't delete on retry
                 }
             elif source.asset.url:
