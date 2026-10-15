@@ -368,6 +368,43 @@ class TestNoCourseContentInTheRepo:
         )
         assert ignored.returncode == 0, "sync/ is not gitignored in the app repository"
 
+    def test_every_source_file_is_tracked(self):
+        """A gitignore must never silently swallow a module.
+
+        The manifest rule was once written as a bare `sync/`, which
+        matches any directory of that name - including
+        `open_notebook/sync/`, the package implementing sync. A new
+        module there was skipped by `git add -A` without a word: every
+        test passed locally, the bundle shipped without it, and the
+        phone 500'd on every call to the missing endpoint. Tracked here
+        so the next swallowed file fails loudly instead of at runtime on
+        another device.
+        """
+        import subprocess
+
+        tracked = set(
+            subprocess.run(
+                ["git", "-C", str(REPO), "ls-files"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.splitlines()
+        )
+        untracked = [
+            str(p.relative_to(REPO))
+            for p in list((REPO / "open_notebook").rglob("*.py"))
+            + list((REPO / "api").rglob("*.py"))
+            + list((REPO / "scripts").glob("*.sh"))
+            if "node_modules" not in p.parts
+            and ".venv" not in p.parts
+            and str(p.relative_to(REPO)) not in tracked
+        ]
+
+        assert untracked == [], (
+            f"{len(untracked)} source file(s) not tracked by git - "
+            f"a gitignore rule may be swallowing them: {untracked[:5]}"
+        )
+
     def test_the_sync_dir_has_its_own_remote(self, tmp_path):
         """Otherwise the content lands wherever the app repo points."""
         sync_dir = REPO / "sync"
