@@ -561,6 +561,85 @@ async def test_a_notebook_reaches_the_other_device(tmp_path, use_device):
 
 @requires_db
 @pytest.mark.asyncio
+async def test_import_files_records_into_new_notebooks(tmp_path, use_device):
+    """The phone's empty shelves, end to end.
+
+    Seven notebooks arrived on the phone with all of their sources left
+    unattached, and the import reported success. Two defects combined:
+    the notebook map was snapshotted before notebooks were imported, so
+    every slug missed on a device receiving new notebooks - and sources
+    were filed as `artifact` edges, which the notebook view never reads.
+    """
+    from open_notebook.domain.notebook import ChatSession, Note, Notebook, Source
+    from open_notebook.sync.exchange import export_all, import_all
+
+    use_device("pc")
+    await Notebook(name="Course", description="").save()
+    notebook_id = str((await _get_notebook("Course")).id)
+    source = Source(title="Filed", topics=[])
+    await source.save()
+    await source.relate("reference", notebook_id)
+    note = Note(title="Filed note", note_type="human", content="x")
+    await note.save()
+    await note.relate("artifact", notebook_id)
+    session = ChatSession(title="Filed chat")
+    await session.save()
+    await session.relate_to_notebook(notebook_id)
+    await export_all(device="pc", root=tmp_path / "pc")
+
+    use_device("phone")
+    result = await import_all(root=tmp_path / "pc")
+
+    assert result["notebooks_created"] == 1
+    assert result["missing_notebooks"] == []
+    phone_nb = str((await _get_notebook("Course")).id)
+    assert await _edge_count("reference", phone_nb) == 1, "source not filed"
+    assert await _edge_count("artifact", phone_nb) == 1, "note not filed"
+    assert await _edge_count("refers_to", phone_nb) == 1, "session not filed"
+
+
+async def _edge_count(table: str, notebook_id: str) -> int:
+    from open_notebook.database.repository import ensure_record_id, repo_query
+
+    rows = await repo_query(
+        f"SELECT count() AS c FROM {table} WHERE out = $id GROUP ALL",  # noqa: S608
+        {"id": ensure_record_id(notebook_id)},
+    )
+    return rows[0]["c"] if rows else 0
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_reimport_creates_no_duplicate_edges(tmp_path, use_device):
+    """RELATE always inserts, so filing must skip edges already present.
+
+    Otherwise every sync doubles each membership, and the notebook view
+    fills with the same source once per import.
+    """
+    from open_notebook.domain.notebook import Notebook, Source
+    from open_notebook.sync.exchange import export_all, import_all
+
+    use_device("pc")
+    await Notebook(name="Course", description="").save()
+    notebook_id = str((await _get_notebook("Course")).id)
+    source = Source(title="Filed", topics=[])
+    await source.save()
+    await source.relate("reference", notebook_id)
+    await export_all(device="pc", root=tmp_path / "pc")
+
+    use_device("phone")
+    await import_all(root=tmp_path / "pc")
+    phone_nb = str((await _get_notebook("Course")).id)
+    assert await _edge_count("reference", phone_nb) == 1
+    await import_all(root=tmp_path / "pc")
+
+    assert await _edge_count("reference", phone_nb) == 1, (
+        "second import doubled the edge"
+    )
+
+
+@requires_db
+@pytest.mark.asyncio
 async def test_a_deleted_notebook_stays_deleted(tmp_path, use_device):
     """The gap that was flagged rather than papered over."""
     from open_notebook.domain.notebook import Notebook
@@ -617,7 +696,14 @@ async def test_a_notebook_tombstone_unfiles_its_members(tmp_path, use_device):
     await import_all(root=tmp_path / "pc")
     assert await _notebook_exists("Shared course")
 
-    await (await _get_notebook("Shared course")).delete()
+    # A bare record delete, not `Notebook.delete()`: the method cascades
+    # to member notes and referring sessions, which would write one
+    # tombstone per member and prove nothing about what a *single*
+    # notebook tombstone does. The bug was the application path
+    # cascading, so the test serves exactly one notebook tombstone.
+    from open_notebook.database.repository import repo_delete
+
+    await repo_delete(str((await _get_notebook("Shared course")).id))
     await export_all(device="phone", root=tmp_path / "pc")
 
     use_device("pc")

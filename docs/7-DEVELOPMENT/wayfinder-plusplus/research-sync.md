@@ -1483,3 +1483,38 @@ status line reporting a dead server as up, a serialiser discarding a
 conversation, a script reporting nothing to do, and a pull diagnosing a
 conflict that did not exist. None were found by reading the code. Each
 was found by asking whether the number on screen was true.
+
+---
+
+## 22. The import filed nothing, twice over
+
+The phone pulled 7 notebooks and 46 sources, the import reported
+success, and every notebook opened empty.
+
+Two defects combined, in the same function. First, the notebook map was
+snapshotted before notebooks were imported, so on a device receiving new
+notebooks every slug missed: the notebooks were created and then nothing
+was ever filed into them. The comments even said the ordering mattered -
+"this has to run before the notes and sources are processed" - about the
+import, while the map it resolves against stayed stale above it.
+
+Second, sources were filed as `artifact` edges. The export tolerates both
+tables, but the notebook view reads `reference` - the table the UI
+writes. So even a fresh map would have filed every source where
+`get_sources` never looks: attached by every measure except the one the
+user sees. Sessions were worse: the manifest carried `notebook_slugs`
+for them from the start and the import ignored the field entirely, so
+synced conversations arrived unfiled anywhere.
+
+The repair is threefold: the map is rebuilt after notebooks import (and
+tombstone application uses the fresh one too); one `_attach_slugs`
+helper files notes with `artifact`, sources with `reference`, sessions
+with `refers_to` - the tables each reader actually reads; and filing runs
+for stale records as well as fresh ones, idempotently, so a repeated
+import repairs a missed attachment instead of skipping past it again.
+RELATE always inserts, so the helper skips edges already present - a
+second import must not double every membership.
+
+One existing test asserted the bug: it expected a slug in
+`missing_notebooks` that only missed because the map was stale. It now
+asserts the source is filed and nothing is missing.

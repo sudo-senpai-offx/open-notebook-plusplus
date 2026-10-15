@@ -188,9 +188,19 @@ class TestSourceManifestRoundTrip:
         assert result["sources_awaiting_blobs"] == 1, (
             "B must be told it is missing the bytes"
         )
-        assert "gtb221-basic-hematology" in result["missing_notebooks"], (
-            "the notebook slug must survive the export"
+        assert result["missing_notebooks"] == [], (
+            "the notebook arrived in the same manifest, so the slug must "
+            "resolve - it used to miss because the notebook map was "
+            "snapshotted before notebooks were imported"
         )
+        from open_notebook.database.repository import ensure_record_id, repo_query
+
+        [notebook] = await repo_query("SELECT VALUE id FROM notebook")
+        edges = await repo_query(
+            "SELECT count() AS c FROM reference WHERE out = $id GROUP ALL",
+            {"id": ensure_record_id(str(notebook))},
+        )
+        assert edges[0]["c"] == 1, "the source must be filed, not just present"
 
     @pytest.mark.asyncio
     async def test_import_creates_source_without_a_file_path(

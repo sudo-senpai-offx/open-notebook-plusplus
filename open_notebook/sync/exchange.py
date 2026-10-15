@@ -686,11 +686,6 @@ async def import_all(
     from open_notebook.domain.notebook import Note, Source
 
     root = root or sync_dir()
-
-    local_notebooks = {
-        _slug(r.get("name") or ""): str(r["id"])
-        for r in (await repo_query("SELECT id, name FROM notebook") or [])
-    }
     missing: set[str] = set()
 
     # Notebooks first. Everything downstream resolves a `notebook_slugs`
@@ -703,9 +698,23 @@ async def import_all(
     # local match was dropped into `missing_notebooks` and left there.
     notebooks_created, notebooks_updated = await _import_notebooks(root, dry_run)
 
+    # Rebuilt after the import above, not before it. The map used to be
+    # snapshotted here from the pre-import database, so on a device
+    # receiving new notebooks every slug missed: the notebooks were
+    # created and then nothing was ever filed into them. Seven notebooks
+    # arrived on the phone with all of their sources left unattached,
+    # and the import reported success.
+    async def _notebook_index() -> Dict[str, str]:
+        return {
+            _slug(r.get("name") or ""): str(r["id"])
+            for r in (await repo_query("SELECT id, name FROM notebook") or [])
+        }
+
+    local_notebooks = await _notebook_index()
+
     # Sessions next, once notebooks exist - a session's notebook_slugs
     # resolve against the same index the notes and sources use.
-    chats = await _import_chats(root, dry_run)
+    chats = await _import_chats(root, dry_run, local_notebooks, missing)
 
     result: Dict[str, Any] = {
         "notebooks_created": 0,
@@ -761,54 +770,38 @@ async def import_all(
             if (existing_note and existing_note.updated)
             else None
         )
-        if existing_note and not _newer(data.get("updated"), local_updated):
+        # Staleness gates the field upsert, not the filing: a record
+        # skipped as stale still converges its notebook membership
+        # below, which is what lets a repeated import repair a missed
+        # attachment instead of skipping past it again.
+        note_stale = bool(existing_note and not _newer(data.get("updated"), local_updated))
+        if note_stale:
             result["notes_skipped_stale"] += 1
-            continue
-        if dry_run:
+        elif dry_run:
             result["notes_created" if not existing_note else "notes_updated"] += 1
-            continue
-
-        note = existing_note or Note(
-            title=data.get("title"), content=data.get("content") or "x"
-        )
-        note.title = data.get("title")
-        note.content = data.get("content")
-        note.note_type = data.get("note_type")
-        if existing_note:
-            await note.save()
         else:
-            await _create_with_id(note, record_id)
-        await _apply_timestamp(note, data.get("updated"))
-        result["notes_updated" if existing_note else "notes_created"] += 1
-
-        slugs = data.get("notebook_slugs") or []
-        if slugs:
-            linked = (
-                await repo_query(
-                    "SELECT VALUE out FROM artifact WHERE in = $nid",
-                    {"nid": ensure_record_id(record_id)},
-                )
-                or []
+            note = existing_note or Note(
+                title=data.get("title"), content=data.get("content") or "x"
             )
-            already = {str(x) for x in linked}
-            attached = False
-            for slug in slugs:
-                nb_id = local_notebooks.get(slug)
-                if not nb_id:
-                    missing.add(slug)
-                    continue
-                if nb_id in already:
-                    attached = True
-                    continue
-                if dry_run:
-                    attached = True
-                    continue
-                try:
-                    await note.add_to_notebook(nb_id)
-                    attached = True
-                except Exception as exc:  # noqa: BLE001 - one bad edge is not fatal
-                    logger.warning(f"sync: could not attach {record_id}: {exc}")
-            if attached:
+            note.title = data.get("title")
+            note.content = data.get("content")
+            note.note_type = data.get("note_type")
+            if existing_note:
+                await note.save()
+            else:
+                await _create_with_id(note, record_id)
+            await _apply_timestamp(note, data.get("updated"))
+            result["notes_updated" if existing_note else "notes_created"] += 1
+
+        if not dry_run:
+            if await _attach_slugs(
+                record_id,
+                list(data.get("notebook_slugs") or []),
+                "artifact",
+                local_notebooks,
+                missing,
+                dry_run,
+            ):
                 result["notes_attached"] += 1
             else:
                 result["notes_unattached"] += 1
@@ -869,67 +862,66 @@ async def import_all(
             if (existing_source and existing_source.updated)
             else None
         )
-        if existing_source and not _newer(data.get("updated"), local_updated):
+        # As with notes: staleness gates the field upsert, and an
+        # outstanding blob is still counted on the stale path, but the
+        # filing below runs either way.
+        source_stale = bool(
+            existing_source and not _newer(data.get("updated"), local_updated)
+        )
+        if source_stale:
             result["sources_skipped_stale"] += 1
             # Still count an outstanding blob: staleness is about the
             # metadata, not about whether this device can open the file.
-            if _needs_blob(existing_source):
+            if existing_source and _needs_blob(existing_source):
                 result["sources_awaiting_blobs"] += 1
-            continue
-        if dry_run:
+        elif dry_run:
             result["sources_created" if not existing_source else "sources_updated"] += 1
             if data.get("sha256") and not _blob_present(data):
                 result["sources_awaiting_blobs"] += 1
             continue
-
-        # file_path is deliberately NOT taken from the manifest. It is a
-        # path on the *sending* device and means nothing here; the local
-        # path is derived from sha256 (see Source.local_file) once a blob
-        # transfer delivers the bytes. An imported source therefore has
-        # no file until then, which is truthful.
-        incoming_asset = Asset(
-            url=data.get("url"),
-            sha256=data.get("sha256"),
-            filename=data.get("filename"),
-            size=data.get("size"),
-        )
-        source = existing_source or Source(title=data.get("title"))
-        source.title = data.get("title")
-        source.topics = list(data.get("topics") or [])
-        # full_text is not transported - it is re-extracted from the
-        # file. Never overwrite a local extraction with nothing.
-        if data.get("kind") == "text" and not source.full_text:
-            source.full_text = None
-        source.asset = incoming_asset
-        if existing_source:
-            await source.save()
         else:
-            await _create_with_id(source, record_id)
-        await _apply_timestamp(source, data.get("updated"))
-        result["sources_updated" if existing_source else "sources_created"] += 1
-        if _needs_blob(source):
-            result["sources_awaiting_blobs"] += 1
+            # file_path is deliberately NOT taken from the manifest. It is a
+            # path on the *sending* device and means nothing here; the local
+            # path is derived from sha256 (see Source.local_file) once a blob
+            # transfer delivers the bytes. An imported source therefore has
+            # no file until then, which is truthful.
+            incoming_asset = Asset(
+                url=data.get("url"),
+                sha256=data.get("sha256"),
+                filename=data.get("filename"),
+                size=data.get("size"),
+            )
+            source = existing_source or Source(title=data.get("title"))
+            source.title = data.get("title")
+            source.topics = list(data.get("topics") or [])
+            # full_text is not transported - it is re-extracted from the
+            # file. Never overwrite a local extraction with nothing.
+            if data.get("kind") == "text" and not source.full_text:
+                source.full_text = None
+            source.asset = incoming_asset
+            if existing_source:
+                await source.save()
+            else:
+                await _create_with_id(source, record_id)
+            await _apply_timestamp(source, data.get("updated"))
+            result["sources_updated" if existing_source else "sources_created"] += 1
+            if _needs_blob(source):
+                result["sources_awaiting_blobs"] += 1
 
-        slugs = data.get("notebook_slugs") or []
-        if not slugs:
-            continue
-        for slug in slugs:
-            nb_id = local_notebooks.get(slug)
-            if not nb_id:
-                missing.add(slug)
-                continue
-            if dry_run:
-                continue
-            try:
-                await repo_query(
-                    "RELATE $sid->artifact->$nid",
-                    {
-                        "sid": ensure_record_id(record_id),
-                        "nid": ensure_record_id(nb_id),
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001 - one bad edge is not fatal
-                logger.warning(f"sync: could not attach source {record_id}: {exc}")
+        if not dry_run:
+            # Filed with `reference`, the table the UI writes and reads.
+            # An earlier version wrote `artifact` edges here, which the
+            # export tolerates but `get_sources` never looks at - so the
+            # import reported success while the notebook view stayed
+            # empty.
+            await _attach_slugs(
+                record_id,
+                list(data.get("notebook_slugs") or []),
+                "reference",
+                local_notebooks,
+                missing,
+                dry_run,
+            )
 
     revlog_result = await _import_revlog(root, dry_run)
     result["revlog_added"] = revlog_result[0]
@@ -951,7 +943,12 @@ async def import_all(
     return result
 
 
-async def _import_chats(root: Path, dry_run: bool) -> Dict[str, int]:
+async def _import_chats(
+    root: Path,
+    dry_run: bool,
+    local_notebooks: Dict[str, str],
+    missing: set,
+) -> Dict[str, int]:
     """Upsert chat sessions, and merge transcripts whose bytes are here.
 
     A session whose transcript has not arrived still imports. Reporting
@@ -959,6 +956,11 @@ async def _import_chats(root: Path, dry_run: bool) -> Dict[str, int]:
     and bytes travel by different routes, in that order, so "the manifest
     knows about bytes I have not fetched" is the normal state of a device
     between two syncs rather than an error to shout about.
+
+    Sessions are filed with `refers_to` edges like everything else. The
+    manifest carried `notebook_slugs` for sessions from the start, and
+    the import ignored them - so synced conversations arrived unfiled,
+    visible nowhere except a flat session list.
     """
     from open_notebook.domain.notebook import ChatSession
     from open_notebook.sync import chatsync
@@ -1007,6 +1009,19 @@ async def _import_chats(root: Path, dry_run: bool) -> Dict[str, int]:
                 data.get("updated"),
             )
 
+        # Filing, like the transcript below, runs for stale sessions
+        # too: membership is not record content, and a repeated import
+        # repairs a missed attachment instead of skipping past it.
+        if not dry_run:
+            await _attach_slugs(
+                session_id,
+                list(data.get("notebook_slugs") or []),
+                "refers_to",
+                local_notebooks,
+                missing,
+                dry_run,
+            )
+
         # Deliberately outside the branch above. Whether the metadata is
         # stale says nothing about whether the bytes have arrived: the
         # normal order is metadata first and blobs on a later pass, so a
@@ -1026,6 +1041,64 @@ async def _import_chats(root: Path, dry_run: bool) -> Dict[str, int]:
             stats["messages_added"] += added
 
     return stats
+
+
+async def _attach_slugs(
+    record_id: str,
+    slugs: List[str],
+    edge_table: str,
+    local_notebooks: Dict[str, str],
+    missing: set,
+    dry_run: bool,
+) -> bool:
+    """File a record into notebooks by slug. Returns whether it is filed.
+
+    Idempotent: edges already present are skipped, because RELATE always
+    inserts and a second import would otherwise double every membership.
+    Staleness is irrelevant here - membership is not record content, so
+    a record skipped as stale still converges its filing. That is what
+    makes a repeated import repair a missed one rather than repeating it.
+
+    The edge table is the same one the UI writes, or the filing is
+    invisible: notes attach with `artifact`, sources with `reference`,
+    sessions with `refers_to`. Writing a source as an `artifact` edge
+    files it where `get_sources` never looks - attached by every measure
+    except the one the user sees.
+    """
+    if not slugs:
+        return False
+    linked = (
+        await repo_query(
+            f"SELECT VALUE out FROM {edge_table} WHERE in = $rid",  # noqa: S608
+            {"rid": ensure_record_id(record_id)},
+        )
+        or []
+    )
+    already = {str(x) for x in linked}
+    attached = False
+    for slug in slugs:
+        nb_id = local_notebooks.get(slug)
+        if not nb_id:
+            missing.add(slug)
+            continue
+        if nb_id in already:
+            attached = True
+            continue
+        if dry_run:
+            attached = True
+            continue
+        try:
+            await repo_query(
+                f"RELATE $in->{edge_table}->$out",  # noqa: S608
+                {
+                    "in": ensure_record_id(record_id),
+                    "out": ensure_record_id(nb_id),
+                },
+            )
+            attached = True
+        except Exception as exc:  # noqa: BLE001 - one bad edge is not fatal
+            logger.warning(f"sync: could not attach {record_id}: {exc}")
+    return attached
 
 
 def _iso_str(value: Any) -> Optional[str]:
