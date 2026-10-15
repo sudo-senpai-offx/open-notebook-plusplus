@@ -87,11 +87,17 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     chromium \
     libglib2.0-0 \
     libgl1 \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# OCR for scanned PDFs (see open_notebook/ocr/). A separate layer so a
+# flaky mirror on the upgrade above can neither block it nor be blocked
+# by it: this fetches three small packages, not the world.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
     tesseract-ocr-jpn \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv using the official method
