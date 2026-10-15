@@ -774,7 +774,9 @@ async def import_all(
         # skipped as stale still converges its notebook membership
         # below, which is what lets a repeated import repair a missed
         # attachment instead of skipping past it again.
-        note_stale = bool(existing_note and not _newer(data.get("updated"), local_updated))
+        note_stale = bool(
+            existing_note and not _newer(data.get("updated"), local_updated)
+        )
         if note_stale:
             result["notes_skipped_stale"] += 1
         elif dry_run:
@@ -939,6 +941,26 @@ async def import_all(
     if not dry_run:
         tombstones.write_watermark()
         tombstones.write_baseline(_imported_baseline(root))
+
+        # Sources completed by an earlier blob transfer get their text
+        # extracted now, the way an upload would have. Without this a
+        # synced library reports every hash resolved while every file
+        # opens as "No content available" - the bytes arriving is not
+        # the same as the text existing.
+        #
+        # Guarded, not merely called: queuing is an enhancement to the
+        # import, and an enhancement must never break the thing it
+        # follows. If the scan fails, the records are still imported and
+        # the next import - or the manual /blobs/process endpoint - tries
+        # again.
+        try:
+            from open_notebook.sync.extraction import enqueue_missing_extraction
+
+            extraction = await enqueue_missing_extraction()
+            result["sources_queued_for_extraction"] = extraction["queued_count"]
+        except Exception as exc:  # noqa: BLE001 - queuing never breaks importing
+            logger.warning(f"extraction queueing failed after import: {exc}")
+            result["sources_queued_for_extraction"] = 0
 
     return result
 

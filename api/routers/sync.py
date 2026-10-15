@@ -213,7 +213,12 @@ async def sync_blob_pull(
 
     wanted = await missing_from_peer(body.peer, token)
     result = await pull_from(body.peer, wanted, token=token, limit=body.limit)
-    return {"peer": body.peer, **result}
+    # Bytes that just landed may complete sources imported earlier as
+    # metadata: queue their extraction the way an upload would.
+    from open_notebook.sync.extraction import enqueue_missing_extraction
+
+    queued = await enqueue_missing_extraction()
+    return {"peer": body.peer, **result, "extraction_queued": queued["queued_count"]}
 
 
 class SyncBlobOfferRequest(BaseModel):
@@ -262,6 +267,27 @@ async def sync_blob_push(
     ours = await local_hashes()
     result = await push_to(body.peer, ours, token=token, limit=body.limit)
     return {"peer": body.peer, "local": len(ours), **result}
+
+
+@router.post("/sync/blobs/process")
+async def sync_blob_process(token: str | None = Header(None, alias=TOKEN_HEADER)):
+    """Queue extraction for sources whose files are present but unread.
+
+    A source imported as metadata and completed later by the blob
+    channel opens as "No content available" until its text is
+    extracted - the bytes resolving is not the same as the text
+    existing. This is the hook that connects the two: same
+    `process_source` job an upload submits, same queue. Runs on the
+    device holding the files, which is the device that received them.
+    """
+    try:
+        check_token(token)
+    except SyncAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    from open_notebook.sync.extraction import enqueue_missing_extraction
+
+    return await enqueue_missing_extraction()
 
 
 @router.post("/sync/blobs/{sha256}")

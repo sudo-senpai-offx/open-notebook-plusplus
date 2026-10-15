@@ -1518,3 +1518,29 @@ second import must not double every membership.
 One existing test asserted the bug: it expected a slug in
 `missing_notebooks` that only missed because the map was stale. It now
 asserts the source is filed and nothing is missing.
+
+---
+
+## 23. The bytes arrived and nothing could open
+
+The phone reported `sources_awaiting_blobs: 0` - every hash resolved -
+while every file opened as "No content available". Both true: the detail
+view reads `source.full_text`, and it was never written. Import creates
+the record with no text (there is no file yet), the blob channel delivers
+the file, and no hook connected the two. The design said "re-extracted
+once it arrives"; nothing did it.
+
+`enqueue_missing_extraction` is the hook: sources with a resolvable file
+but no text and no command get the same `process_source` job an upload
+submits. Import calls it on every real pass; the blob pull endpoint
+calls it after fetching; a manual `/sync/blobs/process` endpoint covers
+the rest. Only never-processed sources qualify - a job that already ran,
+even failed, is left for explicit retry rather than a silent requeue
+that risks duplicating embeddings. Transformations are not re-run (empty
+list): readable text plus embeddings now, the owner's choices later.
+
+The call is guarded, not merely made: queuing is an enhancement to the
+import, andmust never break the thing it follows. The mocked import
+tests proved the point immediately - the scan hit a real database
+through their mocks and six of them failed with 403s before the guard
+existed.
