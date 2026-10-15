@@ -1712,3 +1712,25 @@ Notes verified rather than built: Day 1 and Day 2 exist with content on
 both devices, filed to 日本語勉強会 - the recovery plus the filing fix
 hold. Flashcards sync in code and suite with zero live rows on either
 side; the path is tested but never exercised with real cards.
+
+---
+
+## 29. Residue cleanup and bulk insight generation
+
+Two deletions, both operator-approved, both via model delete paths with
+tombstones propagating on push: 9 `fixture-*`/`perf-*` test-residue
+sources, then 20 off-topic web clips (sports/news/pop-sci), then 9
+orphan insights whose sources were deleted long ago on both sides (zero
+embeddings referenced them; no source page could display them).
+
+One script bug worth noting: the first residue delete passed parsed
+string ids as record-id params and silently matched nothing - "deleted
+9, remaining: 9" with the same ids still present. The documented
+SurrealDB gotcha, in a repair script, caught by counting after.
+
+Bulk generation: 6 transformations x 17 sources = 102
+`run_transformation` jobs queued through the real API (one probe first:
+a display-truncated id `[:34]` failed lookup and read as a product bug
+for a minute - paste full ids). Draining serially (worker max-tasks 1)
+over hours, unattended. Insights sync to the phone like any other kind
+once pushed.
