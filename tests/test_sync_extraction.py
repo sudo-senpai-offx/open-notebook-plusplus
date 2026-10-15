@@ -94,15 +94,70 @@ class TestTheScan:
         assert device == []
 
     @pytest.mark.asyncio
-    async def test_a_source_with_a_job_is_left_alone(self, device):
-        """Re-queueing blindly risks duplicating embeddings; a queued or
-        failed job deserves an explicit retry, not a silent requeue."""
+    async def test_a_live_job_is_left_alone(self, device):
+        """Re-queueing over a running job doubles the work."""
         from open_notebook.database.repository import ensure_record_id, repo_query
         from open_notebook.storage.blobs import store_bytes
         from open_notebook.sync.extraction import enqueue_missing_extraction
 
         ref = store_bytes(b"in flight", "flight.pdf")
         source = await _source("In flight", sha256=ref.sha256, filename="flight.pdf")
+        await repo_query(
+            "CREATE $cmd CONTENT { name: 'process_source', status: 'running' }",
+            {"cmd": ensure_record_id(f"command:{uuid.uuid4().hex[:8]}")},
+        )
+        job = (
+            await repo_query("SELECT VALUE id FROM command ORDER BY id DESC LIMIT 1")
+        )[0]
+        await repo_query(
+            "UPDATE $id SET command = $cmd",
+            {"id": ensure_record_id(str(source.id)), "cmd": ensure_record_id(str(job))},
+        )
+
+        result = await enqueue_missing_extraction()
+
+        assert result["queued_count"] == 0
+        assert result["skipped_have_job"] == 1
+        assert result["needs_retry"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_job_needs_eyes_not_a_requeue(self, device):
+        """A failure is an explicit signal; silently looping it would burn
+        a phone's CPU on a file that cannot be read."""
+        from open_notebook.database.repository import ensure_record_id, repo_query
+        from open_notebook.storage.blobs import store_bytes
+        from open_notebook.sync.extraction import enqueue_missing_extraction
+
+        ref = store_bytes(b"doomed", "doomed.pdf")
+        source = await _source("Doomed", sha256=ref.sha256, filename="doomed.pdf")
+        await repo_query(
+            "CREATE $cmd CONTENT { name: 'process_source', status: 'failed' }",
+            {"cmd": ensure_record_id(f"command:{uuid.uuid4().hex[:8]}")},
+        )
+        job = (
+            await repo_query("SELECT VALUE id FROM command ORDER BY id DESC LIMIT 1")
+        )[0]
+        await repo_query(
+            "UPDATE $id SET command = $cmd",
+            {"id": ensure_record_id(str(source.id)), "cmd": ensure_record_id(str(job))},
+        )
+
+        result = await enqueue_missing_extraction()
+
+        assert result["queued_count"] == 0
+        assert result["needs_retry"] == [str(source.id)]
+
+    @pytest.mark.asyncio
+    async def test_a_pruned_job_record_does_not_strand_its_file(self, device):
+        """Retention eats old command records. A reference pointing at a
+        missing record is old news, not a live job - the file must queue
+        again without anyone clearing anything by hand."""
+        from open_notebook.database.repository import ensure_record_id, repo_query
+        from open_notebook.storage.blobs import store_bytes
+        from open_notebook.sync.extraction import enqueue_missing_extraction
+
+        ref = store_bytes(b"orphaned", "orphaned.pdf")
+        source = await _source("Orphaned", sha256=ref.sha256, filename="orphaned.pdf")
         await repo_query(
             "UPDATE $id SET command = $cmd",
             {
@@ -113,8 +168,8 @@ class TestTheScan:
 
         result = await enqueue_missing_extraction()
 
-        assert result["queued_count"] == 0
-        assert result["skipped_have_job"] == 1
+        assert result["queued_count"] == 1
+        assert result["queued"] == [str(source.id)]
 
     @pytest.mark.asyncio
     async def test_a_hash_without_bytes_is_left_alone(self, device):

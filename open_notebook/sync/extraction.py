@@ -17,12 +17,21 @@ path as its `content_state`.
 
 What is queued, and what is not
 -------------------------------
-Only sources with empty `full_text` AND no command reference: records
-that have never been processed. A source whose job already ran - even
-one that failed - is left for an explicit retry, because re-running
-extraction blindly risks duplicating embeddings, and a failed job
-deserves a look rather than a silent requeue. Imported sources always
-qualify: they arrive with neither text nor command.
+Only sources with empty `full_text`. Of those, skipped when a live
+`process_source` job exists (new or running - re-queueing would double
+the work) or when one's record says failed or canceled (an explicit
+signal that deserves a look and an explicit retry, not a silent loop
+burning a phone's CPU on a file that cannot be read).
+
+Everything else queues: never-run, a reference whose job record is
+gone (retention prunes old commands, and a pruned record must not strand
+its file forever), a completed job that left no text, or a reference to
+some other command kind (embed jobs do not write text). Reprocessing is
+safe to repeat: extraction overwrites `full_text` and the embed stage
+deletes existing embeddings before recreating them.
+
+Imported sources always qualify on first sight: they arrive with neither
+text nor command.
 
 Transformations are not re-run here (empty list). The goal is readable
 text plus searchable embeddings; transformations are the owner's later
@@ -32,7 +41,7 @@ so insights generate against the same filing the record already has.
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from loguru import logger
 
@@ -56,6 +65,7 @@ async def enqueue_missing_extraction(limit: int = 0) -> Dict[str, object]:
     )
 
     queued: List[str] = []
+    needs_retry: List[str] = []
     skipped_have_text = 0
     skipped_have_job = 0
     skipped_no_file = 0
@@ -65,9 +75,23 @@ async def enqueue_missing_extraction(limit: int = 0) -> Dict[str, object]:
         if text:
             skipped_have_text += 1
             continue
+        record_id = str(row.get("id"))
         if row.get("command"):
-            skipped_have_job += 1
-            continue
+            reason = await _skip_reason(str(row["command"]))
+            if reason == "in flight":
+                skipped_have_job += 1
+                continue
+            if reason == "needs a look":
+                # Failed or canceled: a human decision, not an automatic
+                # requeue that burns a phone's CPU on an unreadable file.
+                # Recorded so the caller can show which files are waiting
+                # on their owner.
+                skipped_have_job += 1
+                needs_retry.append(record_id)
+                continue
+            # No record (retention pruned it), a completed job that left
+            # no text, or some other command kind: none of these wrote
+            # text, so all fall through to the queue below.
 
         asset = row.get("asset") or {}
         if not asset.get("sha256"):
@@ -124,7 +148,39 @@ async def enqueue_missing_extraction(limit: int = 0) -> Dict[str, object]:
     return {
         "queued": queued,
         "queued_count": len(queued),
+        "needs_retry": needs_retry,
         "skipped_have_text": skipped_have_text,
         "skipped_have_job": skipped_have_job,
         "skipped_no_file": skipped_no_file,
     }
+
+
+async def _skip_reason(command_ref: str) -> Optional[str]:
+    """Why not queue over this command reference, or None to queue.
+
+    `in flight` - a live `process_source` job exists; re-queueing would
+    double the work. `needs a look` - it failed or was canceled, which
+    is an explicit signal deserving eyes before any retry. Anything
+    else (no record, completed without text, another command kind)
+    means no text was ever written by it, so queue.
+    """
+    from open_notebook.database.repository import ensure_record_id, repo_query
+
+    try:
+        rows = await repo_query(
+            "SELECT name, status FROM command WHERE id = $cid",
+            {"cid": ensure_record_id(command_ref)},
+        )
+    except Exception as exc:  # noqa: BLE001 - unreadable is queueable
+        logger.warning(f"could not read command {command_ref}: {exc}")
+        return None
+    if not rows:
+        return None
+    job = rows[0]
+    if (job.get("name") or "") != "process_source":
+        return None
+    if job.get("status") in ("new", "running"):
+        return "in flight"
+    if job.get("status") in ("failed", "canceled"):
+        return "needs a look"
+    return None
