@@ -60,7 +60,7 @@ import re
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from loguru import logger
 from pydantic import BaseModel
@@ -200,6 +200,18 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     cards: List[Flashcard] = await Flashcard.get_all()
     sources: List[Source] = await Source.get_all()
 
+    # What this device has demonstrably seen, per manifest kind. Both
+    # sweeps below are gated on it: files that arrived by fetch without
+    # an import are the normal state between two syncs, not deletions,
+    # and only ids inside the baseline may be tombstoned. No baseline
+    # means never imported, and a device that has never imported
+    # tombstones nothing - however old the entries are.
+    baseline = tombstones.read_baseline() or {}
+    known = {kind: set(ids or []) for kind, ids in baseline.items()}
+    known_slugs: Optional[Set[str]] = (
+        set(known[NOTEBOOKS]) if NOTEBOOKS in known else None
+    )
+
     # Notebooks are referenced by slug, not id: a record id is per-database
     # and means nothing on the other device. One query each rather than
     # one per note.
@@ -248,7 +260,15 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     # believed existed - there would be nothing left to detect a
     # deletion against. Per-record files are immune to this because each
     # is its own baseline.
-    tombstones.sweep_notebooks(root, NOTEBOOKS, notebook_entries.keys())
+    #
+    # Gated on the baseline and counted. An earlier version discarded
+    # this return value and counted a second sweep placed after the
+    # index rewrite instead - which could find nothing by construction,
+    # since the fresh index lists exactly what is live. Seven tombstones
+    # were written here while the manifest reported `tombstoned: 0`.
+    notebook_removed = tombstones.sweep_notebooks(
+        root, NOTEBOOKS, notebook_entries.keys(), known_slugs=known_slugs
+    )
 
     _write_json(
         root / NOTEBOOKS,
@@ -363,7 +383,12 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     # script - including ones nobody remembered to instrument. Poking
     # the delete methods would cover the ones already known about and
     # miss the next one silently.
-    removed = tombstones.sweep(
+    #
+    # `notebook_removed` (counted at the pre-index sweep above) joins the
+    # per-record sweep here, so the manifest's `tombstoned` count is what
+    # was actually written - never a subset of it.
+    removed = notebook_removed
+    removed += tombstones.sweep(
         root,
         {
             NOTES_DIR: [str(n.id) for n in notes],
@@ -375,8 +400,8 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             # conversation reappears with no action taken.
             CHAT_DIR: list(chat_entries),
         },
+        known=known,
     )
-    removed += tombstones.sweep_notebooks(root, NOTEBOOKS, notebook_entries.keys())
 
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -418,6 +443,20 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
         ),
     }
     _write_json(root / MANIFEST, manifest)
+
+    # Record what left this device. A locally-created-then-deleted record
+    # must be tombstonable even if it was never imported - the baseline
+    # is what this device knows about, from either direction, and an
+    # export is knowledge leaving.
+    tombstones.write_baseline(
+        {
+            NOTES_DIR: [str(n.id) for n in notes],
+            CARDS_DIR: [str(c.id) for c in cards],
+            SOURCES_DIR: [str(s.id) for s in sources],
+            CHAT_DIR: list(chat_entries),
+            NOTEBOOKS: sorted(notebook_entries.keys()),
+        }
+    )
     return manifest
 
 
@@ -901,10 +940,13 @@ async def import_all(
     await _apply_tombstones(root, result, dry_run, local_notebooks)
 
     # Only a completed import arms the export sweep. Until this runs,
-    # nothing on this device may be tombstoned - see `is_deletable`,
-    # which explains what happens otherwise.
+    # nothing on this device may be tombstoned: with no baseline the
+    # sweeps have nothing they are allowed to forget. The baseline
+    # records what arrived, keyed the same way the sweeps look things
+    # up - record ids for files, slugs for the shared notebook index.
     if not dry_run:
         tombstones.write_watermark()
+        tombstones.write_baseline(_imported_baseline(root))
 
     return result
 
@@ -990,6 +1032,34 @@ def _iso_str(value: Any) -> Optional[str]:
     return value.isoformat() if value is not None else None
 
 
+def _imported_baseline(root: Path) -> Dict[str, List[str]]:
+    """The ids the manifest currently names, for the baseline.
+
+    Read from the files just imported, not from the database: the point
+    is recording what this device has *seen*, and the files are the
+    record of that. Keyed exactly as the sweeps look things up.
+    """
+    snapshot: Dict[str, List[str]] = {}
+    for directory in (NOTES_DIR, CARDS_DIR, SOURCES_DIR, CHAT_DIR):
+        folder = root / directory
+        ids: List[str] = []
+        if folder.is_dir():
+            for path in sorted(folder.glob("*.json")):
+                data = _read_json(path)
+                if data and data.get("id"):
+                    ids.append(str(data["id"]))
+        snapshot[directory] = ids
+
+    slugs: List[str] = []
+    index = _read_json(root / NOTEBOOKS)
+    if index:
+        for entry in index.get("notebooks") or []:
+            if entry.get("slug"):
+                slugs.append(str(entry["slug"]))
+    snapshot[NOTEBOOKS] = slugs
+    return snapshot
+
+
 async def _import_notebooks(root: Path, dry_run: bool) -> Tuple[int, int]:
     """Create or rename notebooks to match the manifest.
 
@@ -1062,14 +1132,24 @@ async def _apply_notebook_tombstone(
     dry_run: bool,
     local_notebooks: Dict[str, str],
 ) -> None:
-    """Delete a notebook the peer says is gone, matched by slug.
+    """Forget a notebook the peer says is gone, matched by slug.
 
     Same rule as everything else, keyed on the slug rather than a record
     id because the id is per-database and means nothing on the other
-    device. Deleting a notebook cascades to its notes; the cascaded
-    notes are tombstoned in turn by this device's next export sweep, so
-    the deletion propagates one level at a time rather than needing the
-    cascade to be transmitted.
+    device. The notebook record goes, but its members only become
+    unfiled: notes, sessions and sources survive with their edges
+    removed, and a later export carries them as unattached rather than
+    deleting them anywhere.
+
+    Unlinking rather than cascading is the whole point. This used to
+    call `notebook.delete()`, whose cascade destroyed member notes and
+    referring sessions - 7 notebook tombstones applied on the PC deleted
+    2 notes and 4 sessions with them, while the phone still held the
+    notes under the same ids. Same records, dead on one side and alive
+    on the other, is the worst possible outcome: a divergent destruction
+    that last-write-wins cannot reconcile, because neither side knows
+    the other disagrees. A folder being forgotten must never destroy its
+    contents.
     """
     from open_notebook.domain.notebook import Notebook
 
@@ -1095,13 +1175,23 @@ async def _apply_notebook_tombstone(
         result["tombstones_applied"] += 1
         return
 
-    # delete_exclusive_sources stays False: a source that merely hung
-    # off this notebook still exists, it just stops being filed here.
-    # Tombstoning it would delete the user's material because they
-    # tidied a folder.
-    await notebook.delete(delete_exclusive_sources=False)
+    # Unlink every member edge, then delete the bare record with
+    # repo_delete - deliberately not `notebook.delete()`, whose cascade
+    # destroys member notes and referring sessions. A source, note or
+    # session that merely hung off this notebook still exists; it just
+    # stops being filed here. Deleting the user's material because they
+    # tidied a folder is the failure this is written against.
+    notebook_record = ensure_record_id(notebook_id)
+    for edge_table in ("artifact", "reference", "refers_to"):
+        await repo_query(
+            f"DELETE {edge_table} WHERE out = $nid",  # noqa: S608
+            {"nid": notebook_record},
+        )
+    from open_notebook.database.repository import repo_delete
+
+    await repo_delete(notebook_id)
     result["tombstones_applied"] += 1
-    logger.info(f"Applied notebook tombstone: deleted notebook {slug}")
+    logger.info(f"Applied notebook tombstone: forgot notebook {slug}, members unfiled")
 
 
 async def _apply_tombstones(

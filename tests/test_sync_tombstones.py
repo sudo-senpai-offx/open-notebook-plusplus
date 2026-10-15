@@ -26,7 +26,6 @@ import pytest
 
 from open_notebook.sync.tombstones import (
     TOMBSTONES_DIR,
-    is_deletable,
     load_tombstones,
     prune_tombstones,
     sweep,
@@ -46,43 +45,29 @@ def _seed(root: Path, name: str, record_id: str, **fields) -> None:
 
 
 @pytest.fixture(autouse=True)
-def synced_device(monkeypatch, request, tmp_path):
-    """Arm the sweep for tests that are not about the watermark.
+def synced_device(monkeypatch, tmp_path):
+    """Isolate every test from the developer's own data directory.
 
-    A device that has completed an import is the precondition for any
-    tombstone existing at all. Tests written before the watermark
-    assumed an always-armed device; this makes that explicit instead of
-    restoring the old, unsafe assumption. The watermark tests override it.
-
-    DATA_FOLDER is redirected as well, and that is not tidiness. Patching
-    `read_watermark` to a far-future date means any `import_all` under
-    this fixture reads 2099, finds it newer than now, and *writes* it -
-    to wherever DATA_FOLDER points, which by default is the developer's
-    own data directory. That left the real PC with a 2099 watermark:
-    the sweep fully armed, so every manifest entry looked deletable,
-    which is precisely the failure the watermark exists to prevent.
+    Export and import both record the sync baseline under DATA_FOLDER,
+    so without this they would write into the repository's own data/ -
+    which is how the real PC once ended up with a 2099 watermark and a
+    fully armed sweep. The redirect is the whole fixture now: arming the
+    sweep is each test's own job, either by declaring what the device
+    saw (`known=`) or by going through export and import, which record
+    the baseline themselves.
     """
     monkeypatch.setenv("DATA_FOLDER", str(tmp_path / "data"))
-    # The watermark tests set the watermark themselves - including to
-    # "none" and to real values - so arming it here would overwrite the
-    # thing under test.
-    if request.node.cls is TestSyncWatermark:
-        return
-
-    from open_notebook.sync import tombstones
-
-    monkeypatch.setattr(
-        tombstones,
-        "read_watermark",
-        lambda: _parse("2099-01-01T00:00:00+00:00"),
-    )
 
 
 class TestSweep:
     def test_a_vanished_record_is_tombstoned(self, tmp_path):
         _seed(tmp_path, "sources", "source:gone", sha256="abc123")
 
-        written = sweep(tmp_path, {"sources": ["source:alive"]})
+        written = sweep(
+            tmp_path,
+            {"sources": ["source:alive"]},
+            known={"sources": {"source:gone"}},
+        )
 
         assert [t.id for t in written] == ["source:gone"]
         assert written[0].sha256 == "abc123"
@@ -90,7 +75,11 @@ class TestSweep:
     def test_a_live_record_is_left_alone(self, tmp_path):
         _seed(tmp_path, "sources", "source:alive")
 
-        written = sweep(tmp_path, {"sources": ["source:alive"]})
+        written = sweep(
+            tmp_path,
+            {"sources": ["source:alive"]},
+            known={"sources": {"source:alive"}},
+        )
 
         assert written == []
         assert not (tmp_path / TOMBSTONES_DIR).exists()
@@ -100,7 +89,7 @@ class TestSweep:
         """Otherwise every future import deletes the record again."""
         _seed(tmp_path, "sources", "source:gone")
 
-        sweep(tmp_path, {"sources": []})
+        sweep(tmp_path, {"sources": []}, known={"sources": {"source:gone"}})
 
         assert not (tmp_path / "sources" / "source-gone.json").exists()
         assert load_tombstones(tmp_path)
@@ -110,7 +99,7 @@ class TestSweep:
         (tmp_path / "sources").mkdir(parents=True)
         (tmp_path / "sources" / "source-broken.json").write_text("{not json")
 
-        assert sweep(tmp_path, {"sources": []}) == []
+        assert sweep(tmp_path, {"sources": []}, known={"sources": set()}) == []
 
     def test_a_missing_directory_is_not_an_error(self, tmp_path):
         assert sweep(tmp_path, {"sources": ["source:x"]}) == []
@@ -122,7 +111,11 @@ class TestSweep:
             json.dumps({"id": "note:n", "updated": STAMP})
         )
 
-        written = sweep(tmp_path, {"sources": [], "notes": []})
+        written = sweep(
+            tmp_path,
+            {"sources": [], "notes": []},
+            known={"sources": {"source:s"}, "notes": {"note:n"}},
+        )
 
         assert {t.id for t in written} == {"source:s", "note:n"}
 
@@ -274,7 +267,12 @@ class TestNotebookSweep:
             tmp_path, [("genetics-301", "Genetics 301"), ("dropped", "Dropped")]
         )
 
-        written = sweep_notebooks(tmp_path, "notebooks/index.json", ["genetics-301"])
+        written = sweep_notebooks(
+            tmp_path,
+            "notebooks/index.json",
+            ["genetics-301"],
+            known_slugs={"genetics-301", "dropped"},
+        )
 
         assert len(written) == 1
         assert written[0].id == notebook_id("dropped")
@@ -284,7 +282,9 @@ class TestNotebookSweep:
     def test_the_dead_entry_is_dropped_from_the_index(self, tmp_path):
         self._index(tmp_path, [("kept", "Kept"), ("dropped", "Dropped")])
 
-        sweep_notebooks(tmp_path, "notebooks/index.json", ["kept"])
+        sweep_notebooks(
+            tmp_path, "notebooks/index.json", ["kept"], known_slugs={"kept", "dropped"}
+        )
 
         remaining = json.loads((tmp_path / "notebooks" / "index.json").read_text())[
             "notebooks"
@@ -294,7 +294,15 @@ class TestNotebookSweep:
     def test_a_live_notebook_is_untouched(self, tmp_path):
         self._index(tmp_path, [("kept", "Kept")])
 
-        assert sweep_notebooks(tmp_path, "notebooks/index.json", ["kept"]) == []
+        assert (
+            sweep_notebooks(
+                tmp_path,
+                "notebooks/index.json",
+                ["kept"],
+                known_slugs={"kept"},
+            )
+            == []
+        )
         assert not (tmp_path / TOMBSTONES_DIR).exists()
 
     def test_a_missing_index_is_not_an_error(self, tmp_path):
@@ -327,7 +335,7 @@ requires_db = pytest.mark.skipif(
 
 
 @pytest.fixture
-def use_device(monkeypatch):
+def use_device(monkeypatch, tmp_path):
     """Point the app at a throwaway namespace per simulated device.
 
     Namespaces are memoised per label. Minting a fresh one on every call
@@ -345,6 +353,13 @@ def use_device(monkeypatch):
         ns = by_label[label]
         monkeypatch.setenv("SURREAL_NAMESPACE", ns)
         monkeypatch.setenv("SURREAL_DATABASE", ns)
+        # Each simulated device gets its own local state, the way real
+        # devices have their own data directories. The baseline (and the
+        # watermark) live under DATA_FOLDER, so sharing one would merge
+        # both devices' memories of what was seen - and a test asserting
+        # "this device has never imported" would fail because the other
+        # one had.
+        monkeypatch.setenv("DATA_FOLDER", str(tmp_path / f"data_{label}"))
         return ns
 
     monkeypatch.setenv("SURREAL_URL", os.environ["SURREAL_TEST_URL"])
@@ -571,6 +586,103 @@ async def test_a_deleted_notebook_stays_deleted(tmp_path, use_device):
     )
 
 
+@requires_db
+@pytest.mark.asyncio
+async def test_a_notebook_tombstone_unfiles_its_members(tmp_path, use_device):
+    """Forgetting a folder must not destroy its contents.
+
+    Applying 7 notebook tombstones once deleted 2 notes and 4 sessions
+    with them, because the tombstone path called `notebook.delete()` and
+    its cascade destroyed member notes and referring sessions - while the
+    peer still held the notes under the same ids. Same records, dead on
+    one side and alive on the other, is a divergent destruction that
+    last-write-wins cannot reconcile. Members survive, unfiled.
+    """
+    from open_notebook.domain.notebook import ChatSession, Note, Notebook
+    from open_notebook.sync.exchange import export_all, import_all
+
+    use_device("pc")
+    await Notebook(name="Shared course", description="").save()
+    notebook_id = str((await _get_notebook("Shared course")).id)
+    note = Note(title="Keep me", note_type="human", content="x")
+    await note.save()
+    await note.relate("artifact", notebook_id)
+    session = ChatSession(title="Keep me too")
+    await session.save()
+    await session.relate_to_notebook(notebook_id)
+    note_id, session_id = str(note.id), str(session.id)
+    await export_all(device="pc", root=tmp_path / "pc")
+
+    use_device("phone")
+    await import_all(root=tmp_path / "pc")
+    assert await _notebook_exists("Shared course")
+
+    await (await _get_notebook("Shared course")).delete()
+    await export_all(device="phone", root=tmp_path / "pc")
+
+    use_device("pc")
+    result = await import_all(root=tmp_path / "pc")
+
+    assert result["tombstones_applied"] == 1
+    assert not await _notebook_exists("Shared course"), "the folder is forgotten"
+    assert await _note_exists(note_id), "a member note is not the folder"
+    assert await _session_exists(session_id), "a referring session is not the folder"
+
+
+async def _note_exists(record_id: str) -> bool:
+    from open_notebook.domain.notebook import Note
+
+    try:
+        await Note.get(record_id)
+        return True
+    except Exception:
+        return False
+
+
+async def _session_exists(record_id: str) -> bool:
+    from open_notebook.domain.notebook import ChatSession
+
+    try:
+        await ChatSession.get(record_id)
+        return True
+    except Exception:
+        return False
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_an_import_records_what_arrived(tmp_path, use_device, monkeypatch):
+    """The baseline is written by importing, not by assuming.
+
+    Without this, the sweep's gate has nothing to check membership
+    against and the device that just imported is still disarmed on its
+    next export - so a record deleted after the import would never be
+    tombstoned and the peer would keep it forever.
+    """
+    import open_notebook.config as config
+    from open_notebook.domain.notebook import Source
+    from open_notebook.sync import tombstones
+    from open_notebook.sync.exchange import export_all, import_all
+
+    monkeypatch.setattr(config, "BLOBS_FOLDER", str(tmp_path / "blobs"), raising=False)
+
+    use_device("pc")
+    source = Source(title="Arrival", topics=[])
+    await source.save()
+    record_id = str(source.id)
+    await export_all(device="pc", root=tmp_path / "pc")
+
+    use_device("phone")
+    assert tombstones.read_baseline() is None
+    await import_all(root=tmp_path / "pc")
+
+    baseline = tombstones.read_baseline() or {}
+    assert record_id in baseline.get("sources", []), (
+        "importing must record what arrived, or the next export cannot "
+        "tombstone anything"
+    )
+
+
 async def _query(statement: str):
     from open_notebook.database.repository import repo_query
 
@@ -589,45 +701,28 @@ async def _notebook_exists(name: str) -> bool:
     return bool(rows)
 
 
-class TestSyncWatermark:
-    """A device that never imported must not tombstone its peer's library.
+class TestSyncBaseline:
+    """The sweep must know what this device has seen. Not when - what.
 
-    The failure this prevents is real, not hypothetical. The phone was
-    running a build with no notebook sync, held zero notebooks, and the
-    manifest carried seven. Its first export would have answered "the
-    manifest has 7 notebooks, I have 0" as "all 7 were deleted here" -
-    and the PC would have applied that as a deletion, cascading notes
-    with it.
+    The failure this prevents destroyed 7 notebooks. The phone held an
+    October watermark, held zero notebooks, and the manifest carried
+    seven entries older than the watermark. The timestamp gate answered
+    "older than the last import" as "seen and since deleted" - but the
+    phone had never imported that manifest lineage at all. Age alone is
+    not evidence; only having seen the record is.
 
-    So a tombstone is only evidence if the tombstoning device once *had*
-    the record. The watermark is when that was.
-
-    `is_deletable` takes the watermark as an argument, so none of this
-    needs patching and no test can be decided by a watermark file left
-    behind by another one.
+    So a tombstone is only evidence if the id is in the baseline: the
+    per-kind id sets from this device's last import, plus everything it
+    has itself exported. No baseline file means never imported, and a
+    device that has never imported tombstones nothing.
     """
 
-    def test_never_imported_means_nothing_is_deletable(self):
-        assert is_deletable("2026-01-01T00:00:00+00:00", None) is False
+    def test_never_imported_means_nothing_is_tombstoned(self, tmp_path):
+        """End to end: 7 notebooks in the manifest, 0 held, no import yet.
 
-    def test_an_entry_newer_than_the_import_has_not_arrived_yet(self):
-        # The peer created it after our last import: it has not arrived
-        # yet, which is not the same as having been deleted.
-        # STAMP is 2026-10-14; a peer entry dated after it has not
-        # arrived yet. One dated before it was known here and may since
-        # have been deleted.
-        assert is_deletable("2026-12-01T00:00:00+00:00", _parse(STAMP)) is False
-        assert is_deletable("2026-06-01T00:00:00+00:00", _parse(STAMP)) is True
-        assert is_deletable(STAMP, _parse(STAMP)) is True
-
-    def test_an_entry_with_no_timestamp_is_never_deletable(self):
-        """An old manifest cannot prove the record arrived here."""
-        far_future = _parse("2030-01-01T00:00:00+00:00")
-        assert is_deletable(None, far_future) is False
-        assert is_deletable("", far_future) is False
-
-    def test_a_device_without_a_watermark_sweeps_nothing(self, monkeypatch, tmp_path):
-        """End to end: 7 notebooks in the manifest, 0 held, no import yet."""
+        The phone's first export, verbatim. No baseline file exists, so
+        both sweeps are disarmed however old the entries are.
+        """
         from open_notebook.sync import tombstones
 
         index = tmp_path / "notebooks" / "index.json"
@@ -643,69 +738,127 @@ class TestSyncWatermark:
             )
         )
         _seed(tmp_path, "sources", "source:from_peer", updated=STAMP)
-        monkeypatch.setattr(tombstones, "read_watermark", lambda: None)
 
+        assert tombstones.read_baseline() is None
         written = tombstones.sweep(tmp_path, {"sources": []})
         written += tombstones.sweep_notebooks(tmp_path, "notebooks/index.json", [])
 
         assert written == [], "a device that never imported must delete nothing"
 
-    def test_the_watermark_lives_outside_the_shared_repo(self, monkeypatch, tmp_path):
+    def test_an_unseen_id_is_not_a_deletion(self, tmp_path):
+        """The incident itself, at unit scale.
+
+        A baseline exists - this device has synced before - but it names
+        other records. The manifest lists entries from a lineage never
+        imported here. They are not deletions; they are arrivals waiting
+        for an import.
+        """
+        from open_notebook.sync import tombstones
+
+        tombstones.write_baseline({"sources": ["source:mine"]})
+        _seed(
+            tmp_path, "sources", "source:from_peer", updated="2020-01-01T00:00:00+00:00"
+        )
+
+        written = tombstones.sweep(
+            tmp_path, {"sources": []}, known=tombstones.read_baseline()
+        )
+
+        assert written == [], (
+            "an entry older than anything is still not evidence "
+            "when this device never saw it"
+        )
+
+    def test_a_seen_then_deleted_id_is_tombstoned(self, tmp_path):
+        from open_notebook.sync import tombstones
+
+        tombstones.write_baseline({"sources": ["source:gone"]})
+        _seed(tmp_path, "sources", "source:gone")
+
+        written = tombstones.sweep(
+            tmp_path, {"sources": []}, known=tombstones.read_baseline()
+        )
+
+        assert [t.id for t in written] == ["source:gone"]
+
+    def test_an_exported_id_is_tombstonable_without_any_import(self, tmp_path):
+        """A locally-created-then-deleted record must be sayable.
+
+        It was never imported, so an import-only baseline would leave
+        its deletion unsayable and the peer would keep the record
+        forever. Exporting records the baseline too.
+        """
+        from open_notebook.sync import tombstones
+
+        tombstones.write_baseline({"sources": ["source:mine"]})
+        _seed(tmp_path, "sources", "source:mine")
+
+        written = tombstones.sweep(
+            tmp_path, {"sources": []}, known=tombstones.read_baseline()
+        )
+
+        assert [t.id for t in written] == ["source:mine"]
+
+    def test_the_baseline_merges_both_directions(self, tmp_path):
+        """Import records arrivals, export records departures; neither
+        may clobber the other, or one direction quietly disarms the
+        other's deletions."""
+        from open_notebook.sync import tombstones
+
+        tombstones.write_baseline({"sources": ["source:imported"]})
+        tombstones.write_baseline({"sources": ["source:exported"], "notes": ["note:n"]})
+
+        baseline = tombstones.read_baseline() or {}
+
+        assert sorted(baseline["sources"]) == ["source:exported", "source:imported"]
+        assert baseline["notes"] == ["note:n"]
+
+    def test_a_corrupt_baseline_disarms_not_arms(self, tmp_path):
+        """Fail closed. An unreadable memory of what was seen is not
+        permission to forget."""
+        from open_notebook.sync import tombstones
+
+        _seed(tmp_path, "sources", "source:gone")
+        baseline = tmp_path / "data" / "sync-baseline.json"
+        baseline.parent.mkdir(parents=True, exist_ok=True)
+        baseline.write_text("{corrupt")
+
+        assert tombstones.read_baseline() is None
+        assert tombstones.sweep(tmp_path, {"sources": []}) == []
+
+    def test_the_baseline_lives_outside_the_shared_repo(self, monkeypatch, tmp_path):
         """A per-device fact must never be committed to the peer's repo."""
         from open_notebook.sync import tombstones
 
         monkeypatch.setenv("DATA_FOLDER", str(tmp_path / "data"))
-        assert str(tombstones._watermark_path()).startswith(str(tmp_path / "data"))
-
-    def test_the_watermark_never_moves_backwards(self, monkeypatch, tmp_path):
-        import datetime as dt
-
-        from open_notebook.sync import tombstones
-
-        monkeypatch.setenv("DATA_FOLDER", str(tmp_path / "data"))
-        later = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
-        earlier = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
-
-        tombstones.write_watermark(later)
-        tombstones.write_watermark(earlier)
-
-        assert tombstones.read_watermark() == later
-
-    def test_an_import_arms_the_sweep(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("DATA_FOLDER", str(tmp_path / "data"))
-        from open_notebook.sync import tombstones
-
-        assert tombstones.read_watermark() is None
-        tombstones.write_watermark(_parse(STAMP))
-
-        assert tombstones.read_watermark() == _parse(STAMP)
-        assert is_deletable(STAMP, tombstones.read_watermark()) is True
-
-
-def _parse(value):
-    from datetime import datetime
-
-    return datetime.fromisoformat(value) if value else None
+        assert str(tombstones._baseline_path()).startswith(str(tmp_path / "data"))
 
 
 def test_no_test_writes_into_the_project_data_directory():
     """A suite must not mutate the developer's own state.
 
-    This one leaked. The `synced_device` fixture patches
-    `read_watermark` to a far-future date, and the live round-trip tests
-    under it call `import_all`, which calls `write_watermark()` — which
-    reads the patched value, sees it is newer than now, and writes it.
+    This one leaked. The old fixture patched `read_watermark` to a
+    far-future date, and the live round-trip tests under it called
+    `import_all`, which called `write_watermark()` - which read the
+    patched value, saw it was newer than now, and wrote it. With
+    DATA_FOLDER unset that landed in the repository's `data/`, and the
+    real PC ended up armed to forget everything.
 
-    With DATA_FOLDER unset that landed in the repository's `data/`, and
-    the real PC ended up with a watermark of 2099: the sweep fully
-    armed, so every manifest entry looked deletable. That is precisely
-    the failure the watermark exists to prevent, delivered by its own
-    test suite.
+    The arming mechanism is a baseline file now rather than a watermark,
+    but the leak would be identical - local sync state written into the
+    developer's own tree - so both filenames are checked.
     """
     project_data = Path(__file__).resolve().parents[1] / "data"
-    stray = [p for p in (project_data / "sync-watermark.json",) if p.exists()]
+    stray = [
+        p
+        for p in (
+            project_data / "sync-watermark.json",
+            project_data / "sync-baseline.json",
+        )
+        if p.exists()
+    ]
 
     assert not stray, (
-        f"a watermark was written into {project_data} by this run: "
+        f"sync state was written into {project_data} by this run: "
         f"{[p.name for p in stray]}. Tests must redirect DATA_FOLDER."
     )

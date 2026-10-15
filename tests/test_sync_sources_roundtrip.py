@@ -41,13 +41,17 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def use_device(monkeypatch):
+def use_device(monkeypatch, tmp_path):
     """Point the app at throwaway namespaces, one per simulated device.
 
     The repository reads configuration straight from the environment -
     ``db_connection()`` calls ``get_database_url()`` and friends - so
     namespaces are swapped via env vars rather than by patching a
     settings object that does not exist.
+
+    Local sync state (the baseline) moves with the device for the same
+    reason: it lives under DATA_FOLDER, so each simulated device gets
+    its own, the way real devices have their own data directories.
     """
     issued: list[str] = []
     current = {"ns": ""}
@@ -57,6 +61,7 @@ def use_device(monkeypatch):
         issued.append(ns)
         monkeypatch.setenv("SURREAL_NAMESPACE", ns)
         monkeypatch.setenv("SURREAL_DATABASE", ns)
+        monkeypatch.setenv("DATA_FOLDER", str(tmp_path / f"data_{label}"))
         current["ns"] = ns
         return ns
 

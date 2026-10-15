@@ -150,6 +150,19 @@ cmd_pull() {
         echo "       This is the network or the credential, not a conflict."
         return 1
       fi
+      # Unrelated histories are not a conflict either: they share no
+      # commits at all, usually because one side started fresh. An empty
+      # merge-base says so, and the remedy (adopt one side, then publish)
+      # is different from resolving an edit collision.
+      if ! git -C "$SYNC_DIR" merge-base HEAD FETCH_HEAD >/dev/null 2>&1; then
+        echo "[sync] unrelated histories: this repo and the remote share no commits."
+        echo "       Nothing was changed locally. To adopt the remote and publish"
+        echo "       this device's state on top of it:"
+        echo "         git -C '$SYNC_DIR' reset --hard FETCH_HEAD"
+        echo "       then push. To keep this side instead, push with:"
+        echo "         git -C '$SYNC_DIR' push origin main --force-with-lease"
+        return 1
+      fi
       echo "[sync] pull was not a fast-forward, so it was NOT applied."
       echo "       Someone edited the same record. Nothing was changed locally."
       return 1

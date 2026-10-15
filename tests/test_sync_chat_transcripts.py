@@ -31,10 +31,6 @@ pytestmark = pytest.mark.skipif(
 # a notebook name, a title or a timestamp.
 MARKER = "ZEBRAFISH-CANARY-8f21a4"
 
-# A timestamp comfortably in the past, for records that must predate a
-# sync watermark to be eligible for tombstoning.
-OLD = "2026-10-01T00:00:00+00:00"
-
 
 @pytest.fixture
 def two_devices(monkeypatch, tmp_path):
@@ -61,6 +57,10 @@ def two_devices(monkeypatch, tmp_path):
         # it is enough to redirect the whole store. An env var would not
         # be: config.py computes BLOBS_FOLDER once at import.
         monkeypatch.setattr(config, "BLOBS_FOLDER", str(roots[label]), raising=False)
+        # Same for local sync state: the baseline lives under
+        # DATA_FOLDER, read at call time, so each device remembers only
+        # what it has seen.
+        monkeypatch.setenv("DATA_FOLDER", str(tmp_path / f"data_{label}"))
         return ns
 
     monkeypatch.setenv("SURREAL_URL", os.environ["SURREAL_TEST_URL"])
@@ -543,36 +543,23 @@ class TestDeletion:
         root = tmp_path / "sync"
 
         from open_notebook.database.repository import (
-            ensure_record_id,
             repo_delete,
-            repo_query,
         )
         from open_notebook.sync import tombstones
         from open_notebook.sync.exchange import export_all
 
         await _session("Temporary", [("human", "hi")])
 
-        # Backdate the record, then arm the sweep *after* it. Two rules
-        # are being exercised together, and both are refusals rather
-        # than permissions:
-        #
-        #   a device that has never imported may not forget anything, and
-        #   an entry newer than the last import may not be tombstoned -
-        #   it could be work this device has not seen yet.
-        #
-        # So the record has to predate the watermark. Deleting something
-        # created a moment ago on a device that has never synced is not
-        # the case this rule exists for.
-        await repo_query(
-            "UPDATE $id SET updated = $when",
-            {"id": ensure_record_id(await _only_session()), "when": OLD},
-        )
+        # Record the session in the baseline, then delete it. The
+        # baseline is what arms the sweep: a device tombstones only ids
+        # it has demonstrably seen. Backdating is unnecessary - age alone
+        # is not evidence either way, which is the lesson of the 7 lost
+        # notebooks.
         await export_all("pc", root=root)
         assert list((root / "chat").glob("*.json"))
 
-        from datetime import datetime, timezone
-
-        tombstones.write_watermark(datetime.now(timezone.utc))
+        sid = await _only_session()
+        tombstones.write_baseline({"chat": [sid]})
 
         # repo_delete, not `DELETE $id`: SurrealDB 2.x rejects a DELETE
         # whose target is a plain record value, and the error arrives as

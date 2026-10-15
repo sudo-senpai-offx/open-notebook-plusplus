@@ -47,6 +47,33 @@ the record comes back from the dead. Forever is the only setting that
 cannot lose a deletion.
 
 `prune_tombstones` exists for operators who want the files gone anyway.
+
+### The baseline: what this device has actually seen
+
+The sweep compares manifest files against the database - but files can
+arrive without ever being imported. A `git pull`, a bundle fetch, a
+`reset --hard` to the peer's history all put files in the directory that
+this device has never read into its database. Every one of them looks
+exactly like a deletion: listed in the manifest, absent locally.
+
+So the sweep is gated on a baseline: the per-kind id sets from the last
+successful import, plus everything this device has itself exported (a
+locally-created-then-deleted record must be tombstonable even if it was
+never imported). An id outside the baseline is never tombstoned, however
+old it is. No baseline file at all means never imported, and a device
+that has never imported tombstones nothing.
+
+This replaced a timestamp watermark (`updated <= last_import_at`), which
+answered the wrong question. A timestamp cannot distinguish "saw it and
+it is gone" from "never saw it" across two unrelated histories: entries
+older than the watermark are exactly as deletable as entries that were
+actually seen. Seven notebooks were destroyed that way - a phone holding
+an October watermark swept a manifest lineage it had never imported, and
+every entry qualified by age alone. It also missed real deletions in the
+other direction: a record edited after the last import, then deleted,
+carries an `updated` newer than the watermark, so the gate blocked a
+tombstone that should have been written and the peer kept the record
+forever.
 """
 
 from __future__ import annotations
@@ -56,7 +83,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set
 
 from loguru import logger
 
@@ -192,10 +219,61 @@ def _later(left: Optional[str], right: Optional[str]) -> bool:
     return a > b
 
 
+BASELINE_FILE = "sync-baseline.json"
+
+
+def _baseline_path() -> Path:
+    # Local state, next to the watermark: data/ is gitignored, so this
+    # never travels. A baseline that travelled would defeat its purpose,
+    # which is recording what *this* device has seen.
+    return Path(os.getenv("DATA_FOLDER", "./data")) / BASELINE_FILE
+
+
+def read_baseline() -> Optional[Dict[str, List[str]]]:
+    """The per-kind id sets this device has demonstrably seen.
+
+    None when no successful import (or export) has ever recorded one -
+    which means the sweep is disarmed, not permissive.
+    """
+    path = _baseline_path()
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("Unreadable sync baseline; sweeping nothing until it is rebuilt")
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def write_baseline(snapshot: Dict[str, List[str]]) -> None:
+    """Record what this device has seen. Merges with what is already there.
+
+    Merging, not replacing: an import records what arrived, an export
+    records what left, and either one alone is an incomplete picture of
+    what this device knows about. Replacing on import would forget
+    locally-created records; replacing on export would forget imports
+    that have not been re-exported yet.
+    """
+    path = _baseline_path()
+    merged: Dict[str, Set[str]] = {}
+    previous = read_baseline() or {}
+    for kind, ids in list(previous.items()) + list(snapshot.items()):
+        merged.setdefault(str(kind), set()).update(str(i) for i in (ids or []))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({k: sorted(v) for k, v in merged.items()}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
 def sweep(
     root: Path,
     live: Dict[str, Sequence[str]],
     extra: Optional[Dict[str, Dict[str, Optional[str]]]] = None,
+    known: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> List[Tombstone]:
     """Compare the manifest against reality and tombstone what vanished.
 
@@ -207,6 +285,14 @@ def sweep(
     *extra* carries per-id values the tombstone should keep - used for
     the `sha256` of a deleted source, so the peer knows which blob is
     now unreferenced without having to guess.
+
+    *known* gates each directory on the baseline: only ids this device
+    has demonstrably seen (imported, or exported itself) may be
+    tombstoned. None means never imported, and a device that has never
+    imported tombstones nothing - however old the entries are. Age
+    alone is not evidence; seven notebooks were destroyed by treating
+    it as such, swept from a manifest lineage the device had never
+    read.
     """
     written: List[Tombstone] = []
     for directory, live_ids in live.items():
@@ -214,6 +300,10 @@ def sweep(
         if not folder.is_dir():
             continue
         keep = {str(i) for i in live_ids}
+        # Normalised here rather than at the call sites: the baseline
+        # file stores lists, and requiring every caller to convert would
+        # make the common case verbose for no safety gained.
+        seen = set(known.get(directory) or ()) if known else set()
         for path in sorted(folder.glob("*.json")):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -224,7 +314,11 @@ def sweep(
             record_id = str(data.get("id") or "")
             if not record_id or record_id in keep:
                 continue
-            if not is_deletable(data.get("updated")):
+            if record_id not in seen:
+                # Listed in the manifest, absent locally, and never
+                # seen here. That is "arrived by fetch, not yet
+                # imported" - the normal state between two syncs, not a
+                # deletion.
                 continue
 
                 # The hash comes from the manifest file, not from the
@@ -261,13 +355,20 @@ def notebook_id(slug: str) -> str:
 
 
 def sweep_notebooks(
-    root: Path, index_rel: str, live_slugs: Iterable[str]
+    root: Path,
+    index_rel: str,
+    live_slugs: Iterable[str],
+    known_slugs: Optional[Iterable[str]] = None,
 ) -> List[Tombstone]:
     """Tombstone notebooks that vanished, and drop them from the index.
 
     The index is one file rather than one file per notebook, so this
     cannot reuse `sweep` - but the principle is identical: compare what
     the manifest claims against what exists now.
+
+    *known_slugs* is the baseline gate, same as `sweep`'s `known`: only
+    slugs this device has seen may be tombstoned. None disarms the sweep
+    entirely.
     """
     path = root / index_rel
     if not path.is_file():
@@ -281,12 +382,13 @@ def sweep_notebooks(
 
     entries = payload.get("notebooks") or []
     live = {str(s) for s in live_slugs}
+    seen = set(known_slugs) if known_slugs is not None else set()
     kept: List[Dict] = []
     written: List[Tombstone] = []
 
     for entry in entries:
         slug = str(entry.get("slug") or "")
-        if slug and slug not in live and is_deletable(entry.get("updated")):
+        if slug and slug not in live and slug in seen:
             written.append(
                 write_tombstone(
                     root,
@@ -386,42 +488,9 @@ def write_watermark(when: Optional[datetime] = None) -> None:
     )
 
 
-class _Unset:
-    """Sentinel, because `None` already means "this device never imported".
-
-    Overloading None for both left `is_deletable(stamp, None)` silently
-    reading the on-disk watermark, so the one case the tests most need to
-    pin - a device that has never synced - was decided by whatever a
-    previous test run happened to leave in `data/`.
-    """
-
-    def __repr__(self) -> str:
-        return "<unset>"
-
-
-_UNSET = _Unset()
-
-
-def is_deletable(
-    updated: Optional[str], watermark: Optional[datetime] | _Unset = _UNSET
-) -> bool:
-    """Whether a manifest entry may be tombstoned on this device.
-
-    False when this device has never imported, so nothing can be
-    considered deleted here. False when the entry is *newer* than the
-    last import, because it has not arrived yet. False when it carries
-    no timestamp at all - an older manifest cannot prove the record
-    reached this device, and the safe reading of "cannot prove" is
-    "do not destroy".
-    """
-    # Passed in so this is a pure function and can be reasoned about
-    # without touching module state. Only the caller that genuinely
-    # means "this device's own" leaves it unset.
-    if isinstance(watermark, _Unset):
-        watermark = read_watermark()
-    if watermark is None:
-        return False
-    stamp = _parse(updated)
-    if stamp is None:
-        return False
-    return stamp <= watermark
+# `is_deletable` stood here. It gated the sweep on a timestamp
+# comparison (`updated <= last_import_at`) and was removed the night it
+# destroyed 7 notebooks: age alone cannot distinguish "saw it and it is
+# gone" from "never saw it" across two unrelated histories. The baseline
+# above replaces it - membership, not recency. Do not reintroduce a time
+# based gate without a lineage check beside it.

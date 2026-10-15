@@ -220,6 +220,24 @@ def _divergent(tmp_path: Path) -> tuple[Path, Path]:
     return x, y
 
 
+def _unrelated(tmp_path: Path) -> tuple[Path, Path]:
+    """Two histories sharing no commit at all.
+
+    The shape of the first sync: the phone held its October history and
+    the remote held a fresh two-commit history from a bare `git init`.
+    A fast-forward can never exist between them, and calling that a
+    conflict sends the operator to resolve an edit collision that never
+    happened.
+    """
+    x, y = tmp_path / "x", tmp_path / "y"
+    _init(x)
+    _init(y)
+
+    _commit(x, "x.txt", "x")
+    _commit(y, "y.txt", "y")
+    return x, y
+
+
 class TestTheDivergenceGuard:
     @pytest.mark.parametrize("script", [PC_SYNC, TERMUX_SYNC], ids=["pc", "phone"])
     def test_divergence_is_refused_and_HEAD_is_untouched(self, tmp_path, script):
@@ -263,6 +281,41 @@ class TestTheDivergenceGuard:
         local = _git("rev-parse", "--short", "HEAD", cwd=x)
 
         assert local in result.stdout + result.stderr
+
+
+class TestUnrelatedHistoriesAreNotConflicts:
+    """The first sync, verbatim: a fresh remote against an old device.
+
+    The phone held its October history; the remote held a fresh
+    two-commit history from a bare `git init`. No fast-forward can ever
+    exist, and the old message called it "someone edited the same
+    record" - sending the operator to resolve an edit collision that
+    never happened, on a branch that shared nothing with the remote.
+    """
+
+    @pytest.mark.parametrize("script", [PC_SYNC, TERMUX_SYNC], ids=["pc", "phone"])
+    def test_pull_names_unrelated_histories(self, tmp_path, script):
+        x, y = _unrelated(tmp_path)
+        _git("remote", "add", "origin", str(y), cwd=x)
+
+        result = _drive(script, x, "pull")
+
+        out = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert "unrelated histories" in out, f"misdiagnosed:\n{out}"
+        assert "edited the same record" not in out, f"misdiagnosed:\n{out}"
+        assert "reset --hard FETCH_HEAD" in out, f"no recovery command:\n{out}"
+
+    @pytest.mark.parametrize("script", [PC_SYNC, TERMUX_SYNC], ids=["pc", "phone"])
+    def test_a_refused_pull_changes_nothing(self, tmp_path, script):
+        x, y = _unrelated(tmp_path)
+        _git("remote", "add", "origin", str(y), cwd=x)
+        before = _git("rev-parse", "HEAD", cwd=x)
+
+        _drive(script, x, "pull")
+
+        assert _git("rev-parse", "HEAD", cwd=x) == before
+        assert _git("branch", "--show-current", cwd=x) == "main"
 
 
 class TestAPullFailureIsNotReportedAsAConflict:
