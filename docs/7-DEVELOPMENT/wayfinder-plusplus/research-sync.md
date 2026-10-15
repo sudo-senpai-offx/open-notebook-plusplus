@@ -1578,3 +1578,25 @@ package and silently kept the extraction module out of git - local tests
 passed, the bundle shipped without it, the phone 500'd while reporting
 itself up to date. The rule is root-anchored and a test asserts every
 source file is tracked.
+
+---
+
+## 25. The blob store does not guarantee suffixes
+
+The last file failed in two seconds on the phone with the generic
+message - neither OCR path ran. All three OCR gates checked
+`endswith(".pdf")`, and files received over the channel are stored as
+`{sha}.bin`: the PUT endpoint is never told the original filename. Text
+PDFs never noticed (content-based extraction needs no suffix); the one
+scanned file hit every gate and fell through as "unreadable".
+
+OCR gating now reads magic bytes, with the suffix as a hint rather than
+a verdict. The asymmetry is deliberate: a PDF by content with any other
+name must count, while a non-PDF named `.pdf` merely wastes one OCR
+attempt that fails fast. A missing path is never a PDF, whatever its
+suffix claims - that ordering mattered once written down.
+
+The same bulk replacement that installed the gates also rewrote the new
+helper's own short-circuit into self-recursion (`_is_pdf` calling
+`_is_pdf`), which read as a RecursionError across nine tests. A bulk
+edit that touches its own anchor text needs a second look at the anchor.

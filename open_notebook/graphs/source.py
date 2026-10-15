@@ -318,7 +318,7 @@ async def _extract_with_text_engine(
 
         if (
             file_path
-            and file_path.lower().endswith(".pdf")
+            and _is_pdf(file_path)
             and processed.content
             and processed.content.strip()
         ):
@@ -327,7 +327,7 @@ async def _extract_with_text_engine(
                 processed.content = augmented
         elif (
             file_path
-            and file_path.lower().endswith(".pdf")
+            and _is_pdf(file_path)
             and not content_state.get("skip_extraction")
         ):
             # Last resort. The text-layer probe above said readable (or
@@ -347,6 +347,29 @@ async def _extract_with_text_engine(
         logger.warning(f"content-core extraction failed ({type(e).__name__}): {e}")
         raise _extraction_error(e, url) from e
     return processed
+
+
+def _is_pdf(file_path: str | None) -> bool:
+    """Whether the file at *file_path* is a PDF, by content, not by name.
+
+    The blob store does not guarantee suffixes: files received over the
+    channel are stored as `{sha}.bin` (the PUT endpoint is never told the
+    original filename), so gating OCR paths on `endswith(".pdf")` silently
+    skipped every synced blob. A scanned PDF named `.bin` fell through
+    all three OCR gates in two seconds and failed as "unreadable". Magic
+    bytes do not depend on what anyone named the file.
+    """
+    if not file_path:
+        return False
+    try:
+        with open(file_path, "rb") as handle:
+            head = handle.read(5)
+    except OSError:
+        # A path that cannot be opened is not a PDF, whatever its
+        # suffix claims. The suffix short-circuit below must not run
+        # first, or a missing file named `.pdf` counts as one.
+        return False
+    return str(file_path).lower().endswith(".pdf") or head == b"%PDF-"
 
 
 def _pdf_engine_uses_ocr(document_engine: str) -> bool:
@@ -479,7 +502,7 @@ async def content_process(state: SourceState) -> dict:
     file_path = content_state.get("file_path")
     if (
         file_path
-        and file_path.lower().endswith(".pdf")
+        and _is_pdf(file_path)
         and not _pdf_engine_uses_ocr(config_kwargs.get("document_engine", "auto"))
         and not await asyncio.to_thread(_pdf_text_layer_present, file_path)
     ):

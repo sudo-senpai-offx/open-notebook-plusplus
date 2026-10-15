@@ -929,6 +929,66 @@ class TestOcrLastResort:
         assert "tesseract is not on PATH" in str(exc.value)
 
     @pytest.mark.asyncio
+    async def test_suffixless_pdf_still_gets_ocr(self, tmp_path):
+        """Blobs received over the channel are stored as `{sha}.bin`.
+
+        The PUT endpoint is never told the original filename, so gating
+        OCR on the suffix silently skipped every synced blob. A scanned
+        PDF named `.bin` fell through all three gates in two seconds and
+        failed as unreadable.
+        """
+        from content_core.common import ExtractionOutput
+
+        from open_notebook.graphs.source import SourceState, content_process
+
+        blob = tmp_path / "26b11a00.bin"
+        blob.write_bytes(b"%PDF-1.4 scanned, misnamed")
+
+        mock_settings = MagicMock()
+        with (
+            patch(
+                "open_notebook.graphs.source.ModelManager",
+                return_value=self._model_manager(),
+            ),
+            patch("open_notebook.graphs.source.ContentSettings", mock_settings),
+            patch("open_notebook.graphs.source.extract_content") as mock_extract,
+            patch(
+                "open_notebook.graphs.source._pdf_text_layer_present",
+                return_value=True,
+            ),
+            patch("open_notebook.graphs.source.docling_available", return_value=False),
+            patch(
+                "open_notebook.graphs.source._try_ocr", return_value="recovered text"
+            ) as mock_ocr,
+        ):
+            mock_settings.get_instance = AsyncMock(
+                return_value=self._content_settings("simple")
+            )
+            mock_extract.return_value = ExtractionOutput(title="", content="")
+            await content_process(cast(SourceState, self._state(blob)))
+
+        mock_ocr.assert_awaited_once()
+
+    def test_is_pdf_reads_content_not_names(self, tmp_path):
+        from open_notebook.graphs.source import _is_pdf
+
+        # The direction that matters: a PDF by content with any other
+        # name still counts, because the blob store names synced files
+        # `{sha}.bin`. The reverse - a suffix claiming PDF - is only a
+        # hint; attempting OCR on it fails fast and harmlessly.
+        misnamed = tmp_path / "deadbeef.bin"
+        misnamed.write_bytes(b"%PDF-1.4 scanned")
+        assert _is_pdf(str(misnamed)) is True
+
+        not_pdf = tmp_path / "notes.bin"
+        not_pdf.write_bytes(b"<html>definitely not a pdf</html>")
+        assert _is_pdf(str(not_pdf)) is False
+
+        assert _is_pdf(str(tmp_path / "absent.pdf")) is False
+        assert _is_pdf(None) is False
+        assert _is_pdf("") is False
+
+    @pytest.mark.asyncio
     async def test_non_pdf_empty_never_tries_ocr(self, tmp_path):
         from content_core.common import ExtractionOutput
 
