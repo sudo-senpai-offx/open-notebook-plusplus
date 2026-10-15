@@ -38,6 +38,12 @@ def device(monkeypatch, tmp_path):
     blobs = tmp_path / "blobs"
     blobs.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(config, "BLOBS_FOLDER", str(blobs), raising=False)
+    # Local sync state moves with the device too: the export writes the
+    # baseline into DATA_FOLDER, and a second namespace sharing it would
+    # read the first one's exports as its own memory - tripping the
+    # resurrection gate on records it never saw. Same isolation the
+    # other sync fixtures already do.
+    monkeypatch.setenv("DATA_FOLDER", str(tmp_path / "data_a"))
 
     submitted: list[dict] = []
 
@@ -240,6 +246,7 @@ class TestTheImportHook:
 
         _os.environ["SURREAL_NAMESPACE"] = f"extract_phone_{uuid.uuid4().hex[:8]}"
         _os.environ["SURREAL_DATABASE"] = _os.environ["SURREAL_NAMESPACE"]
+        _os.environ["DATA_FOLDER"] = str(tmp_path / "data_b")
 
         result = await import_all(root=sync)
 

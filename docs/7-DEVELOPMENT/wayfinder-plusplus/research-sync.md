@@ -1600,3 +1600,58 @@ The same bulk replacement that installed the gates also rewrote the new
 helper's own short-circuit into self-recursion (`_is_pdf` calling
 `_is_pdf`), which read as a RecursionError across nine tests. A bulk
 edit that touches its own anchor text needs a second look at the anchor.
+
+---
+
+## 26. Stress: randomised two-device convergence
+
+A property test, not a path: two devices, random creates/edits/filings/
+deletes across notes, sources, notebooks, sessions and messages,
+interleaved between syncs over five seeds, plus a repeated-cycle
+stability check. After a full cycle both ways, both databases must hold
+the same records, the same edges and the same content - union semantics
+for ids, last-write-wins for fields, slugs for notebooks.
+
+What it caught, in order:
+
+1. **Import resurrected its own deletions.** B deletes X, then imports
+   A's manifest (which still lists X) before ever exporting the
+   tombstone - recreating X, so no tombstone is ever born and X is
+   immortal. The baseline now gates creation too: absent locally but
+   present in the baseline means deleted-here-not-yet-published, so the
+   import skips it and the next export tombstones it. The phone's
+   pull-then-push order has exactly this shape, so this was live, not
+   theoretical.
+
+2. **Transcript `updated` was never transported.** Both sides agreed on
+   content and disagreed by the transfer delay (~1.3s measured), which
+   reads as divergence to anything comparing records. The payload
+   carries it now; the importer stamps it, falling back to now only for
+   pre-field senders.
+
+3. **The harness compared notebook ids across devices.** Record ids are
+   per-database by the design's founding assumption; the assertion
+   called correct convergence a divergence. Edges normalize through
+   each side's slug map before comparing.
+
+4. **The generator filed without deduping.** RELATE always inserts, so a
+   random re-file left two identical rows on one side while the
+   import's already-check kept one on the other. The generator
+   check-then-relates like the import does.
+
+5. **The generator filed edges to tombstoned notebooks.** Applying a
+   tombstone removes a record the pool still names; the next burst filed
+   into the dead id. Pools now intersect with live records at every
+   merge - a tombstoned record is not operable anywhere, and no
+   production path files into one (the UI lists live notebooks).
+
+6. **Fixture namespaces were not memoised.** The chat and roundtrip
+   fixtures minted a fresh namespace per `use()` call, so switching
+   back to a device landed in an empty database. One test failed for
+   reasons unrelated to sync; both fixtures memoise per label now, like
+   the tombstone one always did.
+
+7. **The extraction fixture shared one DATA_FOLDER.** The export's own
+   baseline write poisoned the import in the same test Methods, tripping
+   the resurrection gate on records never seen. Per-device data dirs,
+   like the other three fixtures.

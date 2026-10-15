@@ -58,6 +58,7 @@ look like one.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from loguru import logger
@@ -109,6 +110,12 @@ def serialize_transcript(session_id: str, messages: Sequence[Any]) -> bytes:
                 "role": str(_field(message, "role", "") or "human"),
                 "content": content if isinstance(content, str) else str(content),
                 "created": _iso(_field(message, "created", None)),
+                # Transported so both sides agree on when the message
+                # happened. Without it the importer stamps its own now(),
+                # and two copies of one message permanently disagree by
+                # the delay between them - which reads as divergence to
+                # anything comparing records.
+                "updated": _iso(_field(message, "updated", None)),
             }
         )
 
@@ -235,11 +242,21 @@ async def import_transcript(session_id: str, sha256: str) -> Tuple[int, int]:
             continue
         have.add(record_id)
 
+        # The transported timestamp, falling back to now only when the
+        # sender predates the field. Stamping unconditionally would leave
+        # both sides disagreeing by the transfer delay, forever.
+        raw_updated = row.get("updated")
+        try:
+            updated = datetime.fromisoformat(str(raw_updated)) if raw_updated else None
+        except ValueError:
+            updated = None
+        if updated is None:
+            updated = datetime.now(timezone.utc)
         await repo_query(
             """
             CREATE $id CONTENT {
                 session: $sid, seq: $seq, role: $role,
-                content: $content, created: $created, updated: time::now()
+                content: $content, created: $created, updated: $updated
             }
             """,
             {
@@ -249,6 +266,7 @@ async def import_transcript(session_id: str, sha256: str) -> Tuple[int, int]:
                 "role": _normalise_role(row.get("role")),
                 "content": content,
                 "created": row.get("created") or None,
+                "updated": updated,
             },
         )
         added += 1

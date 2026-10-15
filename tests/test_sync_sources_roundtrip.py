@@ -54,11 +54,17 @@ def use_device(monkeypatch, tmp_path):
     its own, the way real devices have their own data directories.
     """
     issued: list[str] = []
+    by_label: dict[str, str] = {}
     current = {"ns": ""}
 
     def use(label: str) -> str:
-        ns = f"synctest_{label}_{uuid.uuid4().hex[:8]}"
-        issued.append(ns)
+        # Memoised per label - see the twin fixture in
+        # test_sync_chat_transcripts.py for what a fresh namespace per
+        # call does to a final read.
+        if label not in by_label:
+            by_label[label] = f"synctest_{label}_{uuid.uuid4().hex[:8]}"
+            issued.append(by_label[label])
+        ns = by_label[label]
         monkeypatch.setenv("SURREAL_NAMESPACE", ns)
         monkeypatch.setenv("SURREAL_DATABASE", ns)
         monkeypatch.setenv("DATA_FOLDER", str(tmp_path / f"data_{label}"))

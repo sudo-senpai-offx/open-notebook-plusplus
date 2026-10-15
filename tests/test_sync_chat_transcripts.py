@@ -44,13 +44,21 @@ def two_devices(monkeypatch, tmp_path):
     import open_notebook.config as config
 
     issued: list[str] = []
+    by_label: dict[str, str] = {}
     roots = {"a": tmp_path / "blobs_a", "b": tmp_path / "blobs_b"}
     for path in roots.values():
         path.mkdir(parents=True, exist_ok=True)
 
     def use(label: str) -> str:
-        ns = f"chatsync_{label}_{uuid.uuid4().hex[:8]}"
-        issued.append(ns)
+        # Memoised per label. Minting a fresh namespace on every call
+        # makes "switch back to A" land in an empty database, and the
+        # test then fails for reasons that have nothing to do with sync
+        # (one test did exactly this: the final read found nothing
+        # because it read a database that never existed).
+        if label not in by_label:
+            by_label[label] = f"chatsync_{label}_{uuid.uuid4().hex[:8]}"
+            issued.append(by_label[label])
+        ns = by_label[label]
         monkeypatch.setenv("SURREAL_NAMESPACE", ns)
         monkeypatch.setenv("SURREAL_DATABASE", ns)
         # blobs._root() re-reads this attribute on each call, so patching

@@ -696,7 +696,19 @@ async def import_all(
     # then never read, so a notebook that only ever existed on the PC
     # simply never appeared on the phone. Anything whose slug had no
     # local match was dropped into `missing_notebooks` and left there.
-    notebooks_created, notebooks_updated = await _import_notebooks(root, dry_run)
+    # What this device has seen. Records absent locally but present here
+    # were deleted on this device and not yet published as tombstones:
+    # creating them from the manifest would resurrect the device's own
+    # deletions on every import, and the tombstone could never be born.
+    # Five seeds of randomised two-device interleavings converged on
+    # nothing until this gate existed - deletions died the cycle they
+    # were made in, re-imported by the deleter before it ever exported.
+    seen = tombstones.read_baseline() or {}
+    (
+        notebooks_created,
+        notebooks_updated,
+        notebooks_resurrected,
+    ) = await _import_notebooks(root, dry_run, set(seen.get(NOTEBOOKS, ())))
 
     # Rebuilt after the import above, not before it. The map used to be
     # snapshotted here from the pre-import database, so on a device
@@ -714,11 +726,19 @@ async def import_all(
 
     # Sessions next, once notebooks exist - a session's notebook_slugs
     # resolve against the same index the notes and sources use.
-    chats = await _import_chats(root, dry_run, local_notebooks, missing)
+    chats = await _import_chats(
+        root, dry_run, local_notebooks, missing, set(seen.get(CHAT_DIR, ()))
+    )
 
     result: Dict[str, Any] = {
         "notebooks_created": 0,
         "notebooks_updated": 0,
+        # Records the manifest names that this device deleted and has
+        # not yet published as tombstones. Import skips recreating them
+        # (which would resurrect the deletion before the tombstone is
+        # ever exported); the next export publishes the tombstone and
+        # the peer deletes too.
+        "resurrections_suppressed": 0,
         "notes_created": 0,
         "notes_updated": 0,
         "notes_skipped_stale": 0,
@@ -756,6 +776,7 @@ async def import_all(
         "errors": [],
         "dry_run": dry_run,
     }
+    result["resurrections_suppressed"] += notebooks_resurrected + chats["resurrected"]
 
     for path in sorted((root / NOTES_DIR).glob("*.json")):
         data = _read_json(path)
@@ -764,6 +785,10 @@ async def import_all(
             continue
         record_id = data["id"]
         existing_note: Optional[Note] = await _maybe_get(Note, record_id)
+        if existing_note is None and record_id in seen.get(NOTES_DIR, ()):
+            logger.debug(f"sync: not recreating locally deleted note {record_id}")
+            result["resurrections_suppressed"] += 1
+            continue
 
         local_updated = (
             existing_note.updated.isoformat()
@@ -815,6 +840,10 @@ async def import_all(
             continue
         record_id = data["id"]
         existing_card: Optional[Flashcard] = await _maybe_get(Flashcard, record_id)
+        if existing_card is None and record_id in seen.get(CARDS_DIR, ()):
+            logger.debug(f"sync: not recreating locally deleted card {record_id}")
+            result["resurrections_suppressed"] += 1
+            continue
 
         local_updated = (
             existing_card.updated.isoformat()
@@ -858,6 +887,10 @@ async def import_all(
             continue
         record_id = data["id"]
         existing_source: Optional[Source] = await _maybe_get(Source, record_id)
+        if existing_source is None and record_id in seen.get(SOURCES_DIR, ()):
+            logger.debug(f"sync: not recreating locally deleted source {record_id}")
+            result["resurrections_suppressed"] += 1
+            continue
 
         local_updated = (
             existing_source.updated.isoformat()
@@ -974,6 +1007,7 @@ async def _import_chats(
     dry_run: bool,
     local_notebooks: Dict[str, str],
     missing: set,
+    seen_ids: set | None = None,
 ) -> Dict[str, int]:
     """Upsert chat sessions, and merge transcripts whose bytes are here.
 
@@ -995,6 +1029,7 @@ async def _import_chats(
         "created": 0,
         "updated": 0,
         "skipped_stale": 0,
+        "resurrected": 0,
         "messages_added": 0,
         "awaiting_blobs": 0,
     }
@@ -1009,6 +1044,10 @@ async def _import_chats(
 
         session_id = str(data["id"])
         existing = await _maybe_get(ChatSession, session_id)
+        if existing is None and seen_ids is not None and session_id in seen_ids:
+            logger.debug(f"sync: not recreating locally deleted session {session_id}")
+            stats["resurrected"] += 1
+            continue
         is_stale = existing is not None and not _newer(
             data.get("updated"), _iso_str(existing.updated)
         )
@@ -1159,32 +1198,38 @@ def _imported_baseline(root: Path) -> Dict[str, List[str]]:
     return snapshot
 
 
-async def _import_notebooks(root: Path, dry_run: bool) -> Tuple[int, int]:
+async def _import_notebooks(
+    root: Path, dry_run: bool, seen_slugs: set | None = None
+) -> Tuple[int, int, int]:
     """Create or rename notebooks to match the manifest.
 
     Matched on slug, which is the only identity two devices share - a
     record id is per-database. A notebook present locally under a
     different name is renamed only when the manifest is newer, so the
     same last-write-wins rule applies here as to notes and sources.
+
+    A slug seen before but absent now was deleted here and not yet
+    published: recreating it would resurrect the deletion before the
+    tombstone is ever exported. Returns (created, updated, resurrected).
     """
     from open_notebook.domain.notebook import Notebook
 
     path = root / NOTEBOOKS
     if not path.is_file():
-        return 0, 0
+        return 0, 0, 0
 
     try:
         entries = json.loads(path.read_text(encoding="utf-8")).get("notebooks") or []
     except (OSError, ValueError) as exc:
         logger.warning(f"sync: unreadable notebook index: {exc}")
-        return 0, 0
+        return 0, 0, 0
 
     existing = {
         _slug(r.get("name") or ""): r
         for r in (await repo_query("SELECT id, name, updated FROM notebook") or [])
     }
 
-    created = updated = 0
+    created = updated = resurrected = 0
     for entry in entries:
         slug = str(entry.get("slug") or "")
         name = entry.get("name") or slug
@@ -1192,6 +1237,10 @@ async def _import_notebooks(root: Path, dry_run: bool) -> Tuple[int, int]:
             continue
 
         match = existing.get(slug)
+        if match is None and seen_slugs is not None and slug in seen_slugs:
+            logger.debug(f"sync: not recreating locally deleted notebook {slug}")
+            resurrected += 1
+            continue
         if match is None:
             if dry_run:
                 created += 1
@@ -1222,7 +1271,7 @@ async def _import_notebooks(root: Path, dry_run: bool) -> Tuple[int, int]:
         await _apply_timestamp(notebook, incoming)
         updated += 1
 
-    return created, updated
+    return created, updated, resurrected
 
 
 async def _apply_notebook_tombstone(
