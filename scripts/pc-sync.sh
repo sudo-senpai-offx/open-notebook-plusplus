@@ -174,7 +174,7 @@ cmd_pull() {
   show_import() {
     curl -s -m 300 -X POST "$API/api/sync/import" \
       -H 'Content-Type: application/json' -d "{\"dry_run\":$1}" |
-      tr ',' '\n' | grep -E 'created|updated|stale|revlog|awaiting' | sed 's/^/       /'
+      tr ',' '\n' | grep -E 'created|updated|stale|revlog|awaiting|queued|retry' | sed 's/^/       /'
   }
 
   # Here, not earlier: git has already succeeded or failed by now,

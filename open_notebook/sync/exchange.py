@@ -958,6 +958,10 @@ async def import_all(
 
             extraction = await enqueue_missing_extraction()
             result["sources_queued_for_extraction"] = extraction["queued_count"]
+            # Surfaced, not swallowed: without these ids a skipped file
+            # is invisible, and three turns of diagnosis proved that an
+            # invisible skip reads as a broken queue.
+            result["extraction_needs_retry"] = extraction["needs_retry"]
         except Exception as exc:  # noqa: BLE001 - queuing never breaks importing
             logger.warning(f"extraction queueing failed after import: {exc}")
             result["sources_queued_for_extraction"] = 0

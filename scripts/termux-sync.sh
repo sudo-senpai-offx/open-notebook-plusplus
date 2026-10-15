@@ -154,7 +154,7 @@ cmd_pull() {
   echo "[sync] import dry run (nothing written yet)"
   curl -s -m 300 -X POST "$API/api/sync/import" \
     -H 'Content-Type: application/json' -d '{"dry_run":true}' |
-    tr ',' '\n' | grep -E 'created|updated|stale|revlog' | sed 's/^/       /'
+    tr ',' '\n' | grep -E 'created|updated|stale|revlog|queued|retry' | sed 's/^/       /'
 
   if [ "$apply" != "true" ]; then
     echo
@@ -165,7 +165,7 @@ cmd_pull() {
   echo "[sync] importing"
   curl -s -m 300 -X POST "$API/api/sync/import" \
     -H 'Content-Type: application/json' -d '{"dry_run":false}' |
-    tr ',' '\n' | grep -E 'created|updated|stale|revlog' | sed 's/^/       /'
+    tr ',' '\n' | grep -E 'created|updated|stale|revlog|queued|retry' | sed 's/^/       /'
   echo "[sync] done"
 }
 
