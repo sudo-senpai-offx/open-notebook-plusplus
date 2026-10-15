@@ -781,6 +781,189 @@ class TestScannedPdfFailFast:
         assert "ocr" in str(exc.value).lower()
 
 
+class TestOcrLastResort:
+    """OCR runs when the extractor finds nothing, whatever the probe said.
+
+    The text-layer probe returns True on any uncertainty, and that True
+    used to mean "never OCR" - so a PDF whose layer exists but reads
+    empty failed outright on every device. The extractor's emptiness, not
+    the probe's optimism, now decides.
+    """
+
+    @staticmethod
+    def _model_manager() -> MagicMock:
+        mm_instance = MagicMock()
+        mm_instance.get_defaults = AsyncMock(
+            return_value=MagicMock(default_speech_to_text_model=None)
+        )
+        return mm_instance
+
+    @staticmethod
+    def _content_settings(document_engine: str) -> MagicMock:
+        return MagicMock(
+            youtube_preferred_languages=None,
+            default_content_processing_engine_url=None,
+            default_content_processing_engine_doc=document_engine,
+            docling_ocr=None,
+            docling_formulas=None,
+            docling_vision=None,
+        )
+
+    def _state(self, pdf) -> dict:
+        return {
+            "source_id": "source:123",
+            "content_state": {"file_path": str(pdf)},
+            "embed": False,
+            "apply_transformations": [],
+        }
+
+    @pytest.mark.asyncio
+    async def test_empty_extraction_falls_back_to_ocr(self, tmp_path):
+        """The phone case: probe says readable, engine finds nothing."""
+        from content_core.common import ExtractionOutput
+
+        from open_notebook.graphs.source import SourceState, content_process
+
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 layer lies")
+
+        mock_settings = MagicMock()
+        with (
+            patch(
+                "open_notebook.graphs.source.ModelManager",
+                return_value=self._model_manager(),
+            ),
+            patch("open_notebook.graphs.source.ContentSettings", mock_settings),
+            patch("open_notebook.graphs.source.extract_content") as mock_extract,
+            patch(
+                "open_notebook.graphs.source._pdf_text_layer_present",
+                return_value=True,
+            ),
+            patch("open_notebook.graphs.source.docling_available", return_value=False),
+            patch(
+                "open_notebook.graphs.source._try_ocr", return_value="recovered text"
+            ) as mock_ocr,
+        ):
+            mock_settings.get_instance = AsyncMock(
+                return_value=self._content_settings("simple")
+            )
+            mock_extract.return_value = ExtractionOutput(title="", content="   ")
+            await content_process(cast(SourceState, self._state(pdf)))
+
+        mock_ocr.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_ocr_says_so_not_docling(self, tmp_path):
+        """The message names what was tried, not a setting that cannot help."""
+        from content_core.common import ExtractionOutput
+
+        from open_notebook.graphs.source import SourceState, content_process
+
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 layer lies")
+
+        mock_settings = MagicMock()
+        with (
+            patch(
+                "open_notebook.graphs.source.ModelManager",
+                return_value=self._model_manager(),
+            ),
+            patch("open_notebook.graphs.source.ContentSettings", mock_settings),
+            patch("open_notebook.graphs.source.extract_content") as mock_extract,
+            patch(
+                "open_notebook.graphs.source._pdf_text_layer_present",
+                return_value=True,
+            ),
+            patch("open_notebook.graphs.source.docling_available", return_value=False),
+            patch("open_notebook.graphs.source._try_ocr", return_value=""),
+        ):
+            mock_settings.get_instance = AsyncMock(
+                return_value=self._content_settings("simple")
+            )
+            mock_extract.return_value = ExtractionOutput(title="", content="")
+            with pytest.raises(ValueError) as exc:
+                await content_process(cast(SourceState, self._state(pdf)))
+
+        message = str(exc.value).lower()
+        assert "ocr produced nothing" in message
+        assert "docling" not in message
+
+    @pytest.mark.asyncio
+    async def test_unavailable_ocr_names_the_cause(self, tmp_path):
+        from content_core.common import ExtractionOutput
+
+        from open_notebook.graphs.source import SourceState, content_process
+
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 layer lies")
+
+        mock_settings = MagicMock()
+        with (
+            patch(
+                "open_notebook.graphs.source.ModelManager",
+                return_value=self._model_manager(),
+            ),
+            patch("open_notebook.graphs.source.ContentSettings", mock_settings),
+            patch("open_notebook.graphs.source.extract_content") as mock_extract,
+            patch(
+                "open_notebook.graphs.source._pdf_text_layer_present",
+                return_value=True,
+            ),
+            patch("open_notebook.graphs.source.docling_available", return_value=False),
+            patch("open_notebook.graphs.source._try_ocr", return_value=""),
+            patch(
+                "open_notebook.ocr.available",
+                return_value=(False, "tesseract is not on PATH"),
+            ),
+        ):
+            mock_settings.get_instance = AsyncMock(
+                return_value=self._content_settings("simple")
+            )
+            mock_extract.return_value = ExtractionOutput(title="", content="")
+            with pytest.raises(ValueError) as exc:
+                await content_process(cast(SourceState, self._state(pdf)))
+
+        # The message carries the concrete reason OCR could not run -
+        # the binary name a package manager understands - instead of a
+        # settings page that cannot help.
+        assert "tesseract is not on PATH" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_non_pdf_empty_never_tries_ocr(self, tmp_path):
+        from content_core.common import ExtractionOutput
+
+        from open_notebook.graphs.source import SourceState, content_process
+
+        url_path = tmp_path / "page.html"
+        url_path.write_bytes(b"<html></html>")
+
+        mock_settings = MagicMock()
+        with (
+            patch(
+                "open_notebook.graphs.source.ModelManager",
+                return_value=self._model_manager(),
+            ),
+            patch("open_notebook.graphs.source.ContentSettings", mock_settings),
+            patch("open_notebook.graphs.source.extract_content") as mock_extract,
+            patch("open_notebook.graphs.source.docling_available", return_value=False),
+            patch("open_notebook.graphs.source._try_ocr") as mock_ocr,
+        ):
+            mock_settings.get_instance = AsyncMock(
+                return_value=self._content_settings("simple")
+            )
+            mock_extract.return_value = ExtractionOutput(title="", content="  ")
+            state = {
+                "source_id": "source:123",
+                "content_state": {"url": "https://example.com/page"},
+                "embed": False,
+                "apply_transformations": [],
+            }
+            with pytest.raises(ValueError):
+                await content_process(cast(SourceState, state))
+
+        mock_ocr.assert_not_called()
+
+
 # ============================================================================
 # TEST SUITE 7: Per-transformation model_id forwarding (#1137)
 # ============================================================================

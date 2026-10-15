@@ -87,6 +87,9 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     chromium \
     libglib2.0-0 \
     libgl1 \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-jpn \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*

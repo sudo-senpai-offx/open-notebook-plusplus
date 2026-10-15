@@ -176,6 +176,39 @@ _SCANNED_PDF_MESSAGE = (
 )
 
 
+def _empty_file_message(file_path: str | None, content_state: dict) -> str:
+    """Say what was actually tried, not what a setting could do.
+
+    The previous message told every failure to enable the Docling
+    document engine - including on a phone where Docling is deliberately
+    absent and the lightweight OCR path exists precisely instead of it.
+    A message that names the wrong remedy sends the operator to a
+    settings page that cannot help.
+    """
+    from open_notebook.ocr import available
+
+    # Unavailability outranks attempt: an OCR run that could never start
+    # (no binary, flag off) must say so, not report that it "produced
+    # nothing" as though the document were at fault.
+    ok, detail = available()
+    if not ok:
+        return (
+            "Could not extract any text content from this file, and OCR "
+            f"is unavailable here: {detail}."
+        )
+    if content_state.get("_ocr_attempted"):
+        return (
+            "Could not extract any text content from this file. Text "
+            "extraction came back empty and OCR produced nothing usable - "
+            "the document may be image-only with unreadable scans, or an "
+            "encoding neither engine reads."
+        )
+    return (
+        "Could not extract any text content from this file. It may be "
+        "empty or in a format the current engine can't read."
+    )
+
+
 async def _try_ocr(file_path: str, cmd_id: str | None = None) -> str:
     """Read a scanned PDF with the lightweight engine.
 
@@ -292,6 +325,24 @@ async def _extract_with_text_engine(
             augmented = await _augment_with_ocr(file_path, processed.content, cmd_id)
             if augmented != processed.content:
                 processed.content = augmented
+        elif (
+            file_path
+            and file_path.lower().endswith(".pdf")
+            and not content_state.get("skip_extraction")
+        ):
+            # Last resort. The text-layer probe above said readable (or
+            # was uncertain, which it reports as readable), the engine
+            # found nothing, and failing now would discard a document OCR
+            # can read. This is the path that saved a scanned PDF on the
+            # phone after the probe and the extractor disagreed about it.
+            ocr_text = await _try_ocr(file_path, cmd_id)
+            content_state["_ocr_attempted"] = True
+            if ocr_text and ocr_text.strip():
+                logger.info(
+                    f"OCR recovered {len(ocr_text)} chars the text engine "
+                    f"missed in {Path(file_path).name}"
+                )
+                processed.content = ocr_text
     except cc.ContentCoreError as e:
         logger.warning(f"content-core extraction failed ({type(e).__name__}): {e}")
         raise _extraction_error(e, url) from e
@@ -438,6 +489,7 @@ async def content_process(state: SourceState) -> dict:
         # killer next to two llama-servers. Tesseract is ~30 MB and
         # reads this page in about a second.
         ocr_text = await _try_ocr(file_path, cmd_id)
+        content_state["_ocr_attempted"] = True
         if ocr_text:
             content_state["ocr_text"] = ocr_text
             content_state["skip_extraction"] = True
@@ -471,10 +523,7 @@ async def content_process(state: SourceState) -> dict:
             raise ValueError(_YOUTUBE_NO_TRANSCRIPT_MESSAGE)
         if content_state.get("file_path"):
             raise ValueError(
-                "Could not extract any text content from this file. It may be "
-                "empty or in a format the current engine can't read. If it's a "
-                "scanned or image-only document, turn on OCR by enabling the "
-                "Docling document engine (Settings \u2192 Content Processing)."
+                _empty_file_message(content_state.get("file_path"), content_state)
             )
         raise ValueError(
             "Could not extract any text content from this source. "

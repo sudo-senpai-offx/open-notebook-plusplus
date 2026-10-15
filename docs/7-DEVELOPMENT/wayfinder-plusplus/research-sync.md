@@ -1544,3 +1544,37 @@ import, andmust never break the thing it follows. The mocked import
 tests proved the point immediately - the scan hit a real database
 through their mocks and six of them failed with 403s before the guard
 existed.
+
+---
+
+## 24. The probe said readable; the extractor found nothing
+
+The phone and the PC both failed the same PDF with "Could not extract
+any text content", and the log held zero OCR lines - `_try_ocr` never
+ran on either. It only runs when no text layer is detected, and
+`_pdf_text_layer_present` returns True on any uncertainty. The file has
+a layer the extractor cannot read; the probe called it readable, the
+engine found nothing, and the heuristic's optimism foreclosed the one
+path that works. My own OCR module reads 10,418 chars from the file
+when called directly.
+
+The extractor's emptiness now decides, not the probe: when a PDF
+extracts to nothing and OCR is available, the pipeline OCRs as a last
+resort before raising. Verified against the real file through the real
+path, not mocks.
+
+The failure message named the wrong remedy for every device in this
+project: "turn on OCR by enabling the Docling document engine" - on a
+phone where Docling is deliberately absent and on a container that never
+installed tesseract. It now reports what was tried: attempted-and-empty
+names the document, unavailable names the missing binary the package
+manager understands.
+
+Two environment gaps closed alongside. The PC container never had
+tesseract (`MISSING`), so no scanned PDF could ever process there; the
+Dockerfile installs it with eng+jpn data to match the default langs.
+And the manifest gitignore (`sync/`) matched the `open_notebook/sync/`
+package and silently kept the extraction module out of git - local tests
+passed, the bundle shipped without it, the phone 500'd while reporting
+itself up to date. The rule is root-anchored and a test asserts every
+source file is tracked.
