@@ -1302,13 +1302,36 @@ async def _import_insights(
             continue
 
         if existing is None:
-            await _create_with_id(
-                SourceInsight(
-                    insight_type=data.get("insight_type") or "Insight",
-                    content=data.get("content") or "",
-                ),
-                record_id,
-            )
+            # Raw CREATE, the way the create_insight command writes it:
+            # the constructor drops the `source` link (undeclared
+            # field), and creating without it fails validation - so a
+            # two-step create-then-link cannot exist. The link is part
+            # of the record from the first write.
+            source_link = data.get("source_id")
+            try:
+                await repo_query(
+                    """
+                    CREATE $id CONTENT {
+                        insight_type: $kind, content: $content,
+                        source: $src, updated: time::now()
+                    }
+                    """,
+                    {
+                        "id": ensure_record_id(record_id),
+                        "kind": data.get("insight_type") or "Insight",
+                        "content": data.get("content") or "",
+                        "src": (
+                            ensure_record_id(str(source_link)) if source_link else None
+                        ),
+                    },
+                )
+            except Exception as exc:
+                # Logged, not counted anywhere: the manifest file
+                # persists, so the next import retries. (Appending to
+                # the import result is impossible here - this helper
+                # returns counts, and the caller owns the result.)
+                logger.warning(f"sync: could not create insight {record_id}: {exc}")
+                continue
             existing = await _maybe_get(SourceInsight, record_id)
             created += 1
         else:
@@ -1316,21 +1339,20 @@ async def _import_insights(
             existing.content = data.get("content") or ""
             await existing.save()
             updated += 1
+            source_link = data.get("source_id")
+            if source_link:
+                try:
+                    await repo_query(
+                        "UPDATE $id SET source = $src",
+                        {
+                            "id": ensure_record_id(record_id),
+                            "src": ensure_record_id(str(source_link)),
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001 - link failure is not fatal
+                    logger.warning(f"sync: could not link insight {record_id}: {exc}")
         if existing is not None:
             await _apply_timestamp(existing, data.get("updated"))
-
-        source_id = data.get("source_id")
-        if source_id and existing is not None:
-            try:
-                await repo_query(
-                    "UPDATE $id SET source = $src",
-                    {
-                        "id": ensure_record_id(record_id),
-                        "src": ensure_record_id(str(source_id)),
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001 - link failure is not fatal
-                logger.warning(f"sync: could not link insight {record_id}: {exc}")
 
     return created, updated, stale, resurrected
 
