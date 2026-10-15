@@ -376,7 +376,127 @@ async def test_stream_emits_only_the_new_ai_message(mock_graph):
     assert [e["content"] for e in ai_events] == ["second answer"]
     assert [e["type"] for e in events] == [
         "user_message",
+        "history_selection",
         "ai_message",
         "context_indicators",
         "complete",
     ]
+    report = next(e for e in events if e["type"] == "history_selection")
+    assert report["data"]["kept_exchanges"] >= 1
+    assert report["data"]["total_exchanges"] >= report["data"]["kept_exchanges"]
+
+
+# --- transcript sync state ---------------------------------------------------
+#
+# The session list carries two flags per session: bytes held here, and the
+# manifest naming exactly those bytes. Both computed at read time, never
+# stored, so there is no state to go stale - and neither claims the other
+# device has anything.
+
+
+class TestTranscriptSyncState:
+    @pytest.mark.asyncio
+    async def test_empty_conversation_counts_as_both(self):
+        from api.routers._chat_shared import transcript_sync_state
+
+        with patch(
+            "api.routers._chat_shared.repo_query", new=AsyncMock(return_value=[])
+        ):
+            assert await transcript_sync_state("chat_session:empty") == (True, True)
+
+    @pytest.mark.asyncio
+    async def test_unstored_transcript_is_neither(self, tmp_path, monkeypatch):
+        import open_notebook.sync.exchange as exchange
+        from api.routers._chat_shared import transcript_sync_state
+
+        monkeypatch.setattr(exchange, "sync_dir", lambda: tmp_path)
+        rows = [
+            {
+                "id": "chat_message:1",
+                "seq": 0,
+                "role": "human",
+                "content": "q",
+                "created": "2026-10-14T00:00:00+00:00",
+            }
+        ]
+        with patch(
+            "api.routers._chat_shared.repo_query", new=AsyncMock(return_value=rows)
+        ):
+            assert await transcript_sync_state("chat_session:x") == (False, False)
+
+    @pytest.mark.asyncio
+    async def test_stored_but_unexported(self, tmp_path, monkeypatch):
+        import open_notebook.sync.exchange as exchange
+        from api.routers._chat_shared import transcript_sync_state
+        from open_notebook.storage.blobs import store_bytes
+        from open_notebook.sync import chatsync
+
+        monkeypatch.setattr(exchange, "sync_dir", lambda: tmp_path)
+        rows = [
+            {
+                "id": "chat_message:1",
+                "seq": 0,
+                "role": "human",
+                "content": "q",
+                "created": "2026-10-14T00:00:00+00:00",
+            }
+        ]
+        data = chatsync.serialize_transcript("chat_session:x", rows)
+        store_bytes(data, "chat_session-x.json", root=tmp_path / "blobs")
+        monkeypatch.setattr(
+            "open_notebook.storage.blobs._root",
+            lambda root=None: tmp_path / "blobs",
+        )
+        with patch(
+            "api.routers._chat_shared.repo_query", new=AsyncMock(return_value=rows)
+        ):
+            assert await transcript_sync_state("chat_session:x") == (True, False)
+
+    @pytest.mark.asyncio
+    async def test_exported_when_manifest_names_current_hash(
+        self, tmp_path, monkeypatch
+    ):
+        import hashlib
+        import json
+
+        import open_notebook.sync.exchange as exchange
+        from api.routers._chat_shared import transcript_sync_state
+        from open_notebook.storage.blobs import store_bytes
+        from open_notebook.sync import chatsync
+
+        monkeypatch.setattr(exchange, "sync_dir", lambda: tmp_path)
+        rows = [
+            {
+                "id": "chat_message:1",
+                "seq": 0,
+                "role": "human",
+                "content": "q",
+                "created": "2026-10-14T00:00:00+00:00",
+            }
+        ]
+        data = chatsync.serialize_transcript("chat_session:x", rows)
+        digest = hashlib.sha256(data).hexdigest()
+        store_bytes(data, "chat_session-x.json", root=tmp_path / "blobs")
+        monkeypatch.setattr(
+            "open_notebook.storage.blobs._root",
+            lambda root=None: tmp_path / "blobs",
+        )
+        chat_dir = tmp_path / "chat"
+        chat_dir.mkdir(parents=True)
+        (chat_dir / "chat_session-x.json").write_text(
+            json.dumps({"id": "chat_session:x", "transcript_sha256": digest})
+        )
+        with patch(
+            "api.routers._chat_shared.repo_query", new=AsyncMock(return_value=rows)
+        ):
+            assert await transcript_sync_state("chat_session:x") == (True, True)
+
+    @pytest.mark.asyncio
+    async def test_a_read_failure_never_breaks_listing(self):
+        from api.routers._chat_shared import transcript_sync_state
+
+        with patch(
+            "api.routers._chat_shared.repo_query",
+            new=AsyncMock(side_effect=RuntimeError("db down")),
+        ):
+            assert await transcript_sync_state("chat_session:x") == (False, False)

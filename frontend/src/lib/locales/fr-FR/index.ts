@@ -519,6 +519,8 @@ export const frFR = {
     noDescription: "Aucune description",
     startByCreating: "Commencez par créer votre premier carnet pour organiser vos recherches.",
     messagesCount: "{{count}} messages",
+    awaitingSync: "En attente de synchro",
+    historyWindow: "{{kept}} derniers sur {{total}}",
     sessionCreated: "Session de chat créée",
     sessionUpdated: "Session mise à jour",
     sessionDeleted: "Session supprimée",

@@ -12,7 +12,8 @@ import { MarkdownRenderer } from '@/components/ui/markdown-renderer'
 import {
   SourceChatMessage,
   SourceChatContextIndicator,
-  BaseChatSession
+  BaseChatSession,
+  HistorySelection
 } from '@/lib/types/api'
 import { ModelSelector } from './ModelSelector'
 import { ContextIndicator } from '@/components/common/ContextIndicator'
@@ -31,13 +32,16 @@ interface NotebookContextStats {
   charCount?: number
 }
 
+type HistoryRange = 'all' | '24h' | '7d'
+
 interface ChatPanelProps {
   messages: SourceChatMessage[]
   isStreaming: boolean
   contextIndicators: SourceChatContextIndicator | null
-  onSendMessage: (message: string, modelOverride?: string) => void
+  onSendMessage: (message: string, modelOverride?: string, historySince?: string) => void
   modelOverride?: string
   onModelChange?: (model?: string) => void
+  historySelection?: HistorySelection | null
   // Session management props
   sessions?: BaseChatSession[]
   currentSessionId?: string | null
@@ -72,10 +76,16 @@ export function ChatPanel({
   title,
   contextType = 'source',
   notebookContextStats,
-  notebookId
+  notebookId,
+  historySelection = null
 }: ChatPanelProps) {
   const { t } = useTranslation()
   const [sessionManagerOpen, setSessionManagerOpen] = useState(false)
+  // Which slice of the conversation the next turn sends. Undefined means
+  // the whole history up to the context budget; the shorthands narrow it
+  // to a timeframe and travel as history_since on the send.
+  const [historyRange, setHistoryRange] = useState<HistoryRange>('all')
+  const historySince = historyRange === 'all' ? undefined : historyRange
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const { openModal } = useModalManager()
@@ -215,9 +225,41 @@ export function ChatPanel({
           />
         )}
 
+        {/* History window: what the model saw last turn, and the range
+            for the next one. The range chips always show - a control
+            that appears only after trimming would be undiscoverable
+            exactly when a conversation grows long. The "last N of M"
+            text appears only when a turn actually trimmed something. */}
+        <div className="border-t px-4 py-2 flex items-center justify-between gap-2">
+          <span className="text-xs text-muted-foreground">
+            {historySelection && historySelection.dropped_exchanges > 0
+              ? t('chat.historyWindow', {
+                  kept: historySelection.kept_exchanges,
+                  total: historySelection.total_exchanges
+                })
+              : null}
+          </span>
+          <div className="flex gap-1">
+            {(['all', '24h', '7d'] as HistoryRange[]).map((range) => (
+              <Button
+                key={range}
+                size="sm"
+                variant={historyRange === range ? 'secondary' : 'ghost'}
+                className="h-6 px-2 text-xs"
+                onClick={() => setHistoryRange(range)}
+                disabled={isStreaming}
+              >
+                {range === 'all' ? t('common.all') : range}
+              </Button>
+            ))}
+          </div>
+        </div>
+
         {/* Input Area */}
         <ChatComposer
-          onSendMessage={onSendMessage}
+          onSendMessage={(message, modelOverride) =>
+            onSendMessage(message, modelOverride, historySince)
+          }
           isStreaming={isStreaming}
           modelOverride={modelOverride}
           onModelChange={onModelChange}
@@ -302,6 +344,7 @@ function ChatComposer({
           disabled={!input.trim() || isStreaming}
           size="icon"
           className="h-[40px] w-[40px] flex-shrink-0"
+          aria-label="send"
         >
           {isStreaming ? (
             <Loader2 className="h-4 w-4 animate-spin" />

@@ -14,6 +14,7 @@ from api.routers._chat_shared import (
     SuccessResponse,
     extract_chat_messages,
     get_session_or_404,
+    transcript_sync_state,
 )
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import (
@@ -73,6 +74,18 @@ class ChatSessionResponse(BaseModel):
     model_override: Optional[str] = Field(
         None, description="Model override for this session"
     )
+    # Sync state, computed at read time from the blob store and the last
+    # export - no schema change, no stored state to go stale. `stored`
+    # means this device holds the transcript bytes for the current
+    # messages; `exported` means the manifest names exactly those bytes.
+    # Neither claims the other device has them - that is unknowable
+    # here - only whether there is anything left to send.
+    transcript_stored: bool = Field(
+        default=False, description="Transcript bytes held on this device"
+    )
+    transcript_exported: bool = Field(
+        default=False, description="Manifest names the current transcript hash"
+    )
 
 
 class ChatSessionWithMessagesResponse(ChatSessionResponse):
@@ -99,9 +112,27 @@ class ExecuteChatRequest(BaseModel):
     )
 
 
+class HistorySelectionReport(BaseModel):
+    """What the model actually saw, for the "using the last N" indicator.
+
+    A conversation that silently stops remembering is worse than one
+    that says so. These numbers let the UI state what was sent rather
+    than implying the whole history was.
+    """
+
+    kept_exchanges: int = Field(..., description="Exchanges sent to the model")
+    dropped_exchanges: int = Field(..., description="Exchanges trimmed away")
+    total_exchanges: int = Field(..., description="Exchanges in the session")
+    reason: str = Field(..., description="Why trimming happened: budget or timeframe")
+
+
 class ExecuteChatResponse(BaseModel):
     session_id: str = Field(..., description="Session ID")
     messages: List[ChatMessage] = Field(..., description="Updated message list")
+    history_selection: Optional[HistorySelectionReport] = Field(
+        default=None,
+        description="Which exchanges the model saw, when trimming applied",
+    )
 
 
 class BuildContextRequest(BaseModel):
@@ -149,6 +180,7 @@ async def get_sessions(notebook_id: str = Query(..., description="Notebook ID"))
 
             # Get message count from LangGraph state
             msg_count = await get_session_message_count(chat_graph, session_id)
+            stored, exported = await transcript_sync_state(session_id)
 
             results.append(
                 ChatSessionResponse(
@@ -159,6 +191,8 @@ async def get_sessions(notebook_id: str = Query(..., description="Notebook ID"))
                     updated=str(session.updated),
                     message_count=msg_count,
                     model_override=getattr(session, "model_override", None),
+                    transcript_stored=stored,
+                    transcript_exported=exported,
                 )
             )
 
@@ -518,7 +552,16 @@ async def execute_chat(request: ExecuteChatRequest):
         # Convert messages to response format
         messages = extract_chat_messages(turn_messages)
 
-        return ExecuteChatResponse(session_id=request.session_id, messages=messages)
+        return ExecuteChatResponse(
+            session_id=request.session_id,
+            messages=messages,
+            history_selection=HistorySelectionReport(
+                kept_exchanges=history.kept_exchanges,
+                dropped_exchanges=history.dropped_exchanges,
+                total_exchanges=history.kept_exchanges + history.dropped_exchanges,
+                reason=history.reason,
+            ),
+        )
     except NotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     except HTTPException:

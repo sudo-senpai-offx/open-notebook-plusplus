@@ -13,7 +13,8 @@ import {
   Edit2,
   Check,
   X,
-  Clock
+  Clock,
+  CloudOff
 } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { getDateLocale } from '@/lib/utils/date-locale'
@@ -237,6 +238,12 @@ export function SessionManager({
                         {session.model_override && (
                           <Badge variant="outline" className="mt-2 ml-2 text-xs">
                             {getModelName(session.model_override)}
+                          </Badge>
+                        )}
+                        {session.transcript_exported === false && (
+                          <Badge variant="outline" className="mt-2 ml-2 text-xs gap-1">
+                            <CloudOff className="h-3 w-3" />
+                            {t('chat.awaitingSync')}
                           </Badge>
                         )}
                       </>

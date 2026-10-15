@@ -522,6 +522,8 @@ export const deDE = {
     noDescription: "Keine Beschreibung",
     startByCreating: "Erstelle zuerst dein erstes Notebook, um deine Recherche zu organisieren.",
     messagesCount: "{{count}} Nachrichten",
+    awaitingSync: "Sync ausstehend",
+    historyWindow: "Letzte {{kept}} von {{total}}",
     sessionCreated: "Chat-Sitzung erstellt",
     sessionUpdated: "Sitzung aktualisiert",
     sessionDeleted: "Sitzung gelöscht",

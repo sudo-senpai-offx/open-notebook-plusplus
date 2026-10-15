@@ -9,6 +9,7 @@ import { chatApi } from '@/lib/api/chat'
 import { QUERY_KEYS } from '@/lib/api/query-client'
 import {
   NotebookChatMessage,
+  HistorySelection,
   CreateNotebookChatSessionRequest,
   UpdateNotebookChatSessionRequest,
   SourceListResponse,
@@ -28,6 +29,7 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
   const queryClient = useQueryClient()
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<NotebookChatMessage[]>([])
+  const [historySelection, setHistorySelection] = useState<HistorySelection | null>(null)
   const [isSending, setIsSending] = useState(false)
   const [tokenCount, setTokenCount] = useState<number>(0)
   const [charCount, setCharCount] = useState<number>(0)
@@ -178,7 +180,11 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
   }, [notebookId, sources, notes, contextSelections])
 
   // Send message (synchronous, no streaming)
-  const sendMessage = useCallback(async (message: string, modelOverride?: string) => {
+  const sendMessage = useCallback(async (
+    message: string,
+    modelOverride?: string,
+    historySince?: string
+  ) => {
     let sessionId = currentSessionId
 
     // Auto-create session if none exists
@@ -224,11 +230,13 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
         session_id: sessionId,
         message,
         context,
-        model_override: modelOverride ?? (currentSession?.model_override ?? undefined)
+        model_override: modelOverride ?? (currentSession?.model_override ?? undefined),
+        ...(historySince ? { history_since: historySince } : {})
       })
 
       // Update messages with API response
       setMessages(response.messages)
+      setHistorySelection(response.history_selection ?? null)
 
       // Refetch current session to get updated data
       await refetchCurrentSession()
@@ -255,6 +263,7 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
   // Switch session
   const switchSession = useCallback((sessionId: string) => {
     setCurrentSessionId(sessionId)
+    setHistorySelection(null)
   }, [])
 
   // Create session
@@ -315,6 +324,7 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
     tokenCount,
     charCount,
     pendingModelOverride,
+    historySelection,
 
     // Actions
     createSession,

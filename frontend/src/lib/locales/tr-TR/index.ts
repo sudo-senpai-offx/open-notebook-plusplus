@@ -519,6 +519,8 @@ export const trTR = {
     noDescription: "Açıklama yok",
     startByCreating: "Araştırmanızı düzenlemek için ilk defterinizi oluşturun.",
     messagesCount: "{{count}} mesaj",
+    awaitingSync: "Senkronizasyon bekleniyor",
+    historyWindow: "Son {{kept}} / {{total}}",
     sessionCreated: "Sohbet oturumu oluşturuldu",
     sessionUpdated: "Oturum güncellendi",
     sessionDeleted: "Oturum silindi",

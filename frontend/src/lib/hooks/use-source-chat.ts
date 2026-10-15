@@ -10,6 +10,7 @@ import {
   SourceChatSession,
   SourceChatMessage,
   SourceChatContextIndicator,
+  HistorySelection,
   CreateSourceChatSessionRequest,
   UpdateSourceChatSessionRequest
 } from '@/lib/types/api'
@@ -21,6 +22,7 @@ export function useSourceChat(sourceId: string) {
   const [messages, setMessages] = useState<SourceChatMessage[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [contextIndicators, setContextIndicators] = useState<SourceChatContextIndicator | null>(null)
+  const [historySelection, setHistorySelection] = useState<HistorySelection | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
   // Fetch sessions
@@ -104,7 +106,11 @@ export function useSourceChat(sourceId: string) {
   })
 
   // Send message with streaming
-  const sendMessage = useCallback(async (message: string, modelOverride?: string) => {
+  const sendMessage = useCallback(async (
+    message: string,
+    modelOverride?: string,
+    historySince?: string
+  ) => {
     let sessionId = currentSessionId
 
     // Auto-create session if none exists
@@ -136,7 +142,8 @@ export function useSourceChat(sourceId: string) {
     try {
       const response = await sourceChatApi.sendMessage(sourceId, sessionId, {
         message,
-        model_override: modelOverride
+        model_override: modelOverride,
+        ...(historySince ? { history_since: historySince } : {})
       })
 
       if (!response) {
@@ -187,6 +194,8 @@ export function useSourceChat(sourceId: string) {
                 }
               } else if (data.type === 'context_indicators') {
                 setContextIndicators(data.data)
+              } else if (data.type === 'history_selection') {
+                setHistorySelection(data.data ?? null)
               } else if (data.type === 'error') {
                 throw new Error(data.message || 'Stream error')
               }
@@ -225,6 +234,7 @@ export function useSourceChat(sourceId: string) {
   const switchSession = useCallback((sessionId: string) => {
     setCurrentSessionId(sessionId)
     setContextIndicators(null)
+    setHistorySelection(null)
   }, [])
 
   // Create session
@@ -251,6 +261,7 @@ export function useSourceChat(sourceId: string) {
     isStreaming,
     contextIndicators,
     loadingSessions,
+    historySelection,
     
     // Actions
     createSession,

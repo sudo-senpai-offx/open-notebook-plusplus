@@ -519,6 +519,8 @@ export const jaJP = {
     noDescription: "説明なし",
     startByCreating: "最初のノートブックを作成してリサーチを整理しましょう。",
     messagesCount: "{{count}}件のメッセージ",
+    awaitingSync: "同期待ち",
+    historyWindow: "全{{total}}件中直近{{kept}}件",
     sessionCreated: "チャットセッションを作成しました",
     sessionUpdated: "セッションを更新しました",
     sessionDeleted: "セッションを削除しました",

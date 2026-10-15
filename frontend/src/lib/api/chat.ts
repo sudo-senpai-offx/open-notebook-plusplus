@@ -5,7 +5,7 @@ import {
   CreateNotebookChatSessionRequest,
   UpdateNotebookChatSessionRequest,
   SendNotebookChatMessageRequest,
-  NotebookChatMessage,
+  SendNotebookChatMessageResponse,
   BuildContextRequest,
   BuildContextResponse,
 } from '@/lib/types/api'
@@ -49,10 +49,7 @@ export const chatApi = {
 
   // Messaging (synchronous, no streaming)
   sendMessage: async (data: SendNotebookChatMessageRequest) => {
-    const response = await apiClient.post<{
-      session_id: string
-      messages: NotebookChatMessage[]
-    }>(
+    const response = await apiClient.post<SendNotebookChatMessageResponse>(
       `/chat/execute`,
       data
     )

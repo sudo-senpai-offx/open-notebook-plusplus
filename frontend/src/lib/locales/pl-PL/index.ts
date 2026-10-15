@@ -519,6 +519,8 @@ export const plPL = {
     noDescription: "Brak opisu",
     startByCreating: "Zacznij od utworzenia pierwszego notatnika, aby uporządkować swoje badania.",
     messagesCount: "Wiadomości: {{count}}",
+    awaitingSync: "Oczekuje na synchronizację",
+    historyWindow: "Ostatnie {{kept}} z {{total}}",
     sessionCreated: "Utworzono sesję czatu",
     sessionUpdated: "Zaktualizowano sesję",
     sessionDeleted: "Usunięto sesję",

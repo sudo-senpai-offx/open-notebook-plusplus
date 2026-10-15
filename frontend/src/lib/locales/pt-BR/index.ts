@@ -519,6 +519,8 @@ export const ptBR = {
     noDescription: "Sem descrição",
     startByCreating: "Comece criando seu primeiro caderno para organizar sua pesquisa.",
     messagesCount: "{{count}} mensagens",
+    awaitingSync: "Aguardando sincronização",
+    historyWindow: "Últimas {{kept}} de {{total}}",
     sessionCreated: "Sessão de chat criada",
     sessionUpdated: "Sessão atualizada",
     sessionDeleted: "Sessão excluída",

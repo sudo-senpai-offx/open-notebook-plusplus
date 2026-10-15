@@ -92,3 +92,50 @@ def extract_chat_messages(raw_messages: Iterable[Any]) -> List[ChatMessage]:
             )
         )
     return messages
+
+
+async def transcript_sync_state(session_id: str) -> Tuple[bool, bool]:
+    """Whether this session's transcript is stored here and exported.
+
+    An empty conversation has nothing to store and counts as both: it
+    needs no bytes and names no hash, so there is nothing outstanding in
+    either direction. Computed at read time from the blob store and the
+    last export - no schema change, no stored state to go stale. Neither
+    flag claims the other device has the bytes; only whether there is
+    anything left to send.
+    """
+    import hashlib
+    import json
+
+    from loguru import logger
+
+    from open_notebook.storage.blobs import blob_exists
+    from open_notebook.sync import chatsync
+    from open_notebook.sync.exchange import sync_dir
+
+    try:
+        rows = await repo_query(
+            "SELECT id, seq, role, content, created FROM chat_message "
+            "WHERE session = $sid ORDER BY seq ASC",
+            {"sid": ensure_record_id(session_id)},
+        )
+    except Exception as exc:  # noqa: BLE001 - sync state never breaks listing
+        logger.warning(f"could not read transcript state for {session_id}: {exc}")
+        return False, False
+
+    messages = rows or []
+    if not messages:
+        return True, True
+
+    digest = hashlib.sha256(
+        chatsync.serialize_transcript(session_id, messages)
+    ).hexdigest()
+    if not blob_exists(digest):
+        return False, False
+
+    try:
+        entry_path = sync_dir() / "chat" / f"{session_id.replace(':', '-')}.json"
+        entry = json.loads(entry_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True, False
+    return True, entry.get("transcript_sha256") == digest

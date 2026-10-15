@@ -36,11 +36,11 @@ describe('ChatPanel composer', () => {
     const textarea = getTextarea()
     fireEvent.change(textarea, { target: { value: '  hello world  ' } })
 
-    const sendButton = screen.getByRole('button')
+    const sendButton = screen.getByRole('button', { name: 'send' })
     fireEvent.click(sendButton)
 
     expect(onSendMessage).toHaveBeenCalledTimes(1)
-    expect(onSendMessage).toHaveBeenCalledWith('hello world', undefined)
+    expect(onSendMessage).toHaveBeenCalledWith('hello world', undefined, undefined)
     expect(textarea.value).toBe('')
   })
 
@@ -62,7 +62,7 @@ describe('ChatPanel composer', () => {
     fireEvent.change(textarea, { target: { value: 'via cmd' } })
     fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true, ctrlKey: false })
 
-    expect(onSendMessage).toHaveBeenCalledWith('via cmd', undefined)
+    expect(onSendMessage).toHaveBeenCalledWith('via cmd', undefined, undefined)
     expect(textarea.value).toBe('')
     uaSpy.mockRestore()
   })
@@ -85,7 +85,7 @@ describe('ChatPanel composer', () => {
     fireEvent.change(textarea, { target: { value: 'via ctrl' } })
     fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true, metaKey: false })
 
-    expect(onSendMessage).toHaveBeenCalledWith('via ctrl', undefined)
+    expect(onSendMessage).toHaveBeenCalledWith('via ctrl', undefined, undefined)
     expect(textarea.value).toBe('')
     uaSpy.mockRestore()
   })
@@ -106,5 +106,68 @@ describe('ChatPanel composer', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
 
     expect(onSendMessage).not.toHaveBeenCalled()
+  })
+})
+
+describe('ChatPanel history window', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    window.HTMLElement.prototype.scrollIntoView = vi.fn()
+  })
+
+  const baseProps = {
+    messages: [],
+    isStreaming: false,
+    contextIndicators: null,
+    onSendMessage: vi.fn(),
+  }
+
+  it('shows no counts when the conversation fits', () => {
+    render(
+      <ChatPanel
+        {...baseProps}
+        historySelection={{ kept_exchanges: 5, dropped_exchanges: 0, total_exchanges: 5, reason: 'budget' }}
+      />
+    )
+
+    expect(screen.queryByText('chat.historyWindow')).not.toBeInTheDocument()
+    // The range control itself always shows - it must be reachable
+    // before trimming ever happens.
+    expect(screen.getByRole('button', { name: '24h' })).toBeInTheDocument()
+  })
+
+  it('states what was sent when trimming applied', () => {
+    render(
+      <ChatPanel
+        {...baseProps}
+        historySelection={{ kept_exchanges: 32, dropped_exchanges: 368, total_exchanges: 400, reason: 'budget' }}
+      />
+    )
+
+    // t() is mocked to return the key; interpolation is real.
+    expect(screen.getByText('chat.historyWindow')).toBeInTheDocument()
+  })
+
+  it('sends the selected range as history_since', () => {
+    const onSendMessage = vi.fn()
+    render(<ChatPanel {...baseProps} onSendMessage={onSendMessage} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '24h' }))
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'q' } })
+    fireEvent.click(screen.getByRole('button', { name: 'send' }))
+
+    expect(onSendMessage).toHaveBeenCalledWith('q', undefined, '24h')
+  })
+
+  it('defaults to the whole history', () => {
+    const onSendMessage = vi.fn()
+    render(<ChatPanel {...baseProps} onSendMessage={onSendMessage} />)
+
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'q' } })
+    fireEvent.click(screen.getByRole('button', { name: 'send' }))
+
+    expect(onSendMessage).toHaveBeenCalledWith('q', undefined, undefined)
   })
 })

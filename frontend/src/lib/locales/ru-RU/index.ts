@@ -519,6 +519,8 @@ export const ruRU = {
     noDescription: "Без описания",
     startByCreating: "Начните с создания первого блокнота для организации исследований.",
     messagesCount: "Сообщений: {{count}}",
+    awaitingSync: "Ожидает синхронизации",
+    historyWindow: "Последние {{kept}} из {{total}}",
     sessionCreated: "Сессия чата создана",
     sessionUpdated: "Сессия обновлена",
     sessionDeleted: "Сессия удалена",

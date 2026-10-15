@@ -56,7 +56,8 @@ export default function SourceDetailPage() {
             messages={chat.messages}
             isStreaming={chat.isStreaming}
             contextIndicators={chat.contextIndicators}
-            onSendMessage={(message, model) => chat.sendMessage(message, model)}
+            onSendMessage={(message, model, historySince) =>
+              chat.sendMessage(message, model, historySince)}
             modelOverride={chat.currentSession?.model_override}
             onModelChange={(model) => {
               if (chat.currentSessionId) {
@@ -70,6 +71,7 @@ export default function SourceDetailPage() {
             onUpdateSession={(sessionId, title) => chat.updateSession(sessionId, { title })}
             onDeleteSession={chat.deleteSession}
             loadingSessions={chat.loadingSessions}
+            historySelection={chat.historySelection}
           />
         </div>
       </div>

@@ -98,7 +98,8 @@ export function ChatColumn({ notebookId, contextSelections, sources, sourcesLoad
       messages={chat.messages}
       isStreaming={chat.isSending}
       contextIndicators={null}
-      onSendMessage={(message, modelOverride) => chat.sendMessage(message, modelOverride)}
+      onSendMessage={(message, modelOverride, historySince) =>
+        chat.sendMessage(message, modelOverride, historySince)}
       modelOverride={chat.currentSession?.model_override ?? chat.pendingModelOverride ?? undefined}
       onModelChange={(model) => chat.setModelOverride(model ?? null)}
       sessions={chat.sessions}
@@ -108,6 +109,7 @@ export function ChatColumn({ notebookId, contextSelections, sources, sourcesLoad
       onUpdateSession={(sessionId, title) => chat.updateSession(sessionId, { title })}
       onDeleteSession={chat.deleteSession}
       loadingSessions={chat.loadingSessions}
+      historySelection={chat.historySelection}
       notebookContextStats={contextStats}
       notebookId={notebookId}
     />

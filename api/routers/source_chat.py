@@ -16,6 +16,7 @@ from api.routers._chat_shared import (
     extract_chat_messages,
     get_source_or_404,
     get_verified_source_session,
+    transcript_sync_state,
 )
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import ChatSession
@@ -72,6 +73,12 @@ class SourceChatSessionResponse(BaseModel):
     message_count: Optional[int] = Field(
         None, description="Number of messages in session"
     )
+    transcript_stored: bool = Field(
+        default=False, description="Transcript bytes held on this device"
+    )
+    transcript_exported: bool = Field(
+        default=False, description="Manifest names the current transcript hash"
+    )
 
 
 class SourceChatSessionWithMessagesResponse(SourceChatSessionResponse):
@@ -87,6 +94,14 @@ class SendMessageRequest(BaseModel):
     message: str = Field(..., description="User message content")
     model_override: Optional[str] = Field(
         None, description="Optional model override for this message"
+    )
+    # Narrow the conversation the model sees: an ISO timestamp, or a
+    # shorthand like "2d" / "36h". Without it, history is filled from
+    # the newest end until the context budget is spent. Same field as
+    # the notebook chat path.
+    history_since: Optional[str] = Field(
+        default=None,
+        description="Only consider history at or after this time (ISO, or 45m/2d/1w)",
     )
 
 
@@ -165,6 +180,7 @@ async def get_source_chat_sessions(source_id: str = Path(..., description="Sourc
                     msg_count = await get_session_message_count(
                         source_chat_graph, session_id
                     )
+                    stored, exported = await transcript_sync_state(session_id)
 
                     sessions.append(
                         SourceChatSessionResponse(
@@ -175,6 +191,8 @@ async def get_source_chat_sessions(source_id: str = Path(..., description="Sourc
                             created=str(session_data.get("created")),
                             updated=str(session_data.get("updated")),
                             message_count=msg_count,
+                            transcript_stored=stored,
+                            transcript_exported=exported,
                         )
                     )
 
@@ -349,7 +367,11 @@ async def delete_source_chat_session(
 
 
 async def stream_source_chat_response(
-    session_id: str, source_id: str, message: str, model_override: Optional[str] = None
+    session_id: str,
+    source_id: str,
+    message: str,
+    model_override: Optional[str] = None,
+    history_since: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Stream the source chat response as Server-Sent Events."""
     try:
@@ -360,9 +382,24 @@ async def stream_source_chat_response(
             config=RunnableConfig(configurable={"thread_id": session_id}),
         )
 
-        # Prepare state for execution
+        # Prepare state for execution. Trimmed to the model's window:
+        # the entire checkpoint history used to go out every turn, and a
+        # long session silently stopped working once it outgrew it. Same
+        # selection as the notebook chat path, same budget source.
+        from open_notebook.utils.history import parse_since, select_history
+
+        history = select_history(
+            current_state.values.get("messages", []) if current_state else [],
+            history_since=parse_since(history_since),
+        )
+        if history.dropped_exchanges:
+            logger.info(
+                f"History trimmed for source session {session_id}: kept "
+                f"{history.kept_exchanges} exchange(s), dropped "
+                f"{history.dropped_exchanges} ({history.reason})"
+            )
         state_values = current_state.values if current_state else {}
-        state_values["messages"] = state_values.get("messages", [])
+        state_values["messages"] = list(history.messages)
         state_values["source_id"] = source_id
         state_values["model_override"] = model_override
 
@@ -374,6 +411,20 @@ async def stream_source_chat_response(
         # Send user message event
         user_event = {"type": "user_message", "content": message, "timestamp": None}
         yield f"data: {json.dumps(user_event)}\n\n"
+
+        # What the model saw. Ignored by older frontends (unknown event
+        # types fall through the parser), read by newer ones for the
+        # "using the last N" indicator.
+        selection_event = {
+            "type": "history_selection",
+            "data": {
+                "kept_exchanges": history.kept_exchanges,
+                "dropped_exchanges": history.dropped_exchanges,
+                "total_exchanges": history.kept_exchanges + history.dropped_exchanges,
+                "reason": history.reason,
+            },
+        }
+        yield f"data: {json.dumps(selection_event)}\n\n"
 
         # Run the synchronous LangGraph invoke in a thread so it doesn't block the
         # event loop. While blocked, even the already-yielded SSE events can't
@@ -463,6 +514,7 @@ async def send_message_to_source_chat(
                 source_id=full_source_id,
                 message=request.message,
                 model_override=model_override,
+                history_since=request.history_since,
             ),
             media_type="text/event-stream",
             headers={

@@ -519,6 +519,8 @@ export const bnIN = {
     noDescription: "কোন বিবরণ নেই",
     startByCreating: "আপনার ঠৈ সাজানোর জন্য প্রথম নোটবুক তৈরি করে শুরু করুন।",
     messagesCount: "{{count}}টি বার্তা",
+    awaitingSync: "সিঙ্কের অপেক্ষায়",
+    historyWindow: "সর্বশেষ {{kept}} / {{total}}",
     sessionCreated: "চ্যাট সেশন তৈরি হয়েছে",
     sessionUpdated: "সেশন আপডেট হয়েছে",
     sessionDeleted: "সেশন মুছে ফেলা হয়েছে",

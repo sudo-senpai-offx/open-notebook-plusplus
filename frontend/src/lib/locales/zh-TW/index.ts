@@ -519,6 +519,8 @@ export const zhTW = {
     noDescription: "暫無描述",
     startByCreating: "從新增您的第一個筆記本開始，組織您的研究。",
     messagesCount: "{{count}} 條訊息",
+    awaitingSync: "等待同步",
+    historyWindow: "共{{total}}則中的後{{kept}}則",
     sessionCreated: "聊天會話已建立",
     sessionUpdated: "會話已更新",
     sessionDeleted: "會話已刪除",

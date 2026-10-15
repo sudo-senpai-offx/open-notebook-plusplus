@@ -519,6 +519,8 @@ export const caES = {
     noDescription: "Sense descripció",
     startByCreating: "Comença creant el teu primer quadern per organitzar la teva recerca.",
     messagesCount: "{{count}} missatges",
+    awaitingSync: "Sincronització pendent",
+    historyWindow: "Darrers {{kept}} de {{total}}",
     sessionCreated: "S'ha creat la sessió de xat",
     sessionUpdated: "S'ha actualitzat la sessió",
     sessionDeleted: "S'ha suprimit la sessió",

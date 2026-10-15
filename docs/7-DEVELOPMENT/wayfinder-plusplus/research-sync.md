@@ -1655,3 +1655,33 @@ What it caught, in order:
    baseline write poisoned the import in the same test Methods, tripping
    the resurrection gate on records never seen. Per-device data dirs,
    like the other three fixtures.
+
+---
+
+## 27. Chat sync state and history visibility (frontend)
+
+Two gaps closed, both "the app knows and does not say".
+
+**Session sync state.** The manifest and the blob store already knew
+whether each transcript was held and exported; the session list showed
+neither. `transcript_stored` / `transcript_exported` are computed at
+read time on both session list routes (no schema change, nothing to go
+stale), and the session manager shows a single "awaiting sync" badge
+only when there is something outstanding. Neither flag claims the other
+device has the bytes - unknowable here - only whether anything is left
+to send.
+
+**History selection.** The trimming reports kept/dropped/reason on every
+turn and no UI surfaced it, so a conversation looked like it remembered
+everything while quietly not. The notebook execute response and a new
+source-chat SSE event both carry the report now; the panel shows "Last
+N of M" only when something was actually trimmed, with All/24h/7d range
+chips that travel as `history_since`. The chips always render - a
+control that appears only after trimming would be undiscoverable exactly
+when a conversation grows long.
+
+Built alongside: the source chat path never trimmed at all (same
+unbounded-history hazard, same 4096 window), so it trims with the same
+helper and budget now. Sixteen locales carry the two new strings under
+the parity test, which also enforces an unused-key rule - the keys had
+to ship with the UI that references them, in the same commit.

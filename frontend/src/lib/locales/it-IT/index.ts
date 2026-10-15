@@ -519,6 +519,8 @@ export const itIT = {
     noDescription: "Nessuna descrizione",
     startByCreating: "Inizia creando il tuo primo quaderno per organizzare la tua ricerca.",
     messagesCount: "{{count}} messaggi",
+    awaitingSync: "Sincronizzazione in attesa",
+    historyWindow: "Ultime {{kept}} di {{total}}",
     sessionCreated: "Sessione chat creata",
     sessionUpdated: "Sessione aggiornata",
     sessionDeleted: "Sessione eliminata",

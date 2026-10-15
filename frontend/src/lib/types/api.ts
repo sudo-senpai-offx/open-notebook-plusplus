@@ -146,6 +146,15 @@ export interface BaseChatSession {
   updated: string
   message_count?: number
   model_override?: string | null
+  transcript_stored?: boolean
+  transcript_exported?: boolean
+}
+
+export interface HistorySelection {
+  kept_exchanges: number
+  dropped_exchanges: number
+  total_exchanges: number
+  reason: string
 }
 
 export interface SourceChatSession extends BaseChatSession {
@@ -185,10 +194,11 @@ export interface UpdateSourceChatSessionRequest {
 export interface SendMessageRequest {
   message: string
   model_override?: string
+  history_since?: string
 }
 
 export interface SourceChatStreamEvent {
-  type: 'user_message' | 'ai_message' | 'context_indicators' | 'complete' | 'error'
+  type: 'user_message' | 'ai_message' | 'context_indicators' | 'history_selection' | 'complete' | 'error'
   content?: string
   data?: unknown
   message?: string
@@ -230,6 +240,13 @@ export interface SendNotebookChatMessageRequest {
     notes: Array<Record<string, unknown>>
   }
   model_override?: string
+  history_since?: string
+}
+
+export interface SendNotebookChatMessageResponse {
+  session_id: string
+  messages: NotebookChatMessage[]
+  history_selection?: HistorySelection
 }
 
 export interface BuildContextRequest {

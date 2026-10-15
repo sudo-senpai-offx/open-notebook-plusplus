@@ -11,7 +11,7 @@ from typing import Annotated, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -19,6 +19,16 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from open_notebook.exceptions import IncompleteGenerationError
+
+
+class _Msg:
+    """A LangChain-like message with id/type/content."""
+
+    def __init__(self, id, type, content):
+        self.id = id
+        self.type = type
+        self.content = content
+
 
 EMPTY_REPLIES = ["", "   \n\t", "<think>only reasoning</think>", None]
 
@@ -223,3 +233,70 @@ def test_discard_unanswered_message_ignores_unknown_ids():
     discard_unanswered_message(graph, "t", HumanMessage(content="x", id="nope"))
 
     assert _history(graph, "t") == [("human", "q1"), ("ai", "first answer")]
+
+
+def test_execute_reports_what_the_model_saw():
+    """The "using the last N" indicator reads this, not the messages.
+
+    Without it the UI can only imply the whole history went out, which
+    is exactly the silent failure the trimming exists to prevent.
+    """
+    from fastapi.testclient import TestClient
+
+    from api.main import app
+
+    client = TestClient(app)
+    graph = _toy_graph(["the answer"])
+    session = MagicMock(model_override=None, save=AsyncMock())
+    with (
+        patch("api.routers.chat.chat_graph", graph),
+        patch(
+            "api.routers.chat.get_session_or_404",
+            new=AsyncMock(return_value=("chat_session:n", session)),
+        ),
+        patch("api.routers.chat.repo_query", new=AsyncMock(return_value=[])),
+    ):
+        payload = {"session_id": "chat_session:n", "message": "question", "context": {}}
+        response = client.post("/api/chat/execute", json=payload)
+
+    assert response.status_code == 200
+    report = response.json()["history_selection"]
+    # A fresh session trims nothing; the invariant is arithmetic, not
+    # any particular count.
+    assert report["dropped_exchanges"] == 0
+    assert report["total_exchanges"] == report["kept_exchanges"]
+    assert report["reason"] == "budget"
+
+
+@pytest.mark.asyncio
+async def test_source_stream_reports_trimming_on_long_histories():
+    """The phone's window is 4096 tokens; an untrimmed source chat would
+    silently break there exactly like the notebook path once did."""
+    from api.routers.source_chat import stream_source_chat_response
+
+    long_history: list[BaseMessage] = []
+    for index in range(120):
+        long_history.append(
+            HumanMessage(content=f"question {index} " + "x" * 300, id=f"h{index}")
+        )
+        long_history.append(
+            AIMessage(content=f"answer {index} " + "y" * 300, id=f"a{index}")
+        )
+
+    graph = _toy_graph(["the answer"])
+    with patch("api.routers.source_chat.source_chat_graph", graph):
+        # Seed the checkpoint with the long history first.
+        config = RunnableConfig(configurable={"thread_id": "chat_session:long"})
+        graph.invoke({"messages": long_history}, config)
+        events = await _events(
+            stream_source_chat_response("chat_session:long", "source:1", "next?")
+        )
+
+    report = next(e for e in events if e["type"] == "history_selection")
+    assert report["data"]["dropped_exchanges"] > 0, (
+        "a 120-exchange history must not reach a 4096-token window whole"
+    )
+    assert (
+        report["data"]["kept_exchanges"] + report["data"]["dropped_exchanges"]
+        == (report["data"]["total_exchanges"])
+    )

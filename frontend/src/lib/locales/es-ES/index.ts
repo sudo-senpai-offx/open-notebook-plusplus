@@ -519,6 +519,8 @@ export const esES = {
     noDescription: "Sin descripción",
     startByCreating: "Comienza creando tu primer cuaderno para organizar tu investigación.",
     messagesCount: "{{count}} mensajes",
+    awaitingSync: "Sincronización pendiente",
+    historyWindow: "Últimos {{kept}} de {{total}}",
     sessionCreated: "Sesión de chat creada",
     sessionUpdated: "Sesión actualizada",
     sessionDeleted: "Sesión eliminada",

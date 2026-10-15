@@ -517,6 +517,8 @@ export const enUS = {
     noDescription: "No description",
     startByCreating: "Start by creating your first notebook to organize your research.",
     messagesCount: "{{count}} messages",
+    awaitingSync: "Awaiting sync",
+    historyWindow: "Last {{kept}} of {{total}}",
     sessionCreated: "Chat session created",
     sessionUpdated: "Session updated",
     sessionDeleted: "Session deleted",
