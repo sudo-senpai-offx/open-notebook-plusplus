@@ -1685,3 +1685,30 @@ unbounded-history hazard, same 4096 window), so it trims with the same
 helper and budget now. Sixteen locales carry the two new strings under
 the parity test, which also enforces an unused-key rule - the keys had
 to ship with the UI that references them, in the same commit.
+
+---
+
+## 28. Insights sync; embeddings stay local by necessity
+
+Nine insights sat on the PC with zero on the phone. They sync now as a
+manifest kind (`insights/`, one file per record: id, type, content,
+source link, timestamp), with tombstones, baseline gating, resurrection
+gating and LWW like every other kind. The phone pulls them on its next
+cycle - including the 9 existing ones, which export like any other
+record. Regenerating them there instead would cost model inference time
+next to two llama-servers; transporting them costs bytes in git.
+
+Embeddings explicitly do not sync, and never should: the two devices
+run different embedding models (nomic-family on the PC, bge-small on
+the phone), and vectors from different models live in different spaces
+- transporting them would file garbage that reads as valid. What
+converges instead is the processing *state*: import queues extraction
+for file-holding sources without text, the worker extracts and embeds
+locally, and both sides end up readable and searchable by doing the
+work rather than by copying its output. 526 embedding rows on the PC
+stay exactly where they are.
+
+Notes verified rather than built: Day 1 and Day 2 exist with content on
+both devices, filed to 日本語勉強会 - the recovery plus the filing fix
+hold. Flashcards sync in code and suite with zero live rows on either
+side; the path is tested but never exercised with real cards.

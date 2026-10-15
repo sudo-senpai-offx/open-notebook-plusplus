@@ -80,6 +80,12 @@ NOTES_DIR = "notes"
 NOTEBOOKS = "notebooks/index.json"
 CARDS_DIR = "cards"
 SOURCES_DIR = "sources"
+# Model-generated insights (transformation output per source). Small
+# text, stable source ids, worth carrying: regenerating them on the
+# phone costs model inference time next to two llama-servers, while
+# transporting them costs bytes in git. Embeddings stay local for the
+# opposite reason (vectors are model-specific); insights are text.
+INSIGHTS_DIR = "insights"
 REVLOG = "revlog/revlog.jsonl"
 # Chat sessions. One file per session, holding metadata and the
 # transcript's hash - never the transcript. That travels as a blob, so
@@ -362,6 +368,8 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             },
         )
 
+    insights = await _export_insights(root)
+
     revlog_rows = await repo_query(
         "SELECT card_id, rating, reviewed_at, duration_ms FROM revlog ORDER BY reviewed_at ASC"
     )
@@ -399,6 +407,7 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             # does, or the peer keeps offering it back forever and the
             # conversation reappears with no action taken.
             CHAT_DIR: list(chat_entries),
+            INSIGHTS_DIR: list(insights),
         },
         known=known,
     )
@@ -414,6 +423,7 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             "notebooks": len(notebook_names),
             "tombstoned": len(removed),
             "chats": len(chat_entries),
+            "insights": len(insights),
         },
         # Sources whose bytes this device does not hold. The blob channel
         # uses it to decide what to ask for; it is informational in git.
@@ -454,10 +464,51 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
             CARDS_DIR: [str(c.id) for c in cards],
             SOURCES_DIR: [str(s.id) for s in sources],
             CHAT_DIR: list(chat_entries),
+            INSIGHTS_DIR: list(insights),
             NOTEBOOKS: sorted(notebook_entries.keys()),
         }
     )
     return manifest
+
+
+async def _export_insights(root: Path) -> Dict[str, Dict[str, Any]]:
+    """Write one file per insight. Returns them by id.
+
+    The `source` link travels as a plain id, not an edge: insights point
+    at their source with a record field, and source ids are stable across
+    devices (preserved by `_create_with_id`), so there is nothing to
+    resolve. A link naming a source this device does not hold is left
+    for the import to handle, the same way unresolvable notebook slugs
+    are reported rather than hidden.
+    """
+    (root / INSIGHTS_DIR).mkdir(parents=True, exist_ok=True)
+
+    rows = (
+        await repo_query(
+            "SELECT id, insight_type, content, source, updated FROM source_insight"
+        )
+        or []
+    )
+    entries: Dict[str, Dict[str, Any]] = {}
+
+    for row in rows:
+        insight_id = str(row.get("id") or "")
+        if not insight_id:
+            continue
+        stamped = _as_iso(row.get("updated"))
+        entries[insight_id] = {
+            "id": insight_id,
+            "insight_type": row.get("insight_type"),
+            "content": row.get("content"),
+            "source_id": str(row.get("source") or "") or None,
+            "updated": stamped.isoformat() if stamped else None,
+        }
+        _write_json(
+            root / INSIGHTS_DIR / f"{insight_id.replace(':', '-')}.json",
+            entries[insight_id],
+        )
+
+    return entries
 
 
 async def _export_chats(
@@ -748,6 +799,9 @@ async def import_all(
         "sources_created": 0,
         "sources_updated": 0,
         "sources_skipped_stale": 0,
+        "insights_created": 0,
+        "insights_updated": 0,
+        "insights_skipped_stale": 0,
         # Sources whose metadata landed but whose bytes are not on this
         # device yet. Reported rather than hidden: an imported source
         # that cannot be opened is not the same as one that failed, and
@@ -957,6 +1011,12 @@ async def import_all(
                 missing,
                 dry_run,
             )
+
+    insights_result = await _import_insights(root, dry_run, seen)
+    result["insights_created"] = insights_result[0]
+    result["insights_updated"] = insights_result[1]
+    result["insights_skipped_stale"] = insights_result[2]
+    result["resurrections_suppressed"] += insights_result[3]
 
     revlog_result = await _import_revlog(root, dry_run)
     result["revlog_added"] = revlog_result[0]
@@ -1178,7 +1238,7 @@ def _imported_baseline(root: Path) -> Dict[str, List[str]]:
     record of that. Keyed exactly as the sweeps look things up.
     """
     snapshot: Dict[str, List[str]] = {}
-    for directory in (NOTES_DIR, CARDS_DIR, SOURCES_DIR, CHAT_DIR):
+    for directory in (NOTES_DIR, CARDS_DIR, SOURCES_DIR, CHAT_DIR, INSIGHTS_DIR):
         folder = root / directory
         ids: List[str] = []
         if folder.is_dir():
@@ -1196,6 +1256,83 @@ def _imported_baseline(root: Path) -> Dict[str, List[str]]:
                 slugs.append(str(entry["slug"]))
     snapshot[NOTEBOOKS] = slugs
     return snapshot
+
+
+async def _import_insights(
+    root: Path, dry_run: bool, seen: Dict[str, list]
+) -> Tuple[int, int, int, int]:
+    """Upsert insights by record id. Returns (created, updated, stale, resurrected).
+
+    Runs after sources so the linked records normally exist, but does
+    not require them: the link is a plain record field and SurrealDB
+    does not enforce it, so an insight whose source has not arrived yet
+    still imports and resolves when it does. Deleting the insight when
+    its source is missing would destroy synced content over ordering.
+    """
+    from open_notebook.domain.notebook import SourceInsight
+
+    created = updated = stale = resurrected = 0
+    insights_dir = root / INSIGHTS_DIR
+    if not insights_dir.is_dir():
+        return created, updated, stale, resurrected
+    known_ids = set(seen.get(INSIGHTS_DIR, ()))
+
+    for path in sorted(insights_dir.glob("*.json")):
+        data = _read_json(path)
+        if not data or not data.get("id"):
+            continue
+        record_id = str(data["id"])
+        existing = await _maybe_get(SourceInsight, record_id)
+        if existing is None and record_id in known_ids:
+            logger.debug(f"sync: not recreating locally deleted insight {record_id}")
+            resurrected += 1
+            continue
+
+        local_updated = (
+            existing.updated.isoformat() if (existing and existing.updated) else None
+        )
+        if existing is not None and not _newer(data.get("updated"), local_updated):
+            stale += 1
+            continue
+        if dry_run:
+            if existing is not None:
+                updated += 1
+            else:
+                created += 1
+            continue
+
+        if existing is None:
+            await _create_with_id(
+                SourceInsight(
+                    insight_type=data.get("insight_type") or "Insight",
+                    content=data.get("content") or "",
+                ),
+                record_id,
+            )
+            existing = await _maybe_get(SourceInsight, record_id)
+            created += 1
+        else:
+            existing.insight_type = data.get("insight_type") or existing.insight_type
+            existing.content = data.get("content") or ""
+            await existing.save()
+            updated += 1
+        if existing is not None:
+            await _apply_timestamp(existing, data.get("updated"))
+
+        source_id = data.get("source_id")
+        if source_id and existing is not None:
+            try:
+                await repo_query(
+                    "UPDATE $id SET source = $src",
+                    {
+                        "id": ensure_record_id(record_id),
+                        "src": ensure_record_id(str(source_id)),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - link failure is not fatal
+                logger.warning(f"sync: could not link insight {record_id}: {exc}")
+
+    return created, updated, stale, resurrected
 
 
 async def _import_notebooks(
@@ -1358,7 +1495,7 @@ async def _apply_tombstones(
     happened on.
     """
     from open_notebook.domain.flashcard import Flashcard
-    from open_notebook.domain.notebook import ChatSession, Note
+    from open_notebook.domain.notebook import ChatSession, Note, SourceInsight
 
     found = tombstones.load_tombstones(root)
     if not found:
@@ -1372,6 +1509,7 @@ async def _apply_tombstones(
         # conversation on one device stops it being resurrected by the
         # other's manifest on the next export.
         CHAT_DIR: ChatSession,
+        INSIGHTS_DIR: SourceInsight,
     }
 
     for record_id, tombstone in found.items():

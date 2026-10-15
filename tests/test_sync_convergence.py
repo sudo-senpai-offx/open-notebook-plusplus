@@ -44,7 +44,15 @@ pytestmark = pytest.mark.skipif(
     reason="needs a live SurrealDB; set SURREAL_TEST_URL",
 )
 
-TABLES = ("note", "source", "notebook", "flashcard", "chat_session", "chat_message")
+TABLES = (
+    "note",
+    "source",
+    "notebook",
+    "flashcard",
+    "chat_session",
+    "chat_message",
+    "source_insight",
+)
 EDGE_TABLES = ("artifact", "reference", "refers_to")
 
 
@@ -112,12 +120,47 @@ class World:
     def __init__(self, rng: random.Random):
         self.rng = rng
         self.pools: dict[str, dict[str, list[str]]] = {
-            device: {"note": [], "source": [], "notebook": [], "session": []}
+            device: {
+                "note": [],
+                "source": [],
+                "notebook": [],
+                "session": [],
+                "insight": [],
+            }
             for device in ("a", "b")
         }
         self.deleted: set[str] = set()
         self.counter = 0
         self.device = "a"
+
+    async def create_insight(self) -> str:
+        import uuid
+
+        from open_notebook.database.repository import ensure_record_id, repo_query
+
+        tag = self._tag()
+        rid = f"source_insight:{uuid.uuid4().hex[:12]}"
+        sid = self.rng.choice(self.pools[self.device]["source"])
+        await repo_query(
+            "CREATE $id CONTENT { insight_type: $kind, content: $content, "
+            "source: $src, updated: time::now() }",
+            {
+                "id": ensure_record_id(rid),
+                "kind": "Key Insights",
+                "content": f"insight {tag}",
+                "src": ensure_record_id(sid),
+            },
+        )
+        self.pools[self.device]["insight"].append(rid)
+        return rid
+
+    async def edit_insight(self, rid: str) -> None:
+        from open_notebook.database.repository import ensure_record_id, repo_query
+
+        await repo_query(
+            "UPDATE $id SET content = $c, updated = time::now()",
+            {"id": ensure_record_id(rid), "c": f"edited {self._tag()}"},
+        )
 
     def _tag(self) -> str:
         self.counter += 1
@@ -140,6 +183,7 @@ class World:
             "source": "source",
             "notebook": "notebook",
             "session": "chat_session",
+            "insight": "source_insight",
         }
         for device in ("a", "b"):
             use(device)
@@ -271,6 +315,10 @@ class World:
             choices += ["del-source"]
         if pool["source"] and pool["notebook"]:
             choices += ["file-source"]
+        if pool["source"]:
+            choices += ["insight"]
+        if pool["insight"]:
+            choices += ["edit-insight", "del-insight"]
         if pool["note"] and pool["notebook"]:
             choices += ["file-note"]
         if pool["notebook"]:
@@ -299,6 +347,22 @@ class World:
             rid = pool["source"].pop(self.rng.randrange(len(pool["source"])))
             await self.delete("source", rid)
             return f"delete source {rid}"
+        if op == "insight":
+            return f"create {await self.create_insight()}"
+        if op == "edit-insight":
+            rid = self.rng.choice(pool["insight"])
+            await self.edit_insight(rid)
+            return f"edit {rid}"
+        if op == "del-insight":
+            from open_notebook.database.repository import ensure_record_id, repo_query
+
+            rid = pool["insight"].pop(self.rng.randrange(len(pool["insight"])))
+            self.deleted.add(rid)
+            await repo_query(
+                "DELETE source_insight WHERE id = $id",
+                {"id": ensure_record_id(rid)},
+            )
+            return f"delete insight {rid}"
         if op == "del-notebook":
             rid = pool["notebook"].pop(self.rng.randrange(len(pool["notebook"])))
             # Members stay: sync tombstones unlink rather than cascade,
@@ -382,7 +446,10 @@ async def _snapshot() -> dict:
         rows = await repo_query(f"SELECT * FROM {table}") or []
         snap[table] = {
             str(r.get("id")): {
-                k: (str(v) if k in ("id", "session") else v)
+                # Record links normalize to strings: `source` on an
+                # insight names a source id that is stable across
+                # devices, exactly like `session` on a message.
+                k: (str(v) if k in ("id", "session", "source") else v)
                 for k, v in r.items()
                 if k != "embedding"
             }
@@ -437,7 +504,7 @@ def _assert_converged(a: dict, b: dict, seed: int, history: list[str]) -> None:
             f"  last ops:\n    {trail}"
         )
         for rid in rows_a:
-            for field in ("title", "content", "updated"):
+            for field in ("title", "content", "updated", "source", "insight_type"):
                 if field in rows_a[rid] or field in rows_b[rid]:
                     assert rows_a[rid].get(field) == rows_b[rid].get(field), (
                         f"seed {seed}: {table}:{rid}.{field} differs: "
