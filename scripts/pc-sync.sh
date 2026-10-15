@@ -237,6 +237,19 @@ cmd_fetch_bundle() {
 cmd_blobs() {
   peer="${1:-}"; action="${2:-}"
   [ -n "$peer" ] || die "usage: pc-sync.sh blobs <peer-url> pull|push"
+  # The transfer runs inside the API container, so the peer URL must be
+  # reachable FROM THERE, not from this shell. 127.0.0.1 in the
+  # container is the container itself: pushing to it fails every blob
+  # with a connection error while a host-side curl to the same URL
+  # works, which misdirects the diagnosis at the phone. Through the adb
+  # tunnel use http://host.docker.internal:<port>.
+  case "$peer" in
+    http://127.0.0.1:*|http://localhost:*)
+      echo "  WARNING: $peer is this machine's loopback, which the API"
+      echo "  container cannot reach. If every blob fails, re-run with the"
+      echo "  same port on http://host.docker.internal instead."
+      ;;
+  esac
   api_up
   hdr=$(auth_header)
   if [ -z "$hdr" ]; then
