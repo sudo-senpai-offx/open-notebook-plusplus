@@ -37,6 +37,11 @@ services:
       - OLLAMA_API_BASE=http://host.docker.internal:11434
       # - OPEN_NOTEBOOK_ENABLE_DOCLING=true  # disabled by default for low-end
       - OPEN_NOTEBOOK_WORKER_MAX_TASKS=1
+      # Without this the blob endpoints refuse everything: check_token
+      # fails closed when no token is configured, so file bytes can
+      # never move. The value comes from .env, where the sync token
+      # already lives - it just never reached the container.
+      - OPEN_NOTEBOOK_SYNC_TOKEN=${OPEN_NOTEBOOK_SYNC_TOKEN:-}
       - OPEN_NOTEBOOK_FORCE_MINI_MODELS=true
       - OPEN_NOTEBOOK_MINI_MODEL_CHAT=mistral-nemo:latest
       - OPEN_NOTEBOOK_MINI_MODEL_EMBED=nomic-embed-text:latest

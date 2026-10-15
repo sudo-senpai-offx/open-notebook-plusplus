@@ -287,6 +287,68 @@ class TestPushDirection:
         )
 
 
+class TestVerbsAreNotHashes:
+    """Route shadowing, caught in production.
+
+    `POST /sync/blobs/{sha256}` was registered before
+    `POST /sync/blobs/push`, and FastAPI dispatches first-registered
+    first - so "push" matched as a hash. The PC's push endpoint was
+    unreachable: it tried to store its own `{"peer": ...}` body as a
+    blob named "push" and answered 400, and the whole blob leg silently
+    moved nothing. Verbs now register before the parameterised route.
+    (Constraining the parameter to hex was tried first and reverted:
+    custom regex converters do not match at all on this Starlette
+    version, which turned every valid upload into a 404.)
+    """
+
+    @pytest.fixture
+    def client(self, store, tmp_path, monkeypatch):
+        monkeypatch.setenv(SYNC_TOKEN_ENV, "unit-test-token")
+        import open_notebook.storage.blobs as blobmod
+
+        peer = tmp_path / "peer"
+        peer.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(blobmod, "_root", lambda override=None: peer)
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from api.routers.sync import router
+
+        app = FastAPI()
+        app.include_router(router, prefix="/api")
+        return TestClient(app), peer
+
+    @pytest.mark.parametrize("verb", ["push", "pull", "offer"])
+    def test_a_verb_is_not_a_blob_hash(self, client, verb):
+        """Non-hex never reaches the blob handler, whatever comes first."""
+        api, _peer = client
+        headers = {"X-Sync-Token": "unit-test-token"}
+
+        response = api.post(f"/api/sync/blobs/{verb}", content=b"x", headers=headers)
+
+        assert response.status_code in (404, 405, 422), (
+            f"/blobs/{verb} reached the blob handler: {response.status_code}"
+        )
+
+    def test_push_survives_registration_order(self, client):
+        """The endpoint that moves bytes must answer as itself."""
+        api, _peer = client
+        headers = {"X-Sync-Token": "unit-test-token"}
+
+        response = api.post(
+            "/api/sync/blobs/push",
+            json={"peer": "http://127.0.0.1:1", "limit": 0},
+            headers=headers,
+        )
+
+        # The peer is dead, so the push fails - but it must fail as a
+        # push (a transfer result), not as a blob upload (a 400 about a
+        # hash mismatch for a blob named "push").
+        assert response.status_code == 200, response.text[:200]
+        assert "sent" in response.json()
+
+
 class TestPutVerifiesTheDigest:
     """The upload endpoint must recompute the hash, not trust the name.
 

@@ -240,6 +240,30 @@ async def sync_blob_offer_local(
     return {"peer": body.peer, "count": len(ours), "offered": ok}
 
 
+class SyncBlobPushRequest(BaseModel):
+    peer: str = Field(..., description="Base URL of the peer to push to")
+    limit: int = Field(0, description="Cap the transfer; 0 means everything")
+
+
+@router.post("/sync/blobs/push")
+async def sync_blob_push(
+    body: SyncBlobPushRequest, token: str | None = Header(None, alias=TOKEN_HEADER)
+):
+    """Push the blobs we hold to a peer that cannot reach us.
+
+    The direction the network requires: the PC can open a connection to
+    the phone, the phone cannot open one back.
+    """
+    try:
+        check_token(token)
+    except SyncAuthError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    ours = await local_hashes()
+    result = await push_to(body.peer, ours, token=token, limit=body.limit)
+    return {"peer": body.peer, "local": len(ours), **result}
+
+
 @router.post("/sync/blobs/{sha256}")
 async def sync_blob_put(
     sha256: str, request: Request, token: str | None = Header(None, alias=TOKEN_HEADER)
@@ -274,27 +298,3 @@ async def sync_blob_put(
         )
 
     return {"sha256": ref.sha256, "size": ref.size, "deduped": ref.deduped}
-
-
-class SyncBlobPushRequest(BaseModel):
-    peer: str = Field(..., description="Base URL of the peer to push to")
-    limit: int = Field(0, description="Cap the transfer; 0 means everything")
-
-
-@router.post("/sync/blobs/push")
-async def sync_blob_push(
-    body: SyncBlobPushRequest, token: str | None = Header(None, alias=TOKEN_HEADER)
-):
-    """Push the blobs we hold to a peer that cannot reach us.
-
-    The direction the network requires: the PC can open a connection to
-    the phone, the phone cannot open one back.
-    """
-    try:
-        check_token(token)
-    except SyncAuthError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-
-    ours = await local_hashes()
-    result = await push_to(body.peer, ours, token=token, limit=body.limit)
-    return {"peer": body.peer, "local": len(ours), **result}
