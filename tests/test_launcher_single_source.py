@@ -151,6 +151,40 @@ class TestStartIsVerified:
         assert "address already in use" in text
         assert "pkill" in text
 
+    def test_the_wait_polls_rather_than_guessing(self):
+        """A fixed short sleep produced a false `FAILED to start` on a phone
+        whose uvicorn was healthy and answering a second later.
+
+        A guard that cries wolf is worse than none, because the next real
+        failure gets read as the same noise. So the wait is a poll with a
+        generous ceiling - the command modules are imported to populate the
+        registry, and ADR-009 measured heavy imports at around a minute on
+        low-end hardware.
+        """
+        text = _read("termux-stack.sh")
+        assert "wait_for_api" in text
+        start = text.index("wait_for_api()")
+        body = text[start : text.index("\n}\n", start)]
+        assert "while" in body, "poll until it answers"
+        assert "sleep" in body
+        assert "api_answers" in body
+        # Generous ceiling, not the 2 seconds that shipped.
+        assert "wait_for_api 90" in text
+
+    def test_a_failure_report_shows_the_api_not_the_last_writer(self):
+        """Every process appends to one shared log, so a bare `tail` on a
+        start failure showed SurrealDB's startup lines - which say nothing
+        about why uvicorn did not come up.
+        """
+        text = _read("termux-stack.sh")
+        start = text.index("report_api_failure()")
+        body = text[start : text.index("\n}\n", start)]
+        assert "grep -iE" in body, "filter to lines that could be the API's"
+        assert "shared log" in body, "and say it is a filtered view"
+        assert 'tail -n 6 "$LOG"' not in body, (
+            "an unfiltered tail of the shared log is what showed SurrealDB"
+        )
+
 
 class TestBindingCheckIsHonest:
     """The check that reported "loopback" while the service was on 0.0.0.0.

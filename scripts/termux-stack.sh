@@ -83,6 +83,45 @@ urllib.request.urlopen("http://127.0.0.1:5055/health", timeout=3).read()
 PY
 }
 
+# Wait for the API to answer, rather than assuming a fixed delay is enough.
+#
+# The first version slept 2 seconds and reported `FAILED to start` on a
+# phone whose uvicorn was perfectly healthy and answering a second later -
+# visible only because /health was reachable over the tunnel afterwards. A
+# guard that cries wolf is worse than no guard: the next genuine failure
+# gets read as the same noise.
+#
+# Startup here is slow for a known reason: the command modules are imported
+# to populate the command registry, and ADR-009 measured heavy imports as
+# costing around a minute on low-end hardware. So the wait is generous and
+# polling, not a guess.
+wait_for_api() {
+  waited=0
+  limit="${1:-90}"
+  while [ "$waited" -lt "$limit" ]; do
+    if api_answers; then return 0; fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  return 1
+}
+
+# Show what the API said, not what the last process to write said.
+#
+# Every process appends to one shared log, so `tail` on a start failure
+# showed SurrealDB's startup lines - which say nothing about why uvicorn
+# did not come up. Filtered to lines that could plausibly be the API's, and
+# labelled as a filtered view so nobody reads it as the whole story.
+report_api_failure() {
+  echo "api      FAILED to start - 5055 not answering after ${1:-90}s."
+  echo "         Lines mentioning the API or an error, from the shared log:"
+  grep -iE 'uvicorn|5055|error|traceback|address already' "$LOG" 2>/dev/null \
+    | tail -n 6 | sed 's/^/           /'
+  echo "         If it says 'address already in use', a previous uvicorn"
+  echo "         survived 'down'. Find and kill it:"
+  echo "           proot-distro login ubuntu -- bash -lc 'pkill -f \"uvicorn api.main\"'"
+}
+
 # Report what the binding actually is - and admit when it cannot tell.
 #
 # It cannot usually tell. Android hides /proc/net from apps, so `netstat`
@@ -227,13 +266,8 @@ PY
     # while every check against the wrapper and the repository says the new
     # code is deployed. That is how a loopback binding was believed to be in
     # force for hours on a phone that was still listening on 0.0.0.0.
-    sleep 2
-    if ! api_answers; then
-      echo "api      FAILED to start - 5055 not answering. Recent log:"
-      tail -n 6 "$LOG" | sed 's/^/           /'
-      echo "           If the log says 'address already in use', a previous"
-      echo "           uvicorn survived 'down'. Find and kill it:"
-      echo "             proot-distro login ubuntu -- bash -lc 'pkill -f \"uvicorn api.main\"'"
+    if ! wait_for_api 90; then
+      report_api_failure 90
       return 1
     fi
     echo "api      started on $api_host (window cap $OPEN_NOTEBOOK_WINDOW_CAP)"
