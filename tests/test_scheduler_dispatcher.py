@@ -50,6 +50,7 @@ class FakeDB:
         self.held = held or []
         self.live = live or []
         self.updates: List[Tuple[str, str]] = []
+        self.holds: List[Tuple[str, str]] = []
         self.fail_on: Optional[str] = None
 
     async def query(
@@ -64,10 +65,17 @@ class FakeDB:
             return list(self.live)
         if "UPDATE" in sql:
             command_id = str((params or {}).get("id"))
-            status = str((params or {}).get("status"))
             if self.fail_on and self.fail_on in command_id:
                 raise RuntimeError("simulated promotion failure")
-            self.updates.append((command_id, status))
+            # Two different writes land here: a promotion sets `status`, and
+            # a hold annotation sets `held_reason`. Branching on the bound
+            # params rather than on the SQL text, because a promotion also
+            # clears `held_reason` - matching on the word classified every
+            # promotion as a hold annotation.
+            if (params or {}).get("reason") is not None:
+                self.holds.append((command_id, str((params or {}).get("reason"))))
+            else:
+                self.updates.append((command_id, str((params or {}).get("status"))))
             return []
         return []
 
@@ -136,7 +144,10 @@ class TestPromotion:
         )
 
         assert outcome.promoted_count == 2
-        assert len(db.updates) == 2
+        # Only promotions. The three refused jobs are annotated too, and
+        # counting every write made this assert the window twice over.
+        assert len(db.promoted) == 2
+        assert len(db.holds) == 3
 
     @pytest.mark.asyncio
     async def test_nothing_to_do_is_not_an_error(self, monkeypatch):
@@ -167,6 +178,23 @@ class TestPromotion:
         assert outcome.promoted_count == 1
         assert outcome.error is not None
         assert db.promoted == ["command:process_source2"]
+
+    @pytest.mark.asyncio
+    async def test_the_hold_reason_is_written_back_to_the_row(self, monkeypatch):
+        """The status endpoint reads `held_reason` off the rows, so a reason
+        that lives only in this pass's outcome is invisible to the UI - and
+        "we know why this is stuck" was the whole point of the field.
+        """
+        db = FakeDB(held=[_job("run_transformation", 1, source_id="source:a")])
+        _patch_repo(monkeypatch, db)
+
+        await dispatch_once(
+            generation_bytes=GENERATION_BYTES,
+            memory=_memory(total=15 * GIB, available=200 * MIB),
+            window=3,
+        )
+
+        assert db.holds == [("command:run_transformation1", "memory")]
 
 
 class TestAggregateBudget:

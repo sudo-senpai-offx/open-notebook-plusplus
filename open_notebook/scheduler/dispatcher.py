@@ -258,6 +258,26 @@ async def generation_model_bytes() -> Optional[int]:
     return max(sizes)
 
 
+async def _record_hold(command_id: str, reason: str) -> None:
+    """Persist why a job is being held.
+
+    Best effort by design: failing to annotate a held job is a cosmetic
+    loss in the status panel, and raising here would abandon the rest of the
+    pass over a write that changed nothing. A held job that cannot say why is
+    still correctly *held* - which is the safety-critical part - it just
+    explains itself less well.
+    """
+    from open_notebook.database.repository import ensure_record_id, repo_query
+
+    try:
+        await repo_query(
+            "UPDATE $id SET held_reason = $reason",
+            {"id": ensure_record_id(command_id), "reason": reason},
+        )
+    except Exception as exc:  # noqa: BLE001 - annotation is not admission
+        logger.debug(f"could not record hold reason for {command_id}: {exc}")
+
+
 async def dispatch_once(
     *,
     generation_bytes: Optional[int] = None,
@@ -310,6 +330,11 @@ async def dispatch_once(
             outcome.held_reasons[decision.reason] = (
                 outcome.held_reasons.get(decision.reason, 0) + 1
             )
+            # Written back to the row, not just to this pass's outcome. The
+            # status endpoint reads `held_reason` from the rows, so a reason
+            # that lives only in memory is invisible to the UI - and "we know
+            # why this is stuck" was the entire point of the field.
+            await _record_hold(str(row.get("id")), decision.reason)
             # Every remaining row is held for at least as long as this one:
             # oldest-first means the one that was refused is the one that came
             # first, so nothing behind it has a better claim.
