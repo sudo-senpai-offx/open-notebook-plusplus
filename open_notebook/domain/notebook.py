@@ -7,7 +7,6 @@ from uuid import uuid4
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from surreal_commands import submit_command
 from surrealdb import RecordID
 
 from open_notebook.database.repository import ensure_record_id, repo_query
@@ -17,6 +16,7 @@ from open_notebook.exceptions import (
     InvalidInputError,
     NotFoundError,
 )
+from open_notebook.scheduler.submit import submit_held
 from open_notebook.storage.blobs import resolve_blob_path, unlink_if_unreferenced
 
 
@@ -658,7 +658,7 @@ class Source(ObjectModel):
                 raise ValueError(f"Source {self.id} has no text to vectorize")
 
             # Submit the embed_source command
-            command_id = submit_command(
+            command_id = submit_held(
                 "open_notebook",
                 "embed_source",
                 {"source_id": str(self.id)},
@@ -714,7 +714,7 @@ class Source(ObjectModel):
         try:
             # Submit create_insight command (fire-and-forget)
             # Command handles retries internally for transaction conflicts
-            command_id = submit_command(
+            command_id = submit_held(
                 "open_notebook",
                 "create_insight",
                 {
@@ -868,7 +868,7 @@ class Note(ObjectModel):
         # save with a 500. Best-effort: log and move on.
         if self.id and self.content and self.content.strip():
             try:
-                command_id = submit_command(
+                command_id = submit_held(
                     "open_notebook",
                     "embed_note",
                     {"note_id": str(self.id)},

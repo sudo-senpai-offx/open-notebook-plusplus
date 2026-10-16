@@ -23,7 +23,7 @@ def test_source_without_text_returns_400_and_queues_nothing(client, full_text):
             new=AsyncMock(return_value=SimpleNamespace(full_text=full_text)),
         ),
         patch("api.routers.sources.Transformation.get", new=AsyncMock()),
-        patch("api.routers.sources.submit_command", new=MagicMock()) as mock_submit,
+        patch("api.routers.sources.submit_held", new=MagicMock()) as mock_submit,
     ):
         response = client.post(
             "/api/sources/source:abc/insights",
@@ -43,7 +43,7 @@ def test_source_with_text_is_queued(client):
         ),
         patch("api.routers.sources.Transformation.get", new=AsyncMock()),
         patch(
-            "api.routers.sources.submit_command",
+            "api.routers.sources.submit_held",
             new=MagicMock(return_value="command:1"),
         ) as mock_submit,
     ):

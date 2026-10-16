@@ -243,9 +243,8 @@ async def ensure_insights(body: EnsureInsightsRequest):
     insight endpoint. Smallest files go first so results start landing
     immediately and problem files surface early instead of last.
     """
-    from surreal_commands import submit_command
-
     from open_notebook.domain.transformation import Transformation
+    from open_notebook.scheduler.submit import submit_held
 
     wanted_transformations = body.transformation_ids
     wanted_sources = body.source_ids
@@ -335,7 +334,7 @@ async def ensure_insights(body: EnsureInsightsRequest):
             skipped_unknown += 1
             continue
         try:
-            submit_command(
+            submit_held(
                 "open_notebook",
                 "run_transformation",
                 {"source_id": sid, "transformation_id": tid},

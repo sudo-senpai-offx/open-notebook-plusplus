@@ -11,7 +11,7 @@ from typing import (
 )
 
 from loguru import logger
-from surreal_commands import CommandInput, CommandOutput, command, submit_command
+from surreal_commands import CommandInput, CommandOutput, command
 
 from open_notebook.ai.models import model_manager
 from open_notebook.database.repository import ensure_record_id, repo_insert, repo_query
@@ -21,6 +21,7 @@ from open_notebook.exceptions import (
     ContextLengthExceededError,
     NotFoundError,
 )
+from open_notebook.scheduler.submit import submit_held
 from open_notebook.utils.chunking import ContentType, chunk_text, detect_content_type
 from open_notebook.utils.embedding import generate_embedding, generate_embeddings
 from open_notebook.utils.job_control import (
@@ -512,7 +513,7 @@ async def create_insight_command(
             raise ValueError("Failed to create insight - no ID in result")
 
         # 2. Submit embedding command (fire-and-forget)
-        submit_command(
+        submit_held(
             "open_notebook",
             "embed_insight",
             {"insight_id": insight_id},
@@ -641,7 +642,7 @@ def _submit_embedding_jobs(
     failed = 0
     for idx, item_id in enumerate(item_ids, 1):
         try:
-            submit_command(
+            submit_held(
                 "open_notebook",
                 command_name,
                 {id_field: item_id},

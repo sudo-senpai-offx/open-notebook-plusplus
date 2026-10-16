@@ -201,7 +201,7 @@ class TestApiBoundaryResolvesNameToRecordId:
                 "api.podcast_service.SpeakerProfile.resolve",
                 new=AsyncMock(return_value=speaker_profile),
             ) as mock_resolve,
-            patch("api.podcast_service.submit_command") as mock_submit,
+            patch("api.podcast_service.submit_held") as mock_submit,
         ):
             mock_submit.return_value = "command:job1"
             job_id = await PodcastService.submit_generation_job(

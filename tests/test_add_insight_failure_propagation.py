@@ -2,7 +2,7 @@
 Tests for Source.add_insight() raising on submission failure instead of
 silently swallowing it.
 
-Previously, if submit_command() failed, add_insight() logged the error and
+Previously, if submit_held() failed, add_insight() logged the error and
 returned None. Both callers (transformation.py, source.py) discard the
 return value, so a transformation could report success=True while the
 insight was never persisted. add_insight() now matches the sibling
@@ -31,7 +31,7 @@ class TestAddInsightRaisesOnSubmissionFailure:
     async def test_returns_command_id_on_success(self):
         source = make_source()
         with patch(
-            "open_notebook.domain.notebook.submit_command",
+            "open_notebook.domain.notebook.submit_held",
             return_value="command:abc123",
         ):
             result = await source.add_insight("Summary", "some content")
@@ -41,7 +41,7 @@ class TestAddInsightRaisesOnSubmissionFailure:
     async def test_raises_database_operation_error_on_submission_failure(self):
         source = make_source()
         with patch(
-            "open_notebook.domain.notebook.submit_command",
+            "open_notebook.domain.notebook.submit_held",
             side_effect=RuntimeError("queue unavailable"),
         ):
             with pytest.raises(DatabaseOperationError):

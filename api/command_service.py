@@ -1,9 +1,9 @@
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from surreal_commands import submit_command
 
 from open_notebook.database.repository import ensure_record_id, repo_query
+from open_notebook.scheduler.submit import submit_held
 
 
 class CommandService:
@@ -27,8 +27,12 @@ class CommandService:
                 logger.error(f"Failed to import command modules: {import_err}")
                 raise ValueError("Command modules not available")
 
-            # surreal-commands expects: submit_command(app_name, command_name, args)
-            cmd_id = submit_command(
+            # Written `held`, not `new`: this is the single choke point for
+            # every async caller (embedding, sites, sources, commands), so
+            # routing it through the vendor helper here made every one of
+            # them bypass admission - a job the gate had never seen could
+            # start at any moment.
+            cmd_id = submit_held(
                 module_name,  # This is actually the app name (e.g., "open_notebook")
                 command_name,  # Command name (e.g., "generate_podcast")
                 command_args,  # Input data

@@ -88,7 +88,7 @@ class TestEnsureInsights:
                 "api.routers.processing.repo_query",
                 new=AsyncMock(side_effect=fake_repo),
             ),
-            patch("surreal_commands.submit_command", side_effect=fake_submit),
+            patch("open_notebook.scheduler.submit.submit_held", side_effect=fake_submit),
             patch(
                 "open_notebook.domain.transformation.Transformation.get",
                 new=AsyncMock(return_value=MagicMock()),
@@ -128,7 +128,7 @@ class TestEnsureInsights:
                 new=AsyncMock(side_effect=fake_repo),
             ),
             patch(
-                "surreal_commands.submit_command",
+                "open_notebook.scheduler.submit.submit_held",
                 side_effect=AssertionError("must not submit"),
             ),
             patch(
@@ -184,7 +184,7 @@ class TestEnsureInsights:
                 new=AsyncMock(side_effect=fake_repo),
             ),
             patch(
-                "surreal_commands.submit_command",
+                "open_notebook.scheduler.submit.submit_held",
                 side_effect=_recording_submit(submitted),
             ),
             patch(
@@ -233,7 +233,7 @@ class TestEnsureInsights:
                 new=AsyncMock(side_effect=fake_repo),
             ),
             patch(
-                "surreal_commands.submit_command",
+                "open_notebook.scheduler.submit.submit_held",
                 side_effect=AssertionError("must not submit a second job"),
             ),
         ):
@@ -284,7 +284,7 @@ class TestEnsureInsights:
                 new=AsyncMock(side_effect=fake_repo),
             ),
             patch(
-                "surreal_commands.submit_command",
+                "open_notebook.scheduler.submit.submit_held",
                 side_effect=_recording_submit(submitted),
             ),
             patch(
@@ -327,7 +327,7 @@ class TestEnsureInsights:
                 new=AsyncMock(side_effect=fake_repo),
             ),
             patch(
-                "surreal_commands.submit_command",
+                "open_notebook.scheduler.submit.submit_held",
                 side_effect=_recording_submit(submitted),
             ),
             patch(
@@ -375,7 +375,7 @@ class TestRetryFailed:
 
 
 def _recording_submit(sink):
-    """A submit_command stand-in that records args and returns an id.
+    """A submit_held stand-in that records args and returns an id.
 
     Not a lambda with `append(...) or "command:x"`: append returns None,
     so that idiom works only by accident and mypy rejects it. The point

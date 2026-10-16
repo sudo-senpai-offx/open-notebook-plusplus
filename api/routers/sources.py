@@ -17,7 +17,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, Response
 from loguru import logger
 from pydantic import ValidationError
-from surreal_commands import execute_command_sync, submit_command
+from surreal_commands import execute_command_sync
 
 from api.command_service import CommandService
 from api.credentials_service import validate_url
@@ -43,6 +43,7 @@ from open_notebook.exceptions import (
     OpenNotebookError,
     UnsupportedTypeException,
 )
+from open_notebook.scheduler.submit import submit_held
 from open_notebook.storage.blobs import resolve_blob_path, store_bytes
 from open_notebook.sync.exchange import load_provenance
 
@@ -1329,7 +1330,7 @@ async def create_source_insight(source_id: str, request: CreateSourceInsightRequ
             raise HTTPException(status_code=404, detail="Transformation not found")
 
         # Submit transformation as background job (fire-and-forget)
-        command_id = submit_command(
+        command_id = submit_held(
             "open_notebook",
             "run_transformation",
             {

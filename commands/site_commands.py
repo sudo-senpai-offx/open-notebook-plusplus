@@ -5,12 +5,13 @@ from typing import List, Optional
 from urllib.parse import urlparse
 
 from loguru import logger
-from surreal_commands import CommandInput, CommandOutput, command, submit_command
+from surreal_commands import CommandInput, CommandOutput, command
 
 from open_notebook.database.repository import ensure_record_id
 from open_notebook.domain.notebook import Asset, Notebook, Source
 from open_notebook.domain.site import Site
 from open_notebook.exceptions import ConfigurationError
+from open_notebook.scheduler.submit import submit_held
 from open_notebook.utils.crawler import DEFAULT_USER_AGENT, crawl_site
 
 
@@ -80,7 +81,7 @@ async def _ingest_page(
                 # command, so skip the full Notebook.get per relate.
                 await source.add_to_notebook(notebook_id, validate=False)
 
-        submit_command(
+        submit_held(
             "open_notebook",
             "process_source",
             {
