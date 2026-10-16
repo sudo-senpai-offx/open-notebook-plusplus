@@ -164,8 +164,18 @@ PY
     # the one device it exists for.
     OPEN_NOTEBOOK_WINDOW_CAP="${OPEN_NOTEBOOK_WINDOW_CAP:-2}"
     export OPEN_NOTEBOOK_WINDOW_CAP
-    nohup .venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 5055 >>"$LOG" 2>&1 &
-    echo "api      started (window cap $OPEN_NOTEBOOK_WINDOW_CAP)"
+    # Loopback, not 0.0.0.0. This API serves full unauthenticated job
+    # submission to every network the phone joins - a cafe, a hotel, a
+    # campus - which is a wider door than any phone application needs.
+    # Nothing legitimate requires it: the browser reaches the API through
+    # the Next.js proxy on 8502, and the PC reaches it over `adb forward`,
+    # which connects to the device's own loopback.
+    #
+    # OPEN_NOTEBOOK_API_HOST exists so an operator who knowingly wants LAN
+    # reach can ask for it, rather than this being an edit to a shipped file.
+    api_host="${OPEN_NOTEBOOK_API_HOST:-127.0.0.1}"
+    nohup .venv/bin/uvicorn api.main:app --host "$api_host" --port 5055 >>"$LOG" 2>&1 &
+    echo "api      started on $api_host (window cap $OPEN_NOTEBOOK_WINDOW_CAP)"
   fi
 
   if is_up "surreal-commands-worker"; then

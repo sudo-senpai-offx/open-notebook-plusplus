@@ -14,6 +14,31 @@ from pathlib import Path
 # Set to empty string instead of deleting to prevent it from being reloaded
 os.environ["OPEN_NOTEBOOK_PASSWORD"] = ""
 
+# ...and the *demand* for auth has to be off too, not just the credential.
+# `load_dotenv` does not override variables already set, so pinning the
+# password above survives the .env load - but OPEN_NOTEBOOK_REQUIRE_AUTH was
+# never pinned, so the repository's real deployment setting came through and
+# `enforce_require_auth()` raised in the API lifespan, failing tests that
+# were asserting on migrations and never reached them.
+#
+# This is the general shape of the problem: the suite loads the developer's
+# real `.env`, so any deployment-only setting becomes a test input. Two more
+# are pinned here rather than papered over in the individual tests that
+# happened to trip over them:
+#
+#   OPEN_NOTEBOOK_MODEL_POOL_BYTES - the PC's real value, which made the
+#     admission gate compare every fixture against a 15 GB pool.
+#   OPEN_NOTEBOOK_WINDOW_CAP - the phone's cap, irrelevant on a PC test run.
+#
+# Set to empty, not popped. `load_dotenv` does not override a variable that
+# already exists, so popping here would just let the .env value straight back
+# in - which is why an earlier version of this comment claimed a fix that
+# was not happening. Both readers treat an empty value as unset and fall
+# back to their own default.
+os.environ["OPEN_NOTEBOOK_REQUIRE_AUTH"] = "false"
+os.environ["OPEN_NOTEBOOK_MODEL_POOL_BYTES"] = ""
+os.environ["OPEN_NOTEBOOK_WINDOW_CAP"] = ""
+
 # Load environment variables from .env file
 # This must be done BEFORE any imports that depend on environment variables
 from dotenv import load_dotenv

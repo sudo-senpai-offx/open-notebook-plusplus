@@ -44,24 +44,6 @@ GENERATION_BYTES = 5_093_028_002
 GENERATION_COST = int(GENERATION_BYTES * 1.10)
 
 
-@pytest.fixture(autouse=True)
-def _no_ambient_model_pool():
-    """Clear the model's-pool override for every test in this module.
-
-    This repository's `.env` carries a real `OPEN_NOTEBOOK_MODEL_POOL_BYTES`
-    for the PC deployment, and the test process inherits it. Without this,
-    the gate silently compared every fixture's footprint against a 15 GB
-    pool and the ceiling tests passed or failed according to the developer's
-    machine rather than the code. Tests that mean to exercise a configured
-    pool pass `model_pool` explicitly.
-    """
-    with patch.dict("os.environ", {}, clear=False):
-        import os
-
-        os.environ.pop("OPEN_NOTEBOOK_MODEL_POOL_BYTES", None)
-        yield
-
-
 def gen_job() -> JobFootprint:
     return job_footprint("run_transformation", generation_bytes=GENERATION_BYTES)
 

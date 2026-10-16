@@ -79,6 +79,26 @@ auth_header() {
   if [ -n "$tok" ]; then printf 'X-Sync-Token: %s' "$tok"; fi
 }
 
+# The API's password credential, alongside the sync token.
+#
+# Both are needed. `PasswordAuthMiddleware` covers every path except a short
+# exclusion list that does not include `/api/sync/*`, so the sync channel -
+# the backbone of this whole project - answered 401 the moment a password was
+# configured. The alternative was adding the sync paths to that exclusion
+# list, which would have made the one credential that is an SSRF and
+# exfiltration primitive the *only* thing guarding them. One credential model
+# for both surfaces is less code and a smaller attack surface.
+api_password() {
+  pw_file="${TOKEN_FILE:-.env}"
+  [ -f "$pw_file" ] || return 0
+  sed -n 's/^OPEN_NOTEBOOK_PASSWORD=//p' "$pw_file" | tail -1 | tr -d '"'"'"'\r'
+}
+
+password_header() {
+  pw=$(api_password)
+  if [ -n "$pw" ]; then printf 'Authorization: Bearer %s' "$pw"; fi
+}
+
 cmd_init() {
   # The remote is optional. The offline route - bundles over adb - has
   # no URL at all, and demanding one made the command that exists to
@@ -101,7 +121,9 @@ cmd_push() {
   mkdir -p "$SYNC_DIR" || die "cannot create $SYNC_DIR"
   git_sane
   echo "[sync] exporting from the app (device: $DEVICE)"
+  pw=$(api_password)
   curl -s -m 300 -X POST "$API/api/sync/export" \
+    ${pw:+-H "Authorization: Bearer $pw"} \
     -H 'Content-Type: application/json' \
     -d "{\"device\":\"$DEVICE\"}" |
     grep -o '"counts":{[^}]*}' || echo "  (no counts in response - check the app log)"
@@ -172,7 +194,9 @@ cmd_pull() {
   fi
 
   show_import() {
+    pw=$(api_password)
     curl -s -m 300 -X POST "$API/api/sync/import" \
+      ${pw:+-H "Authorization: Bearer $pw"} \
       -H 'Content-Type: application/json' -d "{\"dry_run\":$1}" |
       tr ',' '\n' | grep -E 'created|updated|stale|revlog|awaiting|queued|retry' | sed 's/^/       /'
   }
@@ -252,6 +276,7 @@ cmd_blobs() {
   esac
   api_up
   hdr=$(auth_header)
+  phdr=$(password_header)
   if [ -z "$hdr" ]; then
     echo "  note: no sync token found in $TOKEN_FILE - the peer will refuse if it requires one"
   fi
@@ -263,14 +288,14 @@ cmd_blobs() {
     push)
       echo "[blobs] pushing to $peer"
       # shellcheck disable=SC2086
-      curl -s -m 900 -X POST "$API/api/sync/blobs/push" ${hdr:+-H "$hdr"} \
+      curl -s -m 900 -X POST "$API/api/sync/blobs/push" ${hdr:+-H "$hdr"} ${phdr:+-H "$phdr"} \
         -H 'Content-Type: application/json' -d "{\"peer\":\"$peer\"}" |
         tr ',' '\n' | grep -E 'local|sent|failed' | sed 's/^/       /'
       ;;
     pull)
       echo "[blobs] pulling from $peer"
       # shellcheck disable=SC2086
-      curl -s -m 900 -X POST "$API/api/sync/blobs/pull" ${hdr:+-H "$hdr"} \
+      curl -s -m 900 -X POST "$API/api/sync/blobs/pull" ${hdr:+-H "$hdr"} ${phdr:+-H "$phdr"} \
         -H 'Content-Type: application/json' -d "{\"peer\":\"$peer\"}" |
         tr ',' '\n' | grep -E 'requested|fetched|failed' | sed 's/^/       /'
       ;;

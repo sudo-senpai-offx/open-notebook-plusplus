@@ -26,7 +26,14 @@ services:
     build: .
     ports:
       - "8502:8502"
-      - "5055:5055"
+      # Loopback, deliberately. This port was published on every
+      # interface, which is how it was verified reachable from the LAN
+      # address and answering a cross-origin preflight with
+      # `access-control-allow-origin: *`. Nothing outside this machine
+      # needs it: the browser reaches the API through the Next.js proxy
+      # on 8502, and the phone is reached over `adb forward`, which
+      # connects to the device's own loopback.
+      - "127.0.0.1:5055:5055"
     environment:
       - OPEN_NOTEBOOK_ENCRYPTION_KEY=${OPEN_NOTEBOOK_ENCRYPTION_KEY}
       - SURREAL_URL=ws://surrealdb:8000/rpc
@@ -46,6 +53,19 @@ services:
       # never move. The value comes from .env, where the sync token
       # already lives - it just never reached the container.
       - OPEN_NOTEBOOK_SYNC_TOKEN=${OPEN_NOTEBOOK_SYNC_TOKEN:-}
+      # Auth on, with a real credential. It was previously configured
+      # but unset, and PasswordAuthMiddleware short-circuits when no
+      # password exists - so a request from the LAN address was
+      # rejected for its malformed body rather than for having no
+      # credentials at all. The frontend already has a login flow
+      # (auth store, /login, /auth/status), so this needs no UI work.
+      - OPEN_NOTEBOOK_PASSWORD=${OPEN_NOTEBOOK_PASSWORD:-}
+      - OPEN_NOTEBOOK_REQUIRE_AUTH=${OPEN_NOTEBOOK_REQUIRE_AUTH:-true}
+      # Not `*`. The browser reaches the API through the Next.js proxy,
+      # so the normal flow is same-origin and needs no CORS grant at
+      # all; the wildcard only ever widened who could drive this API
+      # from a page in any browser on the network.
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://127.0.0.1:8502,http://localhost:8502}
       # Where the *models* live, in bytes, for the admission gate's ceiling
       # check. Ollama runs on the host (host.docker.internal), not in this
       # container - and Docker Desktop virtualises /proc, so the container
