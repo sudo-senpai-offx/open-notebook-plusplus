@@ -1,14 +1,30 @@
 import apiClient from './client'
 
+export interface ProcessingMemory {
+  /** False when /proc/meminfo could not be read. Distinct from available=0:
+   * "we could not tell" and "this device has no memory" need different
+   * reactions, and only one of them is true here. */
+  readable: boolean
+  total: number
+  available: number
+  swapped: number
+  /** Bytes held back so the device stays usable while work runs. */
+  reserve: number
+}
+
 export interface ProcessingStatus {
-  worker_max_tasks: number
+  /** The promotion window, read fresh by the dispatcher every pass. */
+  window: number
   full_throttle: boolean
-  /** Saved preference disagrees with the live worker: restart to apply. */
-  throttle_restart_pending: boolean
-  /** Worker count the next restart will use; what the toggle keys off. */
-  throttle_target: number
+  /** Jobs in `new` or `running` together - the worker's own semaphore is a
+   * backstop, so this is the number that actually governs throughput. */
+  in_flight: number
   queue: Record<string, number>
+  /** Why held jobs are held. `memory` and `window-full` need different fixes,
+   * and `not-yet-considered` means the dispatcher has not looked at them yet. */
+  held_reasons: Record<string, number>
   needs_retry: string[]
+  memory: ProcessingMemory
 }
 
 export interface EnsureInsightsResult {
@@ -56,7 +72,12 @@ export const processingApi = {
 
 export interface ThrottleResult {
   enabled: boolean
-  worker_max_tasks: number
+  /** The promotion window actually stored, after this device's cap. */
+  window: number
+  /** Always false: the dispatcher reads the window on every pass. */
   restart_required: boolean
+  /** True when this device's cap lowered what was asked for. */
   capped: boolean
+  /** Upper bound on when the new window takes effect. */
+  applied_within_seconds: number
 }

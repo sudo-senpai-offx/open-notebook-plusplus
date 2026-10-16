@@ -21,17 +21,41 @@ const mocked = processingApi as unknown as {
   setThrottle: ReturnType<typeof vi.fn>
 }
 
-/** A status with the throttle fields the panel reads. Defaults mirror
- * a settled device: strict mode, nothing pending, so each test states
- * only the field it is about. */
+const GIB = 1024 ** 3
+
+/** A status with the fields the panel reads.
+ *
+ * Defaults mirror a settled device - strict window, nothing queued,
+ * readable memory - so each test states only the field it is about. A mock
+ * missing a field silently exercises the `?? fallback`, which is how a
+ * deleted field keeps looking like it works.
+ */
 function statusWith(overrides: Record<string, unknown> = {}) {
   return {
-    worker_max_tasks: 1,
+    window: 1,
     full_throttle: false,
-    throttle_target: 1,
-    throttle_restart_pending: false,
+    in_flight: 0,
     queue: {},
+    held_reasons: {},
     needs_retry: [],
+    memory: {
+      readable: true,
+      total: 15 * GIB,
+      available: 8 * GIB,
+      swapped: 0,
+      reserve: 2 * GIB,
+    },
+    ...overrides,
+  }
+}
+
+function throttleResult(overrides: Record<string, unknown> = {}) {
+  return {
+    enabled: true,
+    window: 3,
+    restart_required: false,
+    capped: false,
+    applied_within_seconds: 5,
     ...overrides,
   }
 }
@@ -53,10 +77,10 @@ describe('ProcessingQueue', () => {
   it('shows queue depth and worker mode', async () => {
     mocked.status.mockResolvedValue(
       statusWith({
-        worker_max_tasks: 3,
+        window: 3,
         full_throttle: true,
-        throttle_target: 3,
-        queue: { new: 12, running: 2, failed: 1 },
+        in_flight: 3,
+        queue: { new: 1, running: 2, held: 12, failed: 1 },
         needs_retry: ['source:x'],
       })
     )
@@ -66,6 +90,8 @@ describe('ProcessingQueue', () => {
       expect(screen.getByText('processing.workers')).toBeInTheDocument()
     })
     expect(screen.getByText('processing.pending')).toBeInTheDocument()
+    expect(screen.getByText('processing.running')).toBeInTheDocument()
+    expect(screen.getByText('processing.held')).toBeInTheDocument()
     expect(screen.getByText('processing.failed')).toBeInTheDocument()
     expect(screen.getByText('processing.needsReview')).toBeInTheDocument()
   })
@@ -103,12 +129,7 @@ describe('ProcessingQueue', () => {
 
   it('turns full throttle on from strict', async () => {
     mocked.status.mockResolvedValue(statusWith())
-    mocked.setThrottle.mockResolvedValue({
-      enabled: true,
-      worker_max_tasks: 3,
-      restart_required: true,
-      capped: false,
-    })
+    mocked.setThrottle.mockResolvedValue(throttleResult())
     renderPanel()
 
     await waitFor(() => {
@@ -123,18 +144,11 @@ describe('ProcessingQueue', () => {
 
   it('turns full throttle off from throttled', async () => {
     mocked.status.mockResolvedValue(
-      statusWith({
-        worker_max_tasks: 3,
-        full_throttle: true,
-        throttle_target: 3,
-      })
+      statusWith({ window: 3, full_throttle: true, in_flight: 1 })
     )
-    mocked.setThrottle.mockResolvedValue({
-      enabled: false,
-      worker_max_tasks: 1,
-      restart_required: true,
-      capped: false,
-    })
+    mocked.setThrottle.mockResolvedValue(
+      throttleResult({ enabled: false, window: 1 })
+    )
     renderPanel()
 
     await waitFor(() => {
@@ -147,44 +161,82 @@ describe('ProcessingQueue', () => {
     })
   })
 
-  it('keys the toggle off the saved preference while a restart is pending', async () => {
-    // The state that matters: full throttle was requested, the worker
-    // has not restarted. Keying the button off the *running* value
-    // would make a second click re-submit `true` - a toggle that looks
-    // dead to the user, who is trying to undo their own click.
-    mocked.status.mockResolvedValue(
-      statusWith({
-        worker_max_tasks: 1,
-        full_throttle: false,
-        throttle_target: 3,
-        throttle_restart_pending: true,
-      })
-    )
-    mocked.setThrottle.mockResolvedValue({
-      enabled: false,
-      worker_max_tasks: 1,
-      restart_required: true,
-      capped: false,
-    })
+  it('confirms the window that was actually stored', async () => {
+    // A device cap can store a lower window than the button asked for. The
+    // panel reports the stored value, so the number it shows is the number
+    // in force - not the one that was requested.
+    mocked.status.mockResolvedValue(statusWith())
+    mocked.setThrottle.mockResolvedValue(throttleResult({ window: 2, capped: true }))
     renderPanel()
 
     await waitFor(() => {
-      expect(screen.getByText('processing.throttleRestart')).toBeInTheDocument()
+      expect(screen.getByText('processing.throttle')).toBeInTheDocument()
     })
     fireEvent.click(screen.getByText('processing.throttle'))
 
     await waitFor(() => {
-      expect(mocked.setThrottle).toHaveBeenCalledWith(false)
+      expect(screen.getByText('processing.throttleCapped')).toBeInTheDocument()
     })
   })
 
-  it('hides the pending badge when nothing needs restarting', async () => {
+  it('shows why jobs are held rather than only how many', async () => {
+    // "Nothing is running" and "everything is waiting on memory" need
+    // different responses. A bare count hides exactly the case the memory
+    // gate exists to create.
+    mocked.status.mockResolvedValue(
+      statusWith({
+        queue: { held: 12, new: 0, running: 0 },
+        held_reasons: { memory: 9, 'window-full': 3 },
+      })
+    )
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText('processing.reason_memory')).toBeInTheDocument()
+    })
+    expect(screen.getByText('processing.reason_window-full')).toBeInTheDocument()
+    expect(screen.getByText('processing.memoryLine')).toBeInTheDocument()
+  })
+
+  it('says so when memory cannot be read', async () => {
+    mocked.status.mockResolvedValue(
+      statusWith({
+        memory: { readable: false, total: 0, available: 0, swapped: 0, reserve: 0 },
+      })
+    )
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText('processing.memoryUnknown')).toBeInTheDocument()
+    })
+    // No figures rendered from a reading that does not exist.
+    expect(screen.queryByText('processing.memoryLine')).not.toBeInTheDocument()
+  })
+
+  it('renders an unrecognised hold reason as itself', async () => {
+    // A newer backend on another device can report a reason this build has
+    // never heard of. Showing the raw reason beats showing a blank row.
+    mocked.status.mockResolvedValue(
+      statusWith({
+        queue: { held: 1 },
+        held_reasons: { 'some-future-reason': 1 },
+      })
+    )
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText(/some-future-reason/)).toBeInTheDocument()
+    })
+  })
+
+  it('stays quiet when there is nothing wrong', async () => {
     mocked.status.mockResolvedValue(statusWith())
     renderPanel()
 
     await waitFor(() => {
-      expect(screen.getByText('processing.throttle')).toBeInTheDocument()
+      expect(screen.getByText('processing.idle')).toBeInTheDocument()
     })
-    expect(screen.queryByText('processing.throttleRestart')).not.toBeInTheDocument()
+    expect(screen.queryByText('processing.memoryLine')).not.toBeInTheDocument()
+    expect(screen.queryByText('processing.held')).not.toBeInTheDocument()
   })
 })
