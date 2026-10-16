@@ -49,6 +49,7 @@ from api.routers import (
     notebooks,
     notes,
     podcasts,
+    processing,
     providers,
     review,
     search,
@@ -432,6 +433,7 @@ app.include_router(governor.router, prefix="/api", tags=["governor"])
 app.include_router(focus.router, prefix="/api", tags=["focus"])
 app.include_router(flashcards.router, prefix="/api", tags=["flashcards"])
 app.include_router(sync.router, prefix="/api", tags=["sync"])
+app.include_router(processing.router, prefix="/api", tags=["processing"])
 app.include_router(review.router, prefix="/api", tags=["review"])
 app.include_router(metrics.router, prefix="/api", tags=["metrics"])
 app.include_router(settings.router, prefix="/api", tags=["settings"])

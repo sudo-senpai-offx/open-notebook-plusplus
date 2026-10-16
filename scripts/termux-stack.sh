@@ -165,9 +165,16 @@ PY
   if is_up "surreal-commands-worker"; then
     echo "worker   already running"
   else
+    # Full throttle is capped at 2 here no matter what the setting says:
+    # an 8 GB phone with two llama-servers next to the worker will OOM
+    # past that, and a hot phone throttles the CPU away anyway. The PC
+    # sets OPEN_NOTEBOOK_WORKER_MAX_TASKS=3 in its own .env; this guest
+    # keeps 1 unless its own .env says otherwise (and never more than 2).
+    tasks="${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-1}"
+    [ "$tasks" -gt 2 ] 2>/dev/null && tasks=2
     nohup .venv/bin/surreal-commands-worker --import-modules commands \
-      --max-tasks 1 >>"$LOG" 2>&1 &
-    echo "worker   started"
+      --max-tasks "$tasks" >>"$LOG" 2>&1 &
+    echo "worker   started (max-tasks $tasks)"
   fi
 
   if is_up "next-server"; then

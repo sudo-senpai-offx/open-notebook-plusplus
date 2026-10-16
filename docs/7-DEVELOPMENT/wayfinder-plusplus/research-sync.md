@@ -1734,3 +1734,36 @@ a display-truncated id `[:34]` failed lookup and read as a product bug
 for a minute - paste full ids). Draining serially (worker max-tasks 1)
 over hours, unattended. Insights sync to the phone like any other kind
 once pushed.
+
+---
+
+## 30. Full throttle, honest scheduling, and the executor not built
+
+Full throttle is a per-device worker concurrency setting, not a mode
+that reaches across the network. PC runs 3 (12 cores, CPU-bound
+inference, measured against thrashing on a 93%-used box); the phone
+stays 1 with a hard cap of 2 in the launcher (8 GB next to two
+llama-servers OOMs past that, and heat throttles the rest). The default
+everywhere is 1. No hot-switching: concurrency is a startup setting, so
+a UI toggle for it would be theater - the panel states the active value
+and where to change it instead.
+
+Scheduling is where the real gains were, needing no extra RAM:
+smallest-first bulk queueing (early results, early failures), dedup by
+(existing source, transformation title) so re-runs fill gaps instead of
+duplicating, textless sources refused (no paying for invented content),
+and failed extractions released only by an explicit, auditable retry
+call. The Processing panel on the Advanced page surfaces queue depth by
+status, the needs-review list, and both actions; it polls only while
+jobs are active, never idly.
+
+The cross-device executor was declined, deliberately. A shared queue
+needs a live coordination channel between databases that are separate
+by design; per-job byte transfers to the executing device plus result
+merging through a path narrower than the manifest; all for a phone that
+is slower per job than the PC, thermally limited, battery-bound, and
+running a different model (so device-flavored content would land in one
+shared library) - over a tunnel documented as dying on reconnect. The
+distributed design already exists and is strictly cheaper: generate
+once on the fastest device, sync the results everywhere. That is what
+the bulk endpoint plus the manifest do.

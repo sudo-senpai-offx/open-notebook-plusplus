@@ -2,6 +2,7 @@
 
 import { AppShell } from '@/components/layout/AppShell'
 import { RebuildEmbeddings } from './components/RebuildEmbeddings'
+import { ProcessingQueue } from './components/ProcessingQueue'
 import { SystemInfo } from './components/SystemInfo'
 import { useTranslation } from '@/lib/hooks/use-translation'
 
@@ -20,6 +21,7 @@ export default function AdvancedPage() {
             </div>
 
             <SystemInfo />
+            <ProcessingQueue />
             <RebuildEmbeddings />
           </div>
         </div>

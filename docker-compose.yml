@@ -36,7 +36,11 @@ services:
       - SURREAL_DATABASE=open_notebook
       - OLLAMA_API_BASE=http://host.docker.internal:11434
       # - OPEN_NOTEBOOK_ENABLE_DOCLING=true  # disabled by default for low-end
-      - OPEN_NOTEBOOK_WORKER_MAX_TASKS=1
+      # Worker concurrency. 1 is the safe default for constrained
+      # devices (phone stays here: thermal limits and the OOM lesson);
+      # raise per device in .env where cores and RAM allow - the PC runs
+      # 3 (12 cores, CPU-bound inference, measured against thrashing).
+      - OPEN_NOTEBOOK_WORKER_MAX_TASKS=${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-1}
       # Without this the blob endpoints refuse everything: check_token
       # fails closed when no token is configured, so file bytes can
       # never move. The value comes from .env, where the sync token
