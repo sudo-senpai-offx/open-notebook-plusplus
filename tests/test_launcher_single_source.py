@@ -85,6 +85,53 @@ class TestSingleSourceOfTruth:
         assert "refresh_guest_launcher" in text
         assert "guest /root/termux-stack.sh" in text
 
+    def test_the_refresh_uses_a_path_that_exists(self):
+        """`REPO` in install-bin.sh already *is* the scripts directory, so
+        `$REPO/scripts/termux-stack.sh` resolves to `scripts/scripts/...`.
+
+        That shipped once. The failure was a `cp: cannot stat` line in the
+        middle of an otherwise successful install, on a device where the
+        real problem was one directory deeper. A warning buried in a list
+        of successes is the same shape as a start that reports success
+        while the process died - so the path is asserted here rather than
+        left to be noticed on a phone.
+        """
+        import re
+
+        text = _read("install-bin.sh")
+        repo_default = re.search(r'REPO="\$\{1:-\$DEFAULT_REPO\}"', text)
+        assert repo_default, "REPO should default to $DEFAULT_REPO"
+
+        default_repo = re.search(r'DEFAULT_REPO="([^"]+)"', text)
+        assert default_repo, "DEFAULT_REPO must be declared"
+        assert default_repo.group(1).endswith("/scripts"), (
+            "REPO points at the scripts directory itself, so a path built as "
+            "$REPO/scripts/... would double the segment"
+        )
+
+        # Every source path used by the installer must be $REPO/<file>.
+        for match in re.finditer(r"\$REPO/([A-Za-z0-9_./-]+)", text):
+            assert "scripts/" not in match.group(1), (
+                f"$REPO/{match.group(1)} would resolve to scripts/scripts/..."
+            )
+
+    def test_a_failed_refresh_is_reported_not_swallowed(self):
+        """The `cp` returning non-zero must not leave the installer
+        claiming everything is installed."""
+        text = _read("install-bin.sh")
+        refresh = text[
+            text.index("refresh_guest_launcher()") : text.index(
+                "\n}\n", text.index("refresh_guest_launcher()")
+            )
+        ]
+        assert "cmp -s" in refresh, "an unchanged copy needs no write"
+        assert "&&" in refresh, "the copy must gate on itself succeeding"
+        assert "refresh_guest_launcher || true" in text, (
+            "a refresh failure must not be fatal to the rest of the install, "
+            "but it must also not be silent - the || true is only safe "
+            "because the function reports its own failure"
+        )
+
 
 class TestStartIsVerified:
     """A launcher that reports success while running the wrong thing."""

@@ -62,11 +62,11 @@ install_one() {
 refresh_guest_launcher() {
   guest_target="/data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs/root/termux-stack.sh"
   [ -d "$(dirname "$guest_target")" ] || return 0
-  if cmp -s "$REPO/scripts/termux-stack.sh" "$guest_target" 2>/dev/null; then
+  if cmp -s "$REPO/termux-stack.sh" "$guest_target" 2>/dev/null; then
     echo "  guest /root/termux-stack.sh already current"
     return 0
   fi
-  cp "$REPO/scripts/termux-stack.sh" "$guest_target" \
+  cp "$REPO/termux-stack.sh" "$guest_target" \
     && chmod +x "$guest_target" \
     && echo "  refreshed /root/termux-stack.sh in the guest"
 }
