@@ -228,6 +228,9 @@ class TestAggregateBudget:
                     readable=True,
                 ),
                 reserve=0,
+                # Explicitly the local pool: without this the developer's
+                # `.env` override decides what this test means.
+                model_pool=4 * GIB,
             )
             if not decision.admit:
                 break

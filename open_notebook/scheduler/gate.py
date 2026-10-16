@@ -47,10 +47,15 @@ requests are governed by the reserve, not by this window.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Literal
 
-from open_notebook.scheduler.footprint import FootprintEstimate, JobFootprint
+from open_notebook.scheduler.footprint import (
+    EXPLICIT_FOOTPRINTS,
+    FootprintEstimate,
+    JobFootprint,
+)
 from open_notebook.scheduler.memory import MemoryReading
 
 #: Why a job was not admitted. Surfaced verbatim in the API and the UI, so
@@ -108,6 +113,44 @@ def default_reserve(total_bytes: int) -> int:
     return max(512 * 1024 * 1024, int(total_bytes * 0.15))
 
 
+#: What a job costs in *this* process's memory regardless of where its
+#: models run: the command payload, the extracted text, the chunk list. The
+#: `__no_model__` entry because that is precisely what it is - the cost of
+#: doing the work as opposed to running a model for it.
+LOCAL_OVERHEAD = EXPLICIT_FOOTPRINTS["__no_model__"]
+
+
+def model_pool_bytes(memory: MemoryReading) -> int:
+    """The memory pool the *models* live in, which is not always this one.
+
+    This is the correction for a failure that only appears once the whole
+    thing runs on real hardware. On the phone the models are inside the guest
+    beside the worker, so `/proc/meminfo` is the right answer. On the PC the
+    worker runs in a Docker container while Ollama runs on the host - and
+    Docker Desktop virtualises `/proc`, so the container sees the VM's 3.56 GB
+    rather than the host's 15 GB.
+
+    Comparing a model that lives on the host against the VM's total made the
+    ceiling permanently unreachable: a 5.2 GB model can never fit under
+    3.56 GB x 0.85, so every generation job was held forever. The gate looked
+    correct throughout - it reported `memory`, which was true of the number it
+    was handed - while refusing all work.
+
+    So the pool is explicit. Unset means "models are here", which is the
+    phone's case and the right default for a native install. The PC sets it,
+    because there it is demonstrably not.
+    """
+    override = os.getenv("OPEN_NOTEBOOK_MODEL_POOL_BYTES")
+    if override:
+        try:
+            value = int(override)
+        except ValueError:
+            return memory.total
+        if value > 0:
+            return value
+    return memory.total
+
+
 def evaluate(
     *,
     window: int,
@@ -117,6 +160,7 @@ def evaluate(
     memory: MemoryReading,
     reserve: int | None = None,
     ceiling_fraction: float = 0.85,
+    model_pool: int | None = None,
 ) -> GateDecision:
     """Decide whether to admit `candidate` right now."""
     incremental = incremental_cost(committed, candidate)
@@ -153,12 +197,21 @@ def evaluate(
         reserve if reserve is not None else default_reserve(memory.total)
     )
 
-    if memory.available - incremental < effective_reserve:
+    pool = model_pool if model_pool is not None else model_pool_bytes(memory)
+
+    # When the models live in this same pool, the job's whole footprint is
+    # charged against this pool's availability. When they live elsewhere - the
+    # PC, where Ollama runs on the host and only the worker is in here - then
+    # charging the model's bytes against the VM's free memory is the same
+    # category of error one check later: it subtracts a quantity that is not
+    # available here, and holds work that would in fact have started.
+    local_charge = incremental if pool == memory.total else LOCAL_OVERHEAD
+    if memory.available - local_charge < effective_reserve:
         return GateDecision(
             admit=False, reason="memory", incremental=incremental, projected=0
         )
 
-    if projected > memory.total * ceiling_fraction:
+    if projected > pool * ceiling_fraction:
         # Cannot be inflated by page cache, so it still bites when MemAvailable
         # is mostly cache and looks comfortable.
         return GateDecision(

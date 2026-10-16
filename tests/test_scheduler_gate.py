@@ -18,6 +18,7 @@ the rule is a pure function and these tests call it directly.
 """
 
 from typing import List
+from unittest.mock import patch
 
 import pytest
 
@@ -41,6 +42,24 @@ GIB = 1024 * MIB
 #: qwen3:4b Q4_K_M, the model that was actually in use on the PC.
 GENERATION_BYTES = 5_093_028_002
 GENERATION_COST = int(GENERATION_BYTES * 1.10)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_model_pool():
+    """Clear the model's-pool override for every test in this module.
+
+    This repository's `.env` carries a real `OPEN_NOTEBOOK_MODEL_POOL_BYTES`
+    for the PC deployment, and the test process inherits it. Without this,
+    the gate silently compared every fixture's footprint against a 15 GB
+    pool and the ceiling tests passed or failed according to the developer's
+    machine rather than the code. Tests that mean to exercise a configured
+    pool pass `model_pool` explicitly.
+    """
+    with patch.dict("os.environ", {}, clear=False):
+        import os
+
+        os.environ.pop("OPEN_NOTEBOOK_MODEL_POOL_BYTES", None)
+        yield
 
 
 def gen_job() -> JobFootprint:
@@ -450,6 +469,81 @@ class TestReserve:
 
     def test_percentage_takes_over_on_a_large_device(self):
         assert default_reserve(32 * GIB) == int(32 * GIB * 0.15)
+
+
+class TestModelPool:
+    """Where the models live, which is not always where this code lives.
+
+    Found by running it: on the PC the worker is in a Docker container and
+    Ollama is on the host, and Docker Desktop virtualises `/proc` so the
+    container sees the VM's 3.56 GB rather than the host's 15 GB. Comparing a
+    5.2 GB host-resident model against a 3.03 GB ceiling holds every
+    generation job forever - and the gate reports `memory` throughout, which
+    is true of the number it was given.
+    """
+
+    def test_defaults_to_this_processes_own_memory(self):
+        """The phone's case: the model is local, so /proc is correct."""
+        from open_notebook.scheduler.gate import model_pool_bytes
+
+        reading = memory(total=8 * GIB)
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+
+            os.environ.pop("OPEN_NOTEBOOK_MODEL_POOL_BYTES", None)
+            assert model_pool_bytes(reading) == 8 * GIB
+
+    def test_override_is_honoured(self):
+        from open_notebook.scheduler.gate import model_pool_bytes
+
+        with patch.dict(
+            "os.environ", {"OPEN_NOTEBOOK_MODEL_POOL_BYTES": str(15 * GIB)}
+        ):
+            assert model_pool_bytes(memory(total=3_560_000_000)) == 15 * GIB
+
+    @pytest.mark.parametrize("bad", ["not-a-number", "0", "-1", ""])
+    def test_a_nonsense_override_falls_back_rather_than_blocking(self, bad):
+        """A typo in the setting must not hold every job. Falling back to
+        the local total is the pre-existing behaviour and is wrong on the PC
+        but recoverable; holding everything is neither.
+        """
+        from open_notebook.scheduler.gate import model_pool_bytes
+
+        with patch.dict("os.environ", {"OPEN_NOTEBOOK_MODEL_POOL_BYTES": bad}):
+            assert model_pool_bytes(memory(total=8 * GIB)) == 8 * GIB
+
+    def test_a_generation_job_is_admitted_when_the_pool_is_configured(self):
+        """The end-to-end shape of the bug, as a test: a model larger than
+        this process's own total must still be admit-able when the models
+        demonstrably live elsewhere.
+        """
+        decision = evaluate(
+            window=3,
+            in_flight=0,
+            committed=merge_footprints([]),
+            candidate=gen_job(),
+            # A container that believes it has 3.5 GB...
+            memory=memory(total=3_560_000_000, available=1_960_000_000),
+            reserve=0,
+            # ...with the models on a 15 GB host.
+            model_pool=15 * GIB,
+        )
+        assert decision.admit is True
+
+    def test_the_same_job_is_held_when_the_pool_is_the_local_one(self):
+        """And the honest refusal when they are the same pool - which is the
+        phone, and where the ceiling is the check that matters.
+        """
+        decision = evaluate(
+            window=3,
+            in_flight=0,
+            committed=merge_footprints([]),
+            candidate=gen_job(),
+            memory=memory(total=3_560_000_000, available=1_960_000_000),
+            reserve=0,
+        )
+        assert decision.admit is False
+        assert decision.reason == "memory"
 
 
 class TestDecisionShape:

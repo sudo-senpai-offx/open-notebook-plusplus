@@ -46,6 +46,18 @@ services:
       # never move. The value comes from .env, where the sync token
       # already lives - it just never reached the container.
       - OPEN_NOTEBOOK_SYNC_TOKEN=${OPEN_NOTEBOOK_SYNC_TOKEN:-}
+      # Where the *models* live, in bytes, for the admission gate's ceiling
+      # check. Ollama runs on the host (host.docker.internal), not in this
+      # container - and Docker Desktop virtualises /proc, so the container
+      # sees the VM's ~3.5 GB rather than the host's ~15 GB. Comparing a
+      # host-resident 5 GB model against a 3.5 GB ceiling holds every
+      # generation job forever, which is exactly what happened before this
+      # was split out.
+      #
+      # Leave empty where the models are local (the phone runs llama-server
+      # inside the guest beside the worker, so /proc is already correct) and
+      # the gate falls back to its own MemTotal.
+      - OPEN_NOTEBOOK_MODEL_POOL_BYTES=${OPEN_NOTEBOOK_MODEL_POOL_BYTES:-}
       - OPEN_NOTEBOOK_FORCE_MINI_MODELS=true
       - OPEN_NOTEBOOK_MINI_MODEL_CHAT=mistral-nemo:latest
       - OPEN_NOTEBOOK_MINI_MODEL_EMBED=nomic-embed-text:latest
