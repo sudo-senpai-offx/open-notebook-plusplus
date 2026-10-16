@@ -537,6 +537,9 @@ export const ptBR = {
     retryFailed: "Repetir falhas",
     ensured: "{{queued}} enfileirados, {{skipped}} já feitos ou ignorados",
     retried: "{{count}} liberados para reenfileirar",
+    throttle: "Potência máxima",
+    throttleRestart: "Vale após reiniciar",
+    restartRequired: "Vale após reiniciar",
   },
   searchPage: {
     askAndSearch: "Perguntar e Buscar",

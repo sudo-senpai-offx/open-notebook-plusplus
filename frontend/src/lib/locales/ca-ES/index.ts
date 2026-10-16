@@ -537,6 +537,9 @@ export const caES = {
     retryFailed: "Reintenta els fallits",
     ensured: "{{queued}} en cua, {{skipped}} ja fets o omesos",
     retried: "{{count}} alliberats per tornar a posar en cua",
+    throttle: "Màxima potència",
+    throttleRestart: "S'aplica en reiniciar",
+    restartRequired: "S'aplica en reiniciar",
   },
   searchPage: {
     askAndSearch: "Pregunta i cerca",

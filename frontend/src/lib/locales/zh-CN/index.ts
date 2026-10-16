@@ -537,6 +537,9 @@ export const zhCN = {
     retryFailed: "重试失败项",
     ensured: "已加入 {{queued}}，已跳过 {{skipped}}",
     retried: "已释放 {{count}} 以重新排队",
+    throttle: "全速模式",
+    throttleRestart: "重启后生效",
+    restartRequired: "重启后生效",
   },
   searchPage: {
     askAndSearch: "提问与搜索",

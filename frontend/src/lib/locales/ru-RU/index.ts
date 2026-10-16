@@ -537,6 +537,9 @@ export const ruRU = {
     retryFailed: "Повторить неудачные",
     ensured: "В очереди: {{queued}}, пропущено: {{skipped}}",
     retried: "Освобождено для повтора: {{count}}",
+    throttle: "Полный газ",
+    throttleRestart: "Вступит после перезапуска",
+    restartRequired: "Вступит после перезапуска",
   },
   searchPage: {
     askAndSearch: "Запрос и поиск",

@@ -3,6 +3,10 @@ import apiClient from './client'
 export interface ProcessingStatus {
   worker_max_tasks: number
   full_throttle: boolean
+  /** Saved preference disagrees with the live worker: restart to apply. */
+  throttle_restart_pending: boolean
+  /** Worker count the next restart will use; what the toggle keys off. */
+  throttle_target: number
   queue: Record<string, number>
   needs_retry: string[]
 }
@@ -40,4 +44,19 @@ export const processingApi = {
     )
     return response.data
   },
+
+  setThrottle: async (enabled: boolean): Promise<ThrottleResult> => {
+    const response = await apiClient.post<ThrottleResult>(
+      '/processing/throttle',
+      { enabled }
+    )
+    return response.data
+  },
+}
+
+export interface ThrottleResult {
+  enabled: boolean
+  worker_max_tasks: number
+  restart_required: boolean
+  capped: boolean
 }

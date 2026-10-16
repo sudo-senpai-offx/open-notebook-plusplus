@@ -537,6 +537,9 @@ export const zhTW = {
     retryFailed: "重試失敗項目",
     ensured: "已加入 {{queued}}，已略過 {{skipped}}",
     retried: "已釋放 {{count}} 以重新排隊",
+    throttle: "全速模式",
+    throttleRestart: "重啟後生效",
+    restartRequired: "重啟後生效",
   },
   searchPage: {
     askAndSearch: "提問與搜尋",

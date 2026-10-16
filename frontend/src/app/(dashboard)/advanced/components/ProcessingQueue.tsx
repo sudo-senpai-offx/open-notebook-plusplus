@@ -63,6 +63,13 @@ export function ProcessingQueue() {
     onError: () => setLastResult(t('apiErrors.failedToQueue')),
   })
 
+  const throttleMutation = useMutation({
+    mutationFn: (enabled: boolean) => processingApi.setThrottle(enabled),
+    onSuccess: () => {
+      refresh()
+    },
+  })
+
   const retryMutation = useMutation({
     mutationFn: () => processingApi.retryFailed(),
     onSuccess: (data) => {
@@ -115,6 +122,11 @@ export function ProcessingQueue() {
                   {t('processing.failed', { count: failed })}
                 </Badge>
               )}
+              {status?.throttle_restart_pending && (
+                <Badge variant="outline">
+                  {t('processing.throttleRestart')}
+                </Badge>
+              )}
               {pending === 0 && running === 0 && failed === 0 && (
                 <span className="text-xs text-muted-foreground">
                   {t('processing.idle')}
@@ -128,6 +140,26 @@ export function ProcessingQueue() {
                 </AlertDescription>
               </Alert>
             )}
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Keys off throttle_target (the saved preference), not
+                  full_throttle (the running worker): with a restart
+                  pending the running value is still the old mode, and
+                  toggling off it would rewrite the same thing. */}
+              <Button
+                size="sm"
+                variant={(status?.throttle_target ?? 1) > 1 ? 'default' : 'outline'}
+                onClick={() => throttleMutation.mutate((status?.throttle_target ?? 1) <= 1)}
+                disabled={throttleMutation.isPending}
+                title={t('processing.restartRequired')}
+              >
+                {throttleMutation.isPending ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Gauge className="h-3 w-3" />
+                )}
+                <span className="ml-1">{t('processing.throttle')}</span>
+              </Button>
+            </div>
             <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"

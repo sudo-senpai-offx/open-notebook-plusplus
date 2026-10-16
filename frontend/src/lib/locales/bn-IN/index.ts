@@ -537,6 +537,9 @@ export const bnIN = {
     retryFailed: "ব্যর্থগুলো আবার চেষ্টা করো",
     ensured: "{{queued}}টি সারিবদ্ধ, {{skipped}}টি করা বা এড়ানো হয়েছে",
     retried: "{{count}}টি পুনঃসারির জন্য মুক্ত",
+    throttle: "ফুল থ্রটল",
+    throttleRestart: "রিস্টার্টের পর কার্যকর",
+    restartRequired: "রিস্টার্টের পর কার্যকর",
   },
   searchPage: {
     askAndSearch: "জিজ্ঞাসা ও অনুসন্ধান",

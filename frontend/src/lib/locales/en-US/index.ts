@@ -535,6 +535,9 @@ export const enUS = {
     retryFailed: "Retry failed",
     ensured: "Queued {{queued}}, {{skipped}} already done or skipped",
     retried: "{{count}} released for re-queue",
+    throttle: "Full throttle",
+    throttleRestart: "Restart to apply",
+    restartRequired: "Takes effect on restart",
   },
   searchPage: {
     askAndSearch: "Ask and Search",

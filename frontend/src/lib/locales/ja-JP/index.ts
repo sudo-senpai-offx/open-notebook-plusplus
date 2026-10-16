@@ -537,6 +537,9 @@ export const jaJP = {
     retryFailed: "失敗をリトライ",
     ensured: "{{queued}}件キュー済み、{{skipped}}件スキップ",
     retried: "{{count}}件を再キュー用に解放",
+    throttle: "フルスロットル",
+    throttleRestart: "再起動後に有効",
+    restartRequired: "再起動後に有効",
   },
   searchPage: {
     askAndSearch: "質問と検索",

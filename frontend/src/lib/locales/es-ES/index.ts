@@ -537,6 +537,9 @@ export const esES = {
     retryFailed: "Reintentar fallidos",
     ensured: "{{queued}} encolados, {{skipped}} ya hechos u omitidos",
     retried: "{{count}} liberados para reencolar",
+    throttle: "Máxima potencia",
+    throttleRestart: "Se aplica al reiniciar",
+    restartRequired: "Se aplica al reiniciar",
   },
   searchPage: {
     askAndSearch: "Preguntar y buscar",

@@ -537,6 +537,9 @@ export const trTR = {
     retryFailed: "Başarısızları tekrar dene",
     ensured: "{{queued}} kuyruğa alındı, {{skipped}} zaten yapılmış veya atlanmış",
     retried: "{{count}} yeniden kuyruk için serbest",
+    throttle: "Tam gaz",
+    throttleRestart: "Yeniden başlatınca geçerli",
+    restartRequired: "Yeniden başlatınca geçerli",
   },
   searchPage: {
     askAndSearch: "Sor ve Ara",

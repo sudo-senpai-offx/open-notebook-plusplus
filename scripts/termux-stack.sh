@@ -165,13 +165,27 @@ PY
   if is_up "surreal-commands-worker"; then
     echo "worker   already running"
   else
+    # The guest .env carries the persisted throttle preference (written
+    # by POST /processing/throttle); the Termux environment wins when it
+    # sets the variable explicitly. Read with grep, never sourced, so a
+    # corrupt file can at worst be ignored rather than executed.
     # Full throttle is capped at 2 here no matter what the setting says:
     # an 8 GB phone with two llama-servers next to the worker will OOM
-    # past that, and a hot phone throttles the CPU away anyway. The PC
-    # sets OPEN_NOTEBOOK_WORKER_MAX_TASKS=3 in its own .env; this guest
-    # keeps 1 unless its own .env says otherwise (and never more than 2).
-    tasks="${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-1}"
+    # past that, and a hot phone throttles the CPU away anyway.
+    guest_root="$PREFIX/var/lib/proot-distro/containers/ubuntu/rootfs/root/app/open-notebook-plusplus"
+    guest_env="$guest_root/.env"
+    tasks="${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-}"
+    if [ -z "$tasks" ]; then
+      tasks=$(grep -s '^OPEN_NOTEBOOK_WORKER_MAX_TASKS=[1-8]$' "$guest_env" 2>/dev/null | tail -1 | cut -d= -f2)
+      [ -z "$tasks" ] && tasks=1
+    fi
     [ "$tasks" -gt 2 ] 2>/dev/null && tasks=2
+    # Record what the worker is actually started with. The API reports
+    # the running count from this, not from the environment: the cap
+    # above and the guest .env both override the environment, so an
+    # env-based answer would describe a worker that does not exist.
+    printf 'OPEN_NOTEBOOK_WORKER_MAX_TASKS=%s\n' "$tasks" \
+      >"$guest_root/throttle.running" 2>/dev/null || true
     nohup .venv/bin/surreal-commands-worker --import-modules commands \
       --max-tasks "$tasks" >>"$LOG" 2>&1 &
     echo "worker   started (max-tasks $tasks)"

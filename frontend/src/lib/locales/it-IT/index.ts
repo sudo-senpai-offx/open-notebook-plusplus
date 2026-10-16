@@ -537,6 +537,9 @@ export const itIT = {
     retryFailed: "Riprova falliti",
     ensured: "{{queued}} accodati, {{skipped}} già fatti o ignorati",
     retried: "{{count}} rilasciati per la riaccodatura",
+    throttle: "Massima potenza",
+    throttleRestart: "Effettivo al riavvio",
+    restartRequired: "Effettivo al riavvio",
   },
   searchPage: {
     askAndSearch: "Chiedi e cerca",

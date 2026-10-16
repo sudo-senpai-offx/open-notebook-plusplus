@@ -537,6 +537,9 @@ export const frFR = {
     retryFailed: "Réessayer les échecs",
     ensured: "{{queued}} en file, {{skipped}} déjà faits ou ignorés",
     retried: "{{count}} libérés pour remise en file",
+    throttle: "Plein régime",
+    throttleRestart: "Redémarrage requis",
+    restartRequired: "Prend effet au redémarrage",
   },
   searchPage: {
     askAndSearch: "Poser une question et Rechercher",

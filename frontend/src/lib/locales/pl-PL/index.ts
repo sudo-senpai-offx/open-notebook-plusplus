@@ -537,6 +537,9 @@ export const plPL = {
     retryFailed: "Ponów nieudane",
     ensured: "{{queued}} dodano, {{skipped}} już zrobione lub pominięte",
     retried: "{{count}} zwolniono do ponowienia",
+    throttle: "Pełna moc",
+    throttleRestart: "Obowiązuje po restarcie",
+    restartRequired: "Obowiązuje po restarcie",
   },
   searchPage: {
     askAndSearch: "Pytaj i szukaj",

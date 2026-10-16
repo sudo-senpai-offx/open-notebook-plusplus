@@ -540,6 +540,9 @@ export const deDE = {
     retryFailed: "Fehlgeschlagene wiederholen",
     ensured: "{{queued}} eingereiht, {{skipped}} bereits erledigt oder übersprungen",
     retried: "{{count}} zur Neuplanung freigegeben",
+    throttle: "Vollgas",
+    throttleRestart: "Wirksam nach Neustart",
+    restartRequired: "Wirksam nach Neustart",
   },
   searchPage: {
     askAndSearch: "Fragen und Suchen",

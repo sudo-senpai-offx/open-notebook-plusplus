@@ -87,6 +87,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# Worker concurrency records written by the launchers at worker start
+# (and the throttle preference on devices where it lives outside .env).
+# Device-local runtime state, never committed - a committed value would
+# be one device's worker count asserting itself over another's.
+throttle.running
+throttle.env
+
 # PyCharm
 .idea/
 
