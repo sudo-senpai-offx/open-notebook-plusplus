@@ -88,7 +88,9 @@ class TestEnsureInsights:
                 "api.routers.processing.repo_query",
                 new=AsyncMock(side_effect=fake_repo),
             ),
-            patch("open_notebook.scheduler.submit.submit_held", side_effect=fake_submit),
+            patch(
+                "open_notebook.scheduler.submit.submit_held", side_effect=fake_submit
+            ),
             patch(
                 "open_notebook.domain.transformation.Transformation.get",
                 new=AsyncMock(return_value=MagicMock()),
