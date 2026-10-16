@@ -62,6 +62,11 @@ install_one termux-sync.sh   onb-sync  || rc=1
 # run while the stack answers, because updating underneath a live server
 # leaves a half-old process tree. --restart does stop/update/start.
 install_one termux-update.sh onb-update || rc=1
+# onb-config: set a guest config value without hand-typing a proot copy
+# across the Android /data boundary. It refuses an empty value, because a
+# `KEY=` that looks configured and is not has already cost one debugging
+# session - and it reports lengths, never values.
+install_one termux-config.sh onb-config || rc=1
 
 echo
 if [ "$rc" -eq 0 ]; then
