@@ -124,187 +124,110 @@ class TestWorkerLauncherIsPosix:
         assert LAUNCHER.stat().st_mode & 0o111, "worker-launch.sh must be executable"
 
 
-class TestPrecedence:
-    def test_preference_beats_the_environment(self, tmp_path):
-        assert _resolve(tmp_path, "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n", env="1") == "3"
+class TestBackstop:
+    """The worker's own limit is no longer the concurrency control.
 
-    def test_environment_applies_when_no_preference(self, tmp_path):
-        assert _resolve(tmp_path, None, env="2") == "2"
-
-    def test_defaults_to_strict(self, tmp_path):
-        """Nothing set anywhere must be 1, not 0 and not unlimited. The
-        low-end floor this project targets has one llama-server beside
-        the worker; an accidental default of 3 is an OOM.
-        """
-        assert _resolve(tmp_path, None, env=None) == "1"
-
-    @pytest.mark.parametrize(
-        "rejected",
-        [
-            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=0\n",
-            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=9\n",
-            'OPEN_NOTEBOOK_WORKER_MAX_TASKS="3"\n',
-            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3 # fast\n",
-            "  OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n",
-            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3;rm -rf /\n",
-            "OPEN_NOTEBOOK_OTHER=3\n",
-        ],
-    )
-    def test_unacceptable_preference_falls_back(self, tmp_path, rejected):
-        """Ignored, never executed, never clamped up.
-
-        A rejected preference must leave the device exactly as it was -
-        the env value - not promote to some middle value that nobody
-        chose.
-        """
-        assert _resolve(tmp_path, rejected, env="2") == "2"
-
-    def test_garbage_environment_is_not_a_crash(self, tmp_path):
-        assert _resolve(tmp_path, None, env="not-a-number") == "1"
-
-    def test_last_preference_line_wins(self, tmp_path):
-        """Matches the launchers' `tail -1` and the Python reader's
-        last-match rule. Disagreement here means the UI shows one
-        number and the worker starts with another.
-        """
-        assert (
-            _resolve(
-                tmp_path,
-                "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\nOPEN_NOTEBOOK_WORKER_MAX_TASKS=2\n",
-                env="1",
-            )
-            == "2"
-        )
-
-
-class TestPlatformCap:
-    def test_cap_lowers_a_high_preference(self, tmp_path):
-        """The phone's 2-worker ceiling is hardware, not preference, so
-        it applies after the preference is read and cannot be talked
-        around by the UI writing a larger number.
-        """
-        assert (
-            _resolve(tmp_path, "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n", env="1", cap=2)
-            == "2"
-        )
-
-    def test_cap_leaves_a_lower_preference_alone(self, tmp_path):
-        assert (
-            _resolve(tmp_path, "OPEN_NOTEBOOK_WORKER_MAX_TASKS=1\n", env="1", cap=2)
-            == "1"
-        )
-
-    def test_no_cap_by_default(self, tmp_path):
-        assert (
-            _resolve(tmp_path, "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n", env="1", cap=0)
-            == "3"
-        )
-
-
-class TestTheRecord:
-    """The API reads `throttle.running` to report the running worker.
-
-    It cannot be verified from Python - this is about the file being
-    written at all, and the API's own reader already has its tests.
+    Concurrency moved upstream of the claim: the dispatcher admits jobs from
+    `held` to `new` up to a window it re-reads every pass. The worker's
+    semaphore is therefore a backstop that should never bind, and the two
+    failure modes this replaces are both worth pinning.
     """
 
-    def test_writes_what_it_resolved(self, tmp_path):
-        """A real end-to-end run of the script's own write path.
-
-        `exec uv run ...` at the end makes this impossible to run
-        directly, so the write is exercised through the same shell
-        constructs - and the assertion is on the file the API reads,
-        not on the resolved number the caller already knows.
+    def test_backstop_is_not_read_from_the_throttle_file(self):
+        """Reading the preference here would be actively wrong in both
+        directions. Lowered at runtime, a startup-time semaphore would refuse
+        work the operator asked for; raised at runtime, it would cap the
+        window at whatever the worker happened to start with and the gate
+        would govern nothing.
         """
-        write = (
-            RESOLVE.replace("printf '%s' \"$tasks\"", "")
-            + 'mkdir -p "$data_dir"\n'
-            + "printf 'OPEN_NOTEBOOK_WORKER_MAX_TASKS=%s\\n' \"$tasks\" "
-            + '>"$data_dir/throttle.running"\n'
-        )
-        (tmp_path / "throttle.env").write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
-        result = subprocess.run(
-            ["sh", "-c", write, "sh", str(tmp_path)],
-            capture_output=True,
-            text=True,
-            env={
-                "OPEN_NOTEBOOK_WORKER_MAX_TASKS": "1",
-                "OPEN_NOTEBOOK_WORKER_MAX_TASKS_CAP": "0",
-                "PATH": "/usr/bin:/bin",
-            },
-        )
-        assert result.returncode == 0, result.stderr
+        source = LAUNCHER.read_text()
+        assert "throttle" not in source.lower() or "OPEN_NOTEBOOK_WINDOW_CAP" in source
+        assert "grep" not in source, "the launcher must not parse the preference"
 
-        # The line shape the Python reader accepts, exactly.
-        from api.routers.processing import _read_throttle_key
-
-        assert _read_throttle_key(tmp_path / "throttle.running") == 3
-
-    def test_api_reads_the_record_not_the_environment(self, tmp_path, monkeypatch):
-        """The end of the chain, in one test.
-
-        Container: environment says 1, throttle.env says 3, the worker
-        starts at 3 and records 3. The API must then report 3 - not the
-        1 it would read from the environment it just overrode, and not
-        a pending restart that has already happened.
+    def test_backstop_is_at_least_the_highest_possible_window(self):
+        """If the backstop were below the maximum window, it would become the
+        real limit the moment the window was raised past it.
         """
-        from api.routers.processing import processing_status
+        from open_notebook.scheduler.dispatcher import MAX_WINDOW
 
-        (tmp_path / "throttle.env").write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
-        (tmp_path / "throttle.running").write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
-        monkeypatch.setenv("THROTTLE_FILE", str(tmp_path / "throttle.env"))
-        monkeypatch.setenv("OPEN_NOTEBOOK_WORKER_MAX_TASKS", "1")
+        source = LAUNCHER.read_text()
+        assert "BACKSTOP" in source
+        # The default literal in the script must not be below MAX_WINDOW.
+        assert "OPEN_NOTEBOOK_WORKER_BACKSTOP:-8" in source
+        assert MAX_WINDOW <= 8
 
-        import asyncio
-
-        body = asyncio.run(processing_status())
-        assert body["worker_max_tasks"] == 3
-        assert body["full_throttle"] is True
-        assert body["throttle_restart_pending"] is False
-
-    def test_a_missing_record_falls_back_to_the_environment(
-        self, tmp_path, monkeypatch
-    ):
-        """Before the worker starts there is no record, and the
-        environment is the best available answer. Getting this wrong
-        would make a fresh container report a worker that has not
-        started yet.
+    def test_backstop_ignores_a_non_numeric_override(self):
+        """A corrupt environment value falls back to the ceiling rather than
+        being handed to the worker, which would refuse to start.
         """
-        from api.routers.processing import processing_status
+        source = LAUNCHER.read_text()
+        assert "*[!0-9]*" in source
 
-        (tmp_path / "throttle.env").write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
-        monkeypatch.setenv("THROTTLE_FILE", str(tmp_path / "throttle.env"))
-        monkeypatch.setenv("OPEN_NOTEBOOK_WORKER_MAX_TASKS", "1")
 
-        import asyncio
+def test_the_device_cap_lives_with_the_device_not_the_repository():
+    """The phone's ceiling is 2 and the PC's is 8, so it cannot be a constant
+    in the code. It is read from the environment, which the phone launcher
+    sets when it starts the API that hosts the dispatcher.
+    """
+    from open_notebook.scheduler.dispatcher import MAX_WINDOW
 
-        body = asyncio.run(processing_status())
-        assert body["worker_max_tasks"] == 1
-        # The preference is ahead of the worker: still pending.
-        assert body["throttle_restart_pending"] is True
+    stack = (REPO / "scripts" / "termux-stack.sh").read_text()
+    assert "OPEN_NOTEBOOK_WINDOW_CAP:-2" in stack
+    assert MAX_WINDOW == 8
+
+
+def test_window_is_clamped_on_read_as_well_as_on_write(tmp_path):
+    """A file written by an older build, or hand-edited past what this
+    device can honour, is reduced rather than obeyed.
+    """
+    from open_notebook.scheduler.dispatcher import read_window, write_window
+
+    path = tmp_path / "t.conf"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("THROTTLE_FILE", str(path))
+        mp.setenv("OPEN_NOTEBOOK_WINDOW_CAP", "2")
+        # A value a previous build stored, above this device's ceiling.
+        path.write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=8\n")
+        assert read_window() == 2
+        # And writing is clamped too, so the two cannot disagree.
+        assert write_window(3) == 2
+        assert read_window() == 2
+        assert path.read_text().strip() == "OPEN_NOTEBOOK_WORKER_MAX_TASKS=2"
+
+
+def test_cap_below_one_does_not_wedge_the_queue(tmp_path):
+    """A cap of 0 means drain, not refuse-to-parse. A negative or
+    unparseable cap falls back to the ceiling rather than stranding the
+    device with an impossible window.
+    """
+    from open_notebook.scheduler.dispatcher import read_window
+
+    path = tmp_path / "t.conf"
+    path.write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("THROTTLE_FILE", str(path))
+        mp.setenv("OPEN_NOTEBOOK_WINDOW_CAP", "not-a-number")
+        assert read_window() == 3
 
 
 def test_throttle_state_files_are_ignored_by_git():
-    """Both files are device-local runtime state written beside the
-    checkout - on the phone that checkout is a git working tree.
-
-    A committed `throttle.running` would be one device's worker count
-    asserting itself over another's on the next pull, which is the
-    exact failure the phone cap exists to prevent.
+    """Device-local runtime state, written beside the checkout - and on the
+    phone that checkout is a git working tree. A committed value would be one
+    device's window asserting itself over another's.
     """
-    ignored = subprocess.run(
-        ["git", "check-ignore", "-q", "throttle.running"],
-        cwd=REPO,
-        capture_output=True,
-    )
-    assert ignored.returncode == 0, "throttle.running must be gitignored"
+    for name in ("throttle.running", "throttle.env", "throttle.conf"):
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", name],
+            cwd=REPO,
+            capture_output=True,
+        )
+        assert result.returncode == 0, f"{name} must be gitignored"
 
 
 def test_launcher_is_not_a_device_script_by_accident():
-    """It runs under supervisord in the container. If it were also
-    installed onto the phone it would need the DEVICE_SCRIPTS POSIX
-    treatment there, and the phone's cap lives in termux-stack.sh - two
-    places to keep in step instead of one.
+    """It runs under supervisord in the container. If it were also installed
+    onto the phone it would need the DEVICE_SCRIPTS POSIX treatment there, and
+    the phone's cap lives in termux-stack.sh - two places to keep in step.
     """
     from tests.test_device_scripts_posix import DEVICE_SCRIPTS
 

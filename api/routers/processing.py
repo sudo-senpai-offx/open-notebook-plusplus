@@ -35,9 +35,6 @@ visible instead.
 from __future__ import annotations
 
 import json
-import os
-import re
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -45,6 +42,21 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from open_notebook.database.repository import ensure_record_id, repo_query
+from open_notebook.scheduler.dispatcher import (
+    DEFAULT_INTERVAL_SECONDS as READ_INTERVAL,
+)
+from open_notebook.scheduler.dispatcher import (
+    device_cap,
+    read_window,
+    write_window,
+)
+from open_notebook.scheduler.gate import default_reserve
+from open_notebook.scheduler.memory import current_memory
+
+#: This device's hard ceiling on the window. The phone launcher lowers it; an
+#: 8 GB device with two model servers beside the worker will OOM past 2.
+THROTTLE_CAP = device_cap()
+THROTTLE_FULL_TASKS = 3
 
 router = APIRouter()
 
@@ -82,144 +94,73 @@ class ThrottleRequest(BaseModel):
 
 
 class ThrottleResponse(BaseModel):
-    enabled: bool = Field(..., description="What was set")
-    worker_max_tasks: int = Field(..., description="Effective value after caps")
+    enabled: bool = Field(..., description="True when the window is above strict")
+    #: The promotion window. Not a worker semaphore: the dispatcher admits at
+    #: most this many jobs, and the vendor worker's own limit is a backstop
+    #: that should never bind.
+    window: int = Field(..., description="Effective window after caps")
+    #: Always False. The window is read fresh on every dispatcher pass, so a
+    #: toggle applies on the next pass rather than at a restart.
     restart_required: bool = Field(
-        default=True,
-        description="Worker concurrency applies at process start, never hot",
+        default=False, description="Always False: the window is read live"
     )
     capped: bool = Field(
-        default=False,
-        description="True when a platform cap lowered the requested value",
+        default=False, description="True when a platform cap lowered the request"
     )
-
-
-#: The only key this endpoint manages, here and in every launcher that
-#: reads the file. Anything else in the file is left byte-identical.
-THROTTLE_KEY = "OPEN_NOTEBOOK_WORKER_MAX_TASKS"
-#: Workers when full throttle is on. Not "unlimited": each worker holds a
-#: model in memory, and on the 8 GB phone that is the difference between
-#: fast and OOM-killed mid-transformation.
-THROTTLE_FULL_TASKS = 3
-
-
-def _throttle_file() -> Path:
-    """Where this device keeps its throttle preference.
-
-    Overridable for tests. The container writes into its mounted data
-    dir (the repo .env is on the host, unreachable from in here);
-    everywhere else it is the repository .env beside the code.
-    """
-    override = os.getenv("THROTTLE_FILE")
-    if override:
-        return Path(override)
-    if Path("/.dockerenv").exists():
-        return Path("/app/data/throttle.env")
-    return Path(__file__).resolve().parents[2] / ".env"
-
-
-def _read_throttle_key(path: Path) -> Optional[int]:
-    """The `KEY=N` in `path`, or None if there is no acceptable one.
-
-    Only a bare `KEY=N` with 1-8 is honoured; anything else in the file
-    (a comment, a quoted value, a hand-edit typo, a shell fragment) is
-    ignored rather than obeyed. The launchers grep for the same
-    pattern, so a file this function rejects is a file they ignore
-    too - the reader is deliberately the narrowest of the set.
-    """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    found = None
-    for line in text.splitlines():
-        # No strip(), deliberately. The launchers grep
-        # '^KEY=[1-8]$', anchored at both ends: a reader that tolerated
-        # leading or trailing space would accept a line they ignore, and
-        # the preference would work in the UI and vanish at startup.
-        match = re.fullmatch(rf"{THROTTLE_KEY}=([1-8])", line)
-        if match:
-            found = int(match.group(1))
-    return found
-
-
-def _read_throttle_tasks() -> Optional[int]:
-    """The persisted *preference*, or None when never set."""
-    return _read_throttle_key(_throttle_file())
-
-
-def _read_running_tasks() -> Optional[int]:
-    """What the worker process was actually started with, or None.
-
-    Written by the launcher at worker start. It has to be read from a
-    file rather than the environment because the launcher's whole
-    purpose is to override the environment: an API that reported
-    `os.environ` here would name the pre-override number, so a worker
-    already running at 3 would be described as running at 1, with a
-    restart still pending that had in fact already happened.
-    """
-    return _read_throttle_key(_throttle_file().with_name("throttle.running"))
+    applied_within_seconds: int = Field(
+        default=0, description="Upper bound on when the new window takes effect"
+    )
 
 
 @router.post("/processing/throttle", response_model=ThrottleResponse)
 async def set_throttle(body: ThrottleRequest):
-    """Persist full throttle mode. Takes effect on restart, never hot.
+    """Set the promotion window. Applies on the next dispatcher pass.
 
-    Worker concurrency is a process-startup setting on every launcher
-    here (supervisord, termux-stack): no endpoint can safely change a
-    running worker pool's size, so this writes the preference where the
-    launchers read it and says so in `restart_required`. Strict is the
-    default and stays it; the phone launcher additionally caps at 2 no
-    matter what is written, for thermal and OOM reasons documented there.
+    Supersedes the restart-based throttle from `beef791`. That design treated
+    worker concurrency as a process-startup setting, because
+    `surreal_commands` builds its semaphore once before the listen loop. It
+    therefore persisted a preference, reported `restart_required`, and had
+    both launchers record what they had actually started with so the API
+    could reconcile the file against the running process.
 
-    The request is a boolean, not a number, so there is no out-of-range
-    case to refuse: what gets persisted is always 1 or
-    THROTTLE_FULL_TASKS, both inside the 1-8 window the readers accept.
+    Concurrency now lives *upstream* of the claim. The dispatcher decides how
+    many jobs are ever `new`, so the value is read fresh each pass and there
+    is nothing to reconcile, nothing to restart, and no window in which the UI
+    could truthfully claim a change had not yet taken hold.
+
+    Shrinking applies going forward. Jobs already running are left alone:
+    killing one strands in-flight work as a stale failure, which costs more
+    than the memory it would reclaim.
     """
     tasks = THROTTLE_FULL_TASKS if body.enabled else 1
-    path = _throttle_file()
+    capped = tasks > THROTTLE_CAP
     try:
-        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-        kept = [
-            line for line in lines if not line.strip().startswith(f"{THROTTLE_KEY}=")
-        ]
-        kept.append(f"{THROTTLE_KEY}={tasks}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text("\n".join(kept) + "\n", encoding="utf-8")
-        temporary.replace(path)
+        # write_window applies the cap itself, so the stored value and the
+        # reported value cannot disagree. A device ceiling that only clamped
+        # on read would leave the file saying 3 and the window at 2, which
+        # is the kind of discrepancy that reads as a broken toggle.
+        written = write_window(tasks)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"cannot persist throttle: {exc}")
 
     return ThrottleResponse(
-        enabled=body.enabled,
-        worker_max_tasks=tasks,
-        restart_required=True,
-        capped=False,
+        enabled=written > 1,
+        window=written,
+        restart_required=False,
+        capped=capped,
+        applied_within_seconds=int(READ_INTERVAL),
     )
-
-
-def _worker_max_tasks() -> int:
-    """Concurrency the running worker was started with.
-
-    The worker's own record first, the environment only as a fallback
-    for a launcher that has not written one yet (a fresh container
-    before the worker starts, or a bare `uvicorn` with no worker). This
-    reports what is actually true, which is the only number a caller
-    can act on.
-    """
-    recorded = _read_running_tasks()
-    if recorded is not None:
-        return recorded
-    try:
-        return max(1, int(os.getenv("OPEN_NOTEBOOK_WORKER_MAX_TASKS", "1")))
-    except ValueError:
-        return 1
 
 
 @router.get("/processing/status")
 async def processing_status() -> Dict[str, Any]:
-    """Queue depth, worker concurrency, and files waiting on their owner."""
+    """Queue depth, the live window, memory headroom, and why work is held.
+
+    Everything reported here is something the dispatcher actually knows. The
+    superseded design reported a *preference* alongside a *running value* and a
+    pending flag, because the two could disagree for an unbounded time. There
+    is no such disagreement to report now: the window is read fresh each pass.
+    """
     try:
         states = (
             await repo_query("SELECT status, count() AS n FROM command GROUP BY status")
@@ -247,24 +188,47 @@ async def processing_status() -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - best effort enrichment
         logger.debug(f"needs_retry unavailable: {exc}")
 
-    running = _worker_max_tasks()
-    persisted = _read_throttle_tasks()
-    target = persisted if persisted is not None else running
+    # Why the held jobs are held, grouped. A queue that is not draining is
+    # only diagnosable if "nothing is running" and "everything is waiting on
+    # memory" are distinguishable, and the UI needs the counts to say which.
+    held_reasons: Dict[str, int] = {}
+    try:
+        rows = (
+            await repo_query(
+                "SELECT held_reason, count() AS n FROM command "
+                "WHERE status = 'held' GROUP BY held_reason"
+            )
+            or []
+        )
+        for row in rows:
+            reason = row.get("held_reason") or "not-yet-considered"
+            held_reasons[str(reason)] = int(row.get("n") or 0)
+    except Exception as exc:  # noqa: BLE001 - best effort enrichment
+        logger.debug(f"held_reasons unavailable: {exc}")
+
+    memory = current_memory()
+    window = read_window()
+    in_flight = int(queue.get("new", 0) or 0) + int(queue.get("running", 0) or 0)
+
     return {
-        "worker_max_tasks": running,
-        "full_throttle": running > 1,
-        # True when the saved preference disagrees with the live worker:
-        # the click landed, the restart is what applies it. Reported
-        # rather than papered over, because a toggle that silently
-        # does nothing reads as a broken app.
-        "throttle_restart_pending": target != running,
-        # What the next restart will actually use. The toggle must key
-        # off this, not off the running value: with a change pending,
-        # `full_throttle` is still the old mode and a second click would
-        # write the identical preference and look like a dead button.
-        "throttle_target": target,
+        # The promotion window, read live. `full_throttle` is derived from it
+        # rather than from a separate flag so the two can never disagree.
+        "window": window,
+        "full_throttle": window > 1,
+        "in_flight": in_flight,
         "queue": queue,
+        "held_reasons": held_reasons,
         "needs_retry": needs_retry,
+        # Memory, in bytes, with `readable` rather than a zero standing in
+        # for "unknown" - a zero here reads as "this device has no memory",
+        # which is a different and much more alarming statement.
+        "memory": {
+            "readable": memory.readable,
+            "total": memory.total,
+            "available": memory.available,
+            "swapped": memory.swapped,
+            "reserve": default_reserve(memory.total) if memory.readable else 0,
+        },
     }
 
 
@@ -307,7 +271,7 @@ async def ensure_insights(body: EnsureInsightsRequest):
     pending_rows = (
         await repo_query(
             "SELECT args FROM command WHERE name = 'run_transformation' "
-            "AND status IN ['new', 'running']"
+            "AND status IN ['held', 'new', 'running']"
         )
         or []
     )

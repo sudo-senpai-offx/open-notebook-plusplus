@@ -163,6 +163,15 @@ async def _skip_reason(command_ref: str) -> Optional[str]:
     is an explicit signal deserving eyes before any retry. Anything
     else (no record, completed without text, another command kind)
     means no text was ever written by it, so queue.
+
+    `held` counts as in flight, and that is load-bearing rather than
+    tidy. A held job is one the admission gate has not yet admitted -
+    usually because memory is short - so it is *most* likely to be seen
+    again by a caller, and precisely when the device is under pressure.
+    Treating it as queueable made every blob pull and every sync import
+    re-queue every held job, and since each duplicate would eventually be
+    admitted and run, the queue grew without bound and manufactured the
+    memory pressure that had caused the hold in the first place.
     """
     from open_notebook.database.repository import ensure_record_id, repo_query
 
@@ -179,7 +188,7 @@ async def _skip_reason(command_ref: str) -> Optional[str]:
     job = rows[0]
     if (job.get("name") or "") != "process_source":
         return None
-    if job.get("status") in ("new", "running"):
+    if job.get("status") in ("held", "new", "running"):
         return "in flight"
     if job.get("status") in ("failed", "canceled"):
         return "needs a look"

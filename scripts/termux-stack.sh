@@ -158,37 +158,37 @@ PY
   if is_up "uvicorn api.main:app"; then
     echo "api      already running"
   else
+    # The API hosts the dispatcher, so this is where the phone's window
+    # ceiling is set. Defaulted here rather than left to the code because a
+    # hardware limit that lives only in the repository would be invisible on
+    # the one device it exists for.
+    OPEN_NOTEBOOK_WINDOW_CAP="${OPEN_NOTEBOOK_WINDOW_CAP:-2}"
+    export OPEN_NOTEBOOK_WINDOW_CAP
     nohup .venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 5055 >>"$LOG" 2>&1 &
-    echo "api      started"
+    echo "api      started (window cap $OPEN_NOTEBOOK_WINDOW_CAP)"
   fi
 
   if is_up "surreal-commands-worker"; then
     echo "worker   already running"
   else
-    # The guest .env carries the persisted throttle preference (written
-    # by POST /processing/throttle); the Termux environment wins when it
-    # sets the variable explicitly. Read with grep, never sourced, so a
-    # corrupt file can at worst be ignored rather than executed.
-    # Full throttle is capped at 2 here no matter what the setting says:
-    # an 8 GB phone with two llama-servers next to the worker will OOM
-    # past that, and a hot phone throttles the CPU away anyway.
-    guest_root="$PREFIX/var/lib/proot-distro/containers/ubuntu/rootfs/root/app/open-notebook-plusplus"
-    guest_env="$guest_root/.env"
-    tasks="${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-}"
-    if [ -z "$tasks" ]; then
-      tasks=$(grep -s '^OPEN_NOTEBOOK_WORKER_MAX_TASKS=[1-8]$' "$guest_env" 2>/dev/null | tail -1 | cut -d= -f2)
-      [ -z "$tasks" ] && tasks=1
-    fi
-    [ "$tasks" -gt 2 ] 2>/dev/null && tasks=2
-    # Record what the worker is actually started with. The API reports
-    # the running count from this, not from the environment: the cap
-    # above and the guest .env both override the environment, so an
-    # env-based answer would describe a worker that does not exist.
-    printf 'OPEN_NOTEBOOK_WORKER_MAX_TASKS=%s\n' "$tasks" \
-      >"$guest_root/throttle.running" 2>/dev/null || true
+    # The worker's own limit is a backstop only. Concurrency is decided by
+    # the dispatcher, which admits jobs from `held` to `new` up to a window it
+    # re-reads every pass - so a window lowered or raised at runtime is not
+    # capped by a semaphore that was fixed when this process started. The
+    # phone's ceiling of 2 lives in OPEN_NOTEBOOK_WINDOW_CAP, where the
+    # dispatcher can apply it: an 8 GB phone with two model servers beside the
+    # worker will OOM past that, and a hot phone throttles the CPU away anyway.
+    #
+    # The backstop must be at least the highest window this device's cap
+    # allows, or the semaphore becomes the real limit and the gate governs
+    # nothing.
+    cap="${OPEN_NOTEBOOK_WINDOW_CAP:-8}"
+    case "$cap" in
+        ''|*[!0-9]*) cap=8 ;;
+    esac
     nohup .venv/bin/surreal-commands-worker --import-modules commands \
-      --max-tasks "$tasks" >>"$LOG" 2>&1 &
-    echo "worker   started (max-tasks $tasks)"
+      --max-tasks "$cap" >>"$LOG" 2>&1 &
+    echo "worker   started (backstop $cap; real window from the dispatcher)"
   fi
 
   if is_up "next-server"; then

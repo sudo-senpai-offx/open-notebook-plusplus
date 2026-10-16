@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from open_notebook.scheduler.memory import MemoryReading
+
 
 @pytest.fixture
 def client():
@@ -46,47 +48,6 @@ def _repo_for(sources, transformations=(), insights=(), commands=()):
         return []
 
     return fake
-
-
-class TestStatus:
-    def test_reports_concurrency_and_queue(self, client):
-        rows = [
-            {"status": "new", "n": 12},
-            {"status": "running", "n": 2},
-            {"status": "failed", "n": 1},
-        ]
-        with (
-            patch(
-                "api.routers.processing.repo_query",
-                new=AsyncMock(
-                    side_effect=[
-                        rows,
-                        [],
-                    ]
-                ),
-            ),
-            patch.dict("os.environ", {"OPEN_NOTEBOOK_WORKER_MAX_TASKS": "3"}),
-        ):
-            resp = client.get("/api/processing/status")
-
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["worker_max_tasks"] == 3
-        assert body["full_throttle"] is True
-        assert body["queue"] == {"new": 12, "running": 2, "failed": 1}
-
-    def test_defaults_to_single_worker(self, client):
-        with (
-            patch("api.routers.processing.repo_query", new=AsyncMock(return_value=[])),
-            patch.dict("os.environ", {}, clear=False),
-        ):
-            import os
-
-            os.environ.pop("OPEN_NOTEBOOK_WORKER_MAX_TASKS", None)
-            resp = client.get("/api/processing/status")
-
-        assert resp.json()["worker_max_tasks"] == 1
-        assert resp.json()["full_throttle"] is False
 
 
 class TestEnsureInsights:
@@ -428,32 +389,48 @@ def _recording_submit(sink):
     return submit
 
 
-class TestThrottle:
-    """The throttle preference is a file both launchers grep, so the
-    invariants are about what that file is allowed to say.
+class TestWindow:
+    """The window is read fresh on every dispatcher pass.
 
-    Two failures are worth guarding and both are silent: a preference
-    that reads back wrong (the toggle lies), and a preference the
-    launchers cannot parse (the click lands, the restart ignores it).
+    This class replaces one that tested a restart-based throttle: a
+    persisted preference, a `restart_required` flag, and a second file
+    recording what the worker had actually started with so the API could
+    reconcile the two. Concurrency now lives upstream of the claim, so there
+    is no reconciliation to get wrong - and correspondingly no field that
+    could disagree with reality.
     """
 
     def test_persists_full_and_strict(self, client, tmp_path):
-        env = tmp_path / "throttle.env"
+        env = tmp_path / "throttle.conf"
         with patch.dict("os.environ", {"THROTTLE_FILE": str(env)}):
             on = client.post("/api/processing/throttle", json={"enabled": True})
             assert on.status_code == 200
-            assert on.json()["worker_max_tasks"] == 3
-            assert on.json()["restart_required"] is True
+            assert on.json()["window"] == 3
+            assert on.json()["restart_required"] is False
             assert env.read_text().strip() == "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3"
 
             off = client.post("/api/processing/throttle", json={"enabled": False})
-            assert off.json()["worker_max_tasks"] == 1
-            assert env.read_text().strip() == "OPEN_NOTEBOOK_WORKER_MAX_TASKS=1"
+            assert off.json()["window"] == 1
+            assert off.json()["enabled"] is False
+
+    def test_a_toggle_needs_no_restart(self, client, tmp_path):
+        """The requirement that superseded the old design. Asserted on the
+        response and on the reader, because the flag alone would pass even if
+        the dispatcher were still reading the value once at startup.
+        """
+        from open_notebook.scheduler.dispatcher import read_window
+
+        env = tmp_path / "throttle.conf"
+        with patch.dict("os.environ", {"THROTTLE_FILE": str(env)}):
+            client.post("/api/processing/throttle", json={"enabled": True})
+            # Read again, as a later dispatcher pass would.
+            assert read_window() == 3
+            client.post("/api/processing/throttle", json={"enabled": False})
+            assert read_window() == 1
 
     def test_preserves_every_other_line_of_the_file(self, client, tmp_path):
-        """The endpoint owns one key. Rewriting the whole file to store
-        one integer would destroy the sync token sitting beside it -
-        the same class of bug as a launcher sourcing what it greps.
+        """The endpoint owns one key. Rewriting the whole file to store one
+        integer would destroy the sync token sitting beside it.
         """
         env = tmp_path / ".env"
         env.write_text(
@@ -469,174 +446,181 @@ class TestThrottle:
         lines = env.read_text().splitlines()
         assert "OPEN_NOTEBOOK_SYNC_TOKEN=secret" in lines
         assert "# a comment" in lines
-        # exactly one throttle key, and it is the new value
         assert [
             line for line in lines if line.startswith("OPEN_NOTEBOOK_WORKER_MAX_TASKS")
         ] == ["OPEN_NOTEBOOK_WORKER_MAX_TASKS=3"]
 
     def test_reader_honours_only_a_bare_value_in_range(self, tmp_path):
-        """What the launchers grep is `KEY=[1-8]` on its own line. A
-        reader that accepts more than they do produces a preference
-        that works in the UI and is silently ignored at startup.
+        """Anything the reader accepts, the dispatcher will actually use, and
+        anything it rejects leaves the previous value in place rather than
+        becoming a shell fragment.
         """
-        from api.routers.processing import _read_throttle_tasks
+        from open_notebook.scheduler.dispatcher import read_window
 
         cases = {
             "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n": 3,
             "OPEN_NOTEBOOK_WORKER_MAX_TASKS=1\n": 1,
             "OPEN_NOTEBOOK_WORKER_MAX_TASKS=8\n": 8,
-            # out of the window, quoted, suffixed, indented by a shell,
-            # or a fragment - all ignored, none of them executed
-            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=0\n": None,
-            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=9\n": None,
-            'OPEN_NOTEBOOK_WORKER_MAX_TASKS="3"\n': None,
-            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3 # fast\n": None,
-            "  OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n": None,
-            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3;rm -rf /\n": None,
-            "OPEN_NOTEBOOK_OTHER=3\n": None,
-            "": None,
+            # 0 is meaningful here: it drains the queue and admits nothing.
+            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=0\n": 0,
+            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=9\n": 3,
+            'OPEN_NOTEBOOK_WORKER_MAX_TASKS="3"\n': 3,
+            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3 # fast\n": 3,
+            "  OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n": 3,
+            "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3;rm -rf /\n": 3,
+            "OPEN_NOTEBOOK_OTHER=3\n": 3,
+            "": 3,
         }
         for content, expected in cases.items():
-            path = tmp_path / "t.env"
+            path = tmp_path / "t.conf"
             path.write_text(content)
             with patch.dict("os.environ", {"THROTTLE_FILE": str(path)}):
-                assert _read_throttle_tasks() == expected, content
+                assert read_window() == expected, content
 
     def test_last_key_wins(self, tmp_path):
-        """Two keys can only exist if something appended badly. The
-        launchers take the last match, so the reader must agree or the
-        two disagree about which is the preference.
-        """
-        from api.routers.processing import _read_throttle_tasks
+        from open_notebook.scheduler.dispatcher import read_window
 
-        path = tmp_path / "t.env"
+        path = tmp_path / "t.conf"
         path.write_text(
             "OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\nOPEN_NOTEBOOK_WORKER_MAX_TASKS=2\n"
         )
         with patch.dict("os.environ", {"THROTTLE_FILE": str(path)}):
-            assert _read_throttle_tasks() == 2
+            assert read_window() == 2
 
-    def test_worker_record_beats_the_environment(self, tmp_path):
-        """The launcher's entire job is to override the environment.
+    def test_missing_file_falls_back_to_the_default(self, tmp_path):
+        from open_notebook.scheduler.dispatcher import read_window
 
-        So reading the environment to describe the *running* worker
-        reports the number that was overridden: a worker genuinely
-        started at 3 gets described as 1, and a restart that already
-        applied the change is reported as still pending. The launcher's
-        own record of what it started with is the only honest source.
-        """
-        from api.routers.processing import _worker_max_tasks
+        with patch.dict("os.environ", {"THROTTLE_FILE": str(tmp_path / "absent")}):
+            assert read_window() == 3
 
-        env = tmp_path / "throttle.env"
+    def test_zero_window_is_a_legal_drain_setting(self, tmp_path):
+        """Stopping admission without stopping anything already running."""
+        from open_notebook.scheduler.dispatcher import read_window, write_window
+
+        path = tmp_path / "t.conf"
+        with patch.dict("os.environ", {"THROTTLE_FILE": str(path)}):
+            assert write_window(0) == 0
+            assert read_window() == 0
+
+    def test_write_clamps_out_of_range_rather_than_storing_nonsense(self, tmp_path):
+        from open_notebook.scheduler.dispatcher import read_window, write_window
+
+        path = tmp_path / "t.conf"
+        with patch.dict("os.environ", {"THROTTLE_FILE": str(path)}):
+            assert write_window(99) == 8
+            assert read_window() == 8
+            assert write_window(-5) == 0
+            assert read_window() == 0
+
+
+class TestStatus:
+    def test_reports_the_live_window_not_a_preference(self, client, tmp_path):
+        rows = [
+            {"status": "held", "n": 12},
+            {"status": "new", "n": 1},
+            {"status": "running", "n": 2},
+            {"status": "failed", "n": 1},
+        ]
+        held = [{"held_reason": "memory", "n": 9}, {"held_reason": None, "n": 3}]
+
+        async def fake_repo(query, params=None):
+            q = str(query)
+            if "GROUP BY status" in q:
+                return rows
+            if "GROUP BY held_reason" in q:
+                return held
+            return []
+
+        env = tmp_path / "throttle.conf"
         env.write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
-        running = tmp_path / "throttle.running"
-        running.write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
-        with patch.dict(
-            "os.environ",
-            {"THROTTLE_FILE": str(env), "OPEN_NOTEBOOK_WORKER_MAX_TASKS": "1"},
-        ):
-            assert _worker_max_tasks() == 3
-
-    def test_environment_is_the_fallback_before_any_worker_starts(self, tmp_path):
-        """A fresh container has no throttle.running yet. Falling back
-        to the environment is right there and only there.
-        """
-        from api.routers.processing import _worker_max_tasks
-
-        env = tmp_path / "throttle.env"
-        env.write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
-        with patch.dict(
-            "os.environ",
-            {"THROTTLE_FILE": str(env), "OPEN_NOTEBOOK_WORKER_MAX_TASKS": "2"},
-        ):
-            assert _worker_max_tasks() == 2
-
-    def test_settled_after_restart_is_not_pending(self, client, tmp_path):
-        """The end state of the whole feature: the click is written, the
-        restart happened, the worker is at 3 - and nothing claims to be
-        waiting on anything.
-        """
-        env = tmp_path / "throttle.env"
-        env.write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
-        running = tmp_path / "throttle.running"
-        running.write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
         with (
             patch(
                 "api.routers.processing.repo_query",
-                new=AsyncMock(return_value=[]),
+                new=AsyncMock(side_effect=fake_repo),
             ),
-            patch.dict(
-                "os.environ",
-                # the environment still says 2; the worker overrode it
-                {"THROTTLE_FILE": str(env), "OPEN_NOTEBOOK_WORKER_MAX_TASKS": "2"},
+            patch(
+                "api.routers.processing.current_memory",
+                return_value=MemoryReading(
+                    total=15 * 1024**3,
+                    available=8 * 1024**3,
+                    free=7 * 1024**3,
+                    readable=True,
+                ),
             ),
+            patch.dict("os.environ", {"THROTTLE_FILE": str(env)}),
         ):
             body = client.get("/api/processing/status").json()
 
-        assert body["worker_max_tasks"] == 3
+        assert body["window"] == 3
         assert body["full_throttle"] is True
-        assert body["throttle_restart_pending"] is False
+        # `new` and `running` together: the worker flips between them
+        # asynchronously, so counting only `running` under-reports the load.
+        assert body["in_flight"] == 3
+        assert body["queue"]["held"] == 12
+        assert body["held_reasons"]["memory"] == 9
+        assert body["held_reasons"]["not-yet-considered"] == 3
+        assert body["memory"]["readable"] is True
+        assert body["memory"]["reserve"] > 0
 
-    def test_status_separates_running_worker_from_saved_preference(
-        self, client, tmp_path
-    ):
-        """The click lands before the restart does. Reporting only the
-        live worker makes the toggle look dead; reporting only the
-        preference makes the device look faster than it is. Both, plus
-        an explicit pending flag, so neither is a guess.
+    def test_memory_is_reported_as_unreadable_not_as_zero(self, client, tmp_path):
+        """A zero available-memory figure reads as "this device has no
+        memory", which is a different and much more alarming statement than
+        "we could not tell".
         """
-        env = tmp_path / "throttle.env"
-        env.write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
+
+        async def fake_repo(query, params=None):
+            return []
+
         with (
             patch(
                 "api.routers.processing.repo_query",
-                new=AsyncMock(return_value=[]),
+                new=AsyncMock(side_effect=fake_repo),
             ),
-            patch.dict(
-                "os.environ",
-                {"THROTTLE_FILE": str(env), "OPEN_NOTEBOOK_WORKER_MAX_TASKS": "1"},
+            patch(
+                "api.routers.processing.current_memory", return_value=MemoryReading()
             ),
+            patch.dict("os.environ", {"THROTTLE_FILE": str(tmp_path / "absent")}),
         ):
             body = client.get("/api/processing/status").json()
 
-        assert body["worker_max_tasks"] == 1  # what is true now
-        assert body["full_throttle"] is False
-        assert body["throttle_target"] == 3  # what the restart will use
-        assert body["throttle_restart_pending"] is True
+        assert body["memory"]["readable"] is False
+        assert body["memory"]["reserve"] == 0
 
-    def test_status_quiet_when_nothing_pending(self, client, tmp_path):
-        env = tmp_path / "throttle.env"
-        env.write_text("OPEN_NOTEBOOK_WORKER_MAX_TASKS=3\n")
+    def test_status_survives_an_unreadable_queue(self, client, tmp_path):
+        async def boom(query, params=None):
+            raise RuntimeError("database is down")
+
+        with (
+            patch("api.routers.processing.repo_query", new=AsyncMock(side_effect=boom)),
+            patch(
+                "api.routers.processing.current_memory", return_value=MemoryReading()
+            ),
+            patch.dict("os.environ", {"THROTTLE_FILE": str(tmp_path / "absent")}),
+        ):
+            resp = client.get("/api/processing/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["queue"] == {}
+
+    def test_no_field_claims_a_restart_is_pending(self, client, tmp_path):
+        """The fields that made the old design possible are gone, so the UI
+        cannot render a badge that contradicts the dispatcher.
+        """
+
+        async def fake_repo(query, params=None):
+            return []
+
         with (
             patch(
                 "api.routers.processing.repo_query",
-                new=AsyncMock(return_value=[]),
+                new=AsyncMock(side_effect=fake_repo),
             ),
-            patch.dict(
-                "os.environ",
-                {"THROTTLE_FILE": str(env), "OPEN_NOTEBOOK_WORKER_MAX_TASKS": "3"},
-            ),
-        ):
-            body = client.get("/api/processing/status").json()
-
-        assert body["throttle_restart_pending"] is False
-        assert body["throttle_target"] == 3
-
-    def test_missing_file_falls_back_to_the_running_value(self, client, tmp_path):
-        with (
             patch(
-                "api.routers.processing.repo_query",
-                new=AsyncMock(return_value=[]),
+                "api.routers.processing.current_memory", return_value=MemoryReading()
             ),
-            patch.dict(
-                "os.environ",
-                {
-                    "THROTTLE_FILE": str(tmp_path / "absent.env"),
-                    "OPEN_NOTEBOOK_WORKER_MAX_TASKS": "2",
-                },
-            ),
+            patch.dict("os.environ", {"THROTTLE_FILE": str(tmp_path / "absent")}),
         ):
             body = client.get("/api/processing/status").json()
 
-        assert body["throttle_target"] == 2
-        assert body["throttle_restart_pending"] is False
+        for gone in ("throttle_restart_pending", "throttle_target", "worker_max_tasks"):
+            assert gone not in body

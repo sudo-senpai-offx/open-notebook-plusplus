@@ -239,6 +239,16 @@ async def lifespan(app: FastAPI):
     # Start job monitor
     _job_monitor = JobMonitor()
     _job_monitor.start()
+    # Admission dispatcher: promotes `held` jobs to `new` under the live
+    # window and the memory gate. Runs here rather than as its own process
+    # because the phone launcher supervises nothing - `nohup ... &` with no
+    # restart policy - so a standalone dispatcher that died stayed dead and
+    # looked exactly like a busy device.
+    from open_notebook.scheduler.service import Dispatcher
+
+    _dispatcher = Dispatcher()
+    _dispatcher.start()
+    app.state.dispatcher = _dispatcher
     # T3 governor (observe-only): evaluates hibernate verdicts and logs them.
     # Stops nothing; stop-order execution and wake are later slices.
     from api.governor import Governor
@@ -250,6 +260,9 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown: stop monitor
     await _job_monitor.stop()
+    # The dispatcher stops before the monitor: it writes no terminal state, so
+    # stopping it second leaves nothing half-promoted at exit.
+    _dispatcher.stop()
     await _governor.stop()
     logger.info("API shutdown complete")
 
