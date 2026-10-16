@@ -189,7 +189,15 @@ case "${1:-up}" in
     # Bring up the guest stack, then block so --kill-on-exit has something
     # to reap when Ctrl+C arrives.
     proot-distro login ubuntu -- bash -c '
-      sh /root/termux-stack.sh up
+      # The repo copy, not /root/termux-stack.sh. A second copy at the guest
+      # root was installed once at setup and nothing ever refreshed it, so
+      # every fix to the launcher reached ~/bin/onb-stack and not the file
+      # this line actually executes. The loopback binding was added to one
+      # copy while the other kept `--host 0.0.0.0`, and the symptom -
+      # reachable from the LAN - persisted through a restart, a reinstall,
+      # and a clean kill, because every signal pointed at the file that was
+      # not being run.
+      sh /root/app/open-notebook-plusplus/scripts/termux-stack.sh up
       echo
       echo "  Open Notebook: http://127.0.0.1:8502"
       echo "  Ctrl+C stops everything."

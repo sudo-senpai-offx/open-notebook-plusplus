@@ -73,6 +73,50 @@ pid_of() {
 
 is_up() { pid_of "$1" >/dev/null 2>&1; }
 
+# Does the API answer on loopback? Used to confirm a start actually took,
+# rather than trusting that the backgrounded process outlived its own bind
+# error.
+api_answers() {
+  .venv/bin/python - <<'PY' >/dev/null 2>&1
+import urllib.request
+urllib.request.urlopen("http://127.0.0.1:5055/health", timeout=3).read()
+PY
+}
+
+# Report what the binding actually is - and admit when it cannot tell.
+#
+# It cannot usually tell. Android hides /proc/net from apps, so `netstat`
+# shows nothing, and `ip -4 addr` does not list wlan0, so the LAN address is
+# often unavailable. An earlier version of this check treated an empty
+# address as "bound to loopback" and printed a clean bill of health for a
+# service that was listening on 0.0.0.0 - a guard reporting success because
+# it knew nothing, which is the failure this function exists to prevent.
+#
+# The authoritative check is from another host, against this device's
+# address. This is a local sanity signal only, and says "cannot verify"
+# rather than guessing.
+report_binding() {
+  want="$1"
+  lan=$(ip -4 addr show wlan0 2>/dev/null | grep -oE 'inet [0-9.]+' | head -1 | cut -d' ' -f2)
+  if [ -z "$lan" ]; then
+    echo "api      binding: cannot verify from here (no wlan0 address visible);"
+    echo "         requested $want. Confirm from another host:"
+    echo "           curl http://<device-lan-ip>:5055/api/auth/status"
+    return 0
+  fi
+  if .venv/bin/python -c "
+import sys, urllib.request
+try:
+    urllib.request.urlopen('http://$lan:5055/health', timeout=2).read()
+except Exception:
+    sys.exit(1)
+" >/dev/null 2>&1; then
+    echo "api      binding: WARNING reachable at $lan:5055, not loopback-only"
+    return 1
+  fi
+  echo "api      binding: loopback-only (refused at $lan:5055)"
+}
+
 kill_of() {
   pids=$(pids_of "$1")
   [ -n "$pids" ] || return 0
@@ -175,7 +219,25 @@ PY
     # reach can ask for it, rather than this being an edit to a shipped file.
     api_host="${OPEN_NOTEBOOK_API_HOST:-127.0.0.1}"
     nohup .venv/bin/uvicorn api.main:app --host "$api_host" --port 5055 >>"$LOG" 2>&1 &
+    # Confirm it actually bound, instead of printing success and moving on.
+    #
+    # A stale uvicorn that `down` failed to kill holds 5055, the new process
+    # dies immediately with "address already in use", and the launcher
+    # reports a clean start - so the device keeps serving the old binary
+    # while every check against the wrapper and the repository says the new
+    # code is deployed. That is how a loopback binding was believed to be in
+    # force for hours on a phone that was still listening on 0.0.0.0.
+    sleep 2
+    if ! api_answers; then
+      echo "api      FAILED to start - 5055 not answering. Recent log:"
+      tail -n 6 "$LOG" | sed 's/^/           /'
+      echo "           If the log says 'address already in use', a previous"
+      echo "           uvicorn survived 'down'. Find and kill it:"
+      echo "             proot-distro login ubuntu -- bash -lc 'pkill -f \"uvicorn api.main\"'"
+      return 1
+    fi
     echo "api      started on $api_host (window cap $OPEN_NOTEBOOK_WINDOW_CAP)"
+    report_binding "$api_host"
   fi
 
   if is_up "surreal-commands-worker"; then

@@ -49,6 +49,28 @@ install_one() {
   cp "$src" "$dst" && chmod +x "$dst" && echo "  installed $2  <- $1"
 }
 
+# A second copy of the launcher lives at /root/termux-stack.sh inside the
+# guest, and for a long time nothing refreshed it. Every fix to
+# termux-stack.sh reached ~/bin/onb-stack while the file `onb` actually
+# executes kept its old contents - which is how the loopback binding was
+# "deployed" and the API stayed reachable from the LAN.
+#
+# termux-launch.sh now calls the repo copy directly, so there is only one
+# source. This refresh is belt and braces for anyone whose muscle memory
+# reaches for the old path, who would otherwise keep invoking a file frozen
+# at setup time.
+refresh_guest_launcher() {
+  guest_target="/data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs/root/termux-stack.sh"
+  [ -d "$(dirname "$guest_target")" ] || return 0
+  if cmp -s "$REPO/scripts/termux-stack.sh" "$guest_target" 2>/dev/null; then
+    echo "  guest /root/termux-stack.sh already current"
+    return 0
+  fi
+  cp "$REPO/scripts/termux-stack.sh" "$guest_target" \
+    && chmod +x "$guest_target" \
+    && echo "  refreshed /root/termux-stack.sh in the guest"
+}
+
 echo "installing into $BIN"
 rc=0
 install_one termux-launch.sh onb       || rc=1
@@ -67,6 +89,7 @@ install_one termux-update.sh onb-update || rc=1
 # `KEY=` that looks configured and is not has already cost one debugging
 # session - and it reports lengths, never values.
 install_one termux-config.sh onb-config || rc=1
+refresh_guest_launcher || true
 
 echo
 if [ "$rc" -eq 0 ]; then
