@@ -18,6 +18,7 @@ import numpy as np
 from loguru import logger
 
 from .chunking import CHUNK_SIZE, ContentType, chunk_text
+from .embedding_prefix import EmbeddingRole, apply_prefix
 from .token_utils import token_count
 
 
@@ -104,7 +105,9 @@ async def mean_pool_embeddings(embeddings: List[List[float]]) -> List[float]:
 
 
 async def generate_embeddings(
-    texts: List[str], command_id: Optional[str] = None
+    texts: List[str],
+    command_id: Optional[str] = None,
+    role: EmbeddingRole = EmbeddingRole.PASSAGE,
 ) -> List[List[float]]:
     """
     Generate embeddings for multiple texts with automatic batching and retry.
@@ -173,7 +176,13 @@ async def generate_embeddings(
 
         for attempt in range(1, EMBEDDING_MAX_RETRIES + 1):
             try:
-                batch_embeddings = await embedding_model.aembed(batch)
+                # Instruction prefixes are applied here, at the one point
+                # every text passes through, and per model: BGE must stay
+                # unprefixed, because prefixing it pushes vectors off the
+                # distribution they were trained on and quietly degrades the
+                # device that was already retrieving correctly.
+                prefixed = [apply_prefix(text, model_name, role) for text in batch]
+                batch_embeddings = await embedding_model.aembed(prefixed)
                 all_embeddings.extend(batch_embeddings)
                 break
             except Exception as e:
@@ -208,6 +217,7 @@ async def generate_embedding(
     content_type: Optional[ContentType] = None,
     file_path: Optional[str] = None,
     command_id: Optional[str] = None,
+    role: EmbeddingRole = EmbeddingRole.PASSAGE,
 ) -> List[float]:
     """
     Generate a single embedding for text, handling large content via chunking and mean pooling.
@@ -243,7 +253,7 @@ async def generate_embedding(
     if text_tokens <= CHUNK_SIZE:
         # Short text - embed directly
         logger.debug(f"Embedding short text ({text_tokens} tokens) directly")
-        embeddings = await generate_embeddings([text], command_id=command_id)
+        embeddings = await generate_embeddings([text], command_id=command_id, role=role)
         return embeddings[0]
 
     # Long text - chunk and mean pool
@@ -256,13 +266,13 @@ async def generate_embedding(
 
     if len(chunks) == 1:
         # Single chunk after splitting
-        embeddings = await generate_embeddings(chunks, command_id=command_id)
+        embeddings = await generate_embeddings(chunks, command_id=command_id, role=role)
         return embeddings[0]
 
     logger.debug(f"Embedding {len(chunks)} chunks and mean pooling")
 
     # Embed all chunks in batches
-    embeddings = await generate_embeddings(chunks, command_id=command_id)
+    embeddings = await generate_embeddings(chunks, command_id=command_id, role=role)
 
     # Mean pool to get single embedding
     pooled = await mean_pool_embeddings(embeddings)

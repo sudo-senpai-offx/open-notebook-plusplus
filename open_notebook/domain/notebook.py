@@ -1050,10 +1050,17 @@ async def vector_search(
         raise InvalidInputError("Search keyword cannot be empty")
     try:
         from open_notebook.utils.embedding import generate_embedding
+        from open_notebook.utils.embedding_prefix import EmbeddingRole
 
         # Use unified embedding function (handles chunking if query is very long)
+        #
+        # role=QUERY: this is the only place in the codebase embedding a
+        # *query*; every other call embeds stored content. Without the role an
+        # E5-family model would embed this as a passage and retrieve
+        # measurably worse - which is invisible, because it still returns
+        # results, just worse ones.
         _t0 = time.perf_counter()
-        embed = await generate_embedding(keyword)
+        embed = await generate_embedding(keyword, role=EmbeddingRole.QUERY)
         _t1 = time.perf_counter()
         search_results = await repo_query(
             """
