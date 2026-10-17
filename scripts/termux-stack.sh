@@ -28,47 +28,52 @@ NODE="$APP/.venv/lib/python3.12/site-packages/nodejs_wheel/bin/node"
 # (v16.2.6)", so the executable name is the stable part to match — never
 # "server.js", and never a bare substring of the whole command line.
 pids_of() {
-  # Every process matching $1, where the pattern is matched in two
-  # parts: the executable against argv[0], and any remaining words
-  # against the whole command line.
+  # An interpreter runs the program as an argument, so for anything started
+  # through a venv console script argv[0] is the interpreter and not the
+  # program. `.venv/bin/uvicorn` is executed by the venv python, which means
+  # matching argv[0] alone reported `uvicorn DOWN` and
+  # `surreal-commands-worker DOWN` for processes that were serving requests
+  # at that very moment - and, worse, made `is_up` false, so every `up`
+  # started a second copy.
   #
-  # This is needed because the callers disagree about what they are
-  # matching. "llama-server" and "next-server" are one executable.
-  # "uvicorn api.main:app" and "surreal start" are an executable plus
-  # its arguments - and for those, argv[0] alone is just `uvicorn`, so
-  # an argv[0]-only match would find every uvicorn on the device
-  # whatever it was serving.
-  #
-  # It was a substring match over the whole cmdline, and it lied in a
-  # way that mattered: it reported `llama up pid 26053 3236 kB` for a
-  # process serving nothing, while termux-launch.sh - with its own copy
-  # of this function - correctly reported the port unhealthy. Two
-  # implementations of one idea, disagreeing, and the status table was
-  # the one that was confidently wrong.
-  #
-  # Matching argv[0] means a `tail -f llama-server.log` can no longer
-  # be mistaken for the server. Returning *all* matches rather than the
-  # first is deliberate: llama-server is not reliably a single process,
-  # and signalling one of several leaves the port held by another.
+  # Shells are deliberately not in the interpreter list. A diagnostic like
+  # `bash -c '... uvicorn api.main:app ...'` would otherwise match itself,
+  # which is precisely the confusion this function was rewritten once to
+  # avoid.
   pattern_head=${1%% *}
   pattern_tail=${1#"$pattern_head"}
   pattern_tail=${pattern_tail# }
   for p in /proc/[0-9]*; do
     argv0=$(tr '\0' '\n' 2>/dev/null < "$p/cmdline" | head -1) || continue
     [ -n "$argv0" ] || continue
-    case "${argv0##*/}" in
-      "$pattern_head") ;;
-      *) continue ;;
+    base=${argv0##*/}
+    matched=0
+    case "$base" in
+      "$pattern_head")
+        tr '\0' ' ' 2>/dev/null < "$p/cmdline" | grep -q -- "$pattern_tail" && matched=1
+        ;;
+      python | python3 | node)
+        # The whole pattern, head and tail, as it appears in the command
+        # line of an interpreter-hosted process.
+        tr '\0' ' ' 2>/dev/null < "$p/cmdline" | grep -q -- "$1" && matched=1
+        ;;
     esac
-    if [ -n "$pattern_tail" ]; then
-      tr '\0' ' ' 2>/dev/null < "$p/cmdline" | grep -q -- "$pattern_tail" || continue
-    fi
+    [ "$matched" = 1 ] || continue
     echo "${p#/proc/}"
   done
 }
 
 pid_of() {
-  pids_of "$1" | head -1 | grep . || return 1
+  # Capture everything before taking the first line.
+  #
+  # `pids_of | head -1` closes the pipe as soon as head has one line, and
+  # every later `echo` inside pids_of then fails with EPIPE - printed by the
+  # shell as `echo: I/O error` on stderr, in the middle of a status table,
+  # from a *different* invocation than the one being reported. Assigning
+  # first means nothing closes the pipe early and the noise disappears.
+  _pids=$(pids_of "$1" 2>/dev/null) || return 1
+  [ -n "$_pids" ] || return 1
+  printf '%s\n' "${_pids%% *}"
 }
 
 is_up() { pid_of "$1" >/dev/null 2>&1; }

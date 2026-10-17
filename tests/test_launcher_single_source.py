@@ -33,6 +33,21 @@ def _read(name: str) -> str:
     return (REPO / "scripts" / name).read_text()
 
 
+def _code_of(function_header: str, script: str = "termux-stack.sh") -> str:
+    """A shell function's body, with comment lines removed.
+
+    Several of these functions carry comments quoting the code they
+    replaced, so an assertion against the raw text fails on the explanation
+    of the fix rather than on the fix.
+    """
+    text = _read(script)
+    start = text.index(function_header)
+    body = text[start : text.index("\n}\n", start)]
+    return "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
 class TestSingleSourceOfTruth:
     def test_launcher_executes_the_repo_copy(self):
         """Not `/root/termux-stack.sh`. That path is the one that froze."""
@@ -131,6 +146,65 @@ class TestSingleSourceOfTruth:
             "but it must also not be silent - the || true is only safe "
             "because the function reports its own failure"
         )
+
+
+class TestProcessMatcher:
+    """`uvicorn DOWN` while uvicorn was serving requests.
+
+    The matcher compared argv[0]'s basename against the pattern head. For a
+    venv console script that is wrong: `.venv/bin/uvicorn` is executed *by*
+    the venv python, so the process's argv[0] is `python` and `uvicorn`
+    appears only as an argument. Confirmed on the device:
+
+        19301 python .venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 5055
+
+    so `is_up` was permanently false for the API and the worker. Every `up`
+    therefore started a second copy, which is the EADDRINUSE the start guard
+    was added to catch - the guard was watching for a failure the matcher was
+    manufacturing.
+    """
+
+    def _matcher_body(self) -> str:
+        return _code_of("pids_of() {")
+
+    def test_matches_an_interpreter_hosted_process(self):
+        body = self._matcher_body()
+        assert "python | python3 | node" in body, (
+            "a venv console script runs under python, so argv[0] is the "
+            "interpreter; matching argv[0] alone cannot see the API"
+        )
+        assert 'grep -q -- "$1"' in body, (
+            "the interpreter branch must match the whole pattern, not just "
+            "the head, or `python manage.py` would match `manage.py`"
+        )
+
+    def test_still_matches_a_native_binary_by_argv0(self):
+        """llama-server, surreal and next-server are real executables, so
+        the original argv[0] match has to keep working for them."""
+        body = self._matcher_body()
+        assert '"$pattern_head")' in body
+        assert 'grep -q -- "$pattern_tail"' in body
+
+    def test_shells_are_not_treated_as_interpreters(self):
+        """Otherwise a diagnostic quoting the pattern matches itself:
+        `bash -c '... uvicorn api.main:app ...'`. That is the confusion
+        this function was rewritten once already."""
+        body = self._matcher_body()
+        interpreter_branch = body[body.index('case "$base" in') :]
+        assert "sh |" not in interpreter_branch
+        assert "bash" not in interpreter_branch.split("esac")[0]
+
+    def test_pid_of_does_not_close_the_pipe_early(self):
+        """`pids_of | head -1` closed the pipe, so every later echo in
+        pids_of failed with EPIPE - printed by the shell as
+        `echo: I/O error` in the middle of a status table, from a different
+        invocation than the one being reported."""
+        body = _code_of("pid_of() {")
+        assert "head -1" not in body, (
+            "taking the first line with head closes the pipe and makes the "
+            "remaining echoes in pids_of fail"
+        )
+        assert "_pids=$(pids_of" in body
 
 
 class TestStartIsVerified:
