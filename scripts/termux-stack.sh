@@ -146,8 +146,11 @@ report_api_failure() {
   grep -iE 'uvicorn|5055|error|traceback|address already' "$LOG" 2>/dev/null \
     | tail -n 6 | sed 's/^/           /'
   echo "         If it says 'address already in use', a previous uvicorn"
-  echo "         survived 'down'. Find and kill it:"
-  echo "           proot-distro login ubuntu -- bash -lc 'pkill -f \"uvicorn api.main\"'"
+    echo "         survived 'down'. pkill is NOT installed in this guest - the"
+    echo "         note at the top of this file says so - so signal the pid"
+    echo "         directly, read from the same /proc scan:"
+    echo "           sh ~/bin/onb-stack status   # shows the pid"
+    echo "           kill <that-pid>              # from Termux, not the guest"
 }
 
 # Report what the binding actually is - and admit when it cannot tell.
