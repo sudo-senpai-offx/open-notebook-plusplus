@@ -60,6 +60,44 @@ kill_embed() {
   echo "[embed] stopped (pid $pid)"
 }
 
+  # The model the running server is actually serving, by basename.
+  #
+  # `/v1/embeddings` ignores the `model` field entirely and echoes it back, so
+  # asking for "jina" against a server running bge-small returns bge-small's
+  # 384-dim vectors labelled jina. The only honest source of truth is
+  # `/v1/models`.
+  served_model() {
+    curl -s -m 5 "http://127.0.0.1:${PORT}/v1/models" \
+      | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      | head -1 \
+      | sed 's|.*/||'
+  }
+
+  # Refuse to continue when the server is serving something else.
+  #
+  # The mismatch is silent and total: the app embeds at the served model's
+  # dimensions while the stored index holds another model's, so every search
+  # returns nothing and nothing is logged anywhere. This is the same shape as
+  # the rebuild-status 500 - a gap between two components that each look fine.
+  #
+  # The `already up` path is where this actually bites: a server left over
+  # from a previous launch keeps its own model, and reporting "already up"
+  # without looking is how a stale embedder survives a model change.
+  require_expected_model() {
+    _expected=$(basename "$MODEL")
+    _actual=$(served_model)
+    [ -n "$_actual" ] || return 0   # cannot tell; do not invent a failure
+    if [ "$_actual" != "$_expected" ]; then
+      echo "[embed] FATAL: serving '$_actual' but EMBED_MODEL expects '$_expected'" >&2
+      echo "         a stale embedding server from an earlier launch is still up." >&2
+      echo "         its vectors will not match the stored index, and search" >&2
+      echo "         will silently return nothing. Fix with:" >&2
+      echo "           sh ~/bin/onb-embed down && ~/bin/onb" >&2
+      return 1
+    fi
+    return 0
+  }
+
 case "${1:-up}" in
   down)
     kill_embed
@@ -73,8 +111,8 @@ case "${1:-up}" in
     ;;
   up)
     if pid=$(pid_of); then
-      echo "[embed] already up (pid $pid) port ${PORT}"
-      exit 0
+      require_expected_model || exit 1
+      echo "[embed] already up (pid $pid) port ${PORT} model $(served_model)"
     fi
     if [ ! -f "$MODEL" ]; then
       echo "[embed] FATAL: model missing at $MODEL"
@@ -109,6 +147,25 @@ case "${1:-up}" in
           | head -1
       )
       echo "[embed] model: ${_served:-not reported}"
+      # Verified after a fresh start too, not only on the already-up path:
+      # a port already held by something else answers /health happily and
+      # /v1/models with its own model.
+      require_expected_model || exit 1
+      # Report the dimension it produces. This is the number that has to
+      # agree with the stored `source_embedding` vectors, and printing it
+      # here is the only place an operator can see the two side by side
+      # before a rebuild silently fails to match. Costs one embed, which is
+      # ~0.06s on bge-small and ~25s on bge-m3 - set EMBED_PROBE=0 to skip.
+      if [ "${EMBED_PROBE:-1}" != "0" ]; then
+        _dims=$(curl -s -m 120 -X POST "http://127.0.0.1:${PORT}/v1/embeddings" \
+          -H 'Content-Type: application/json' \
+          -d '{"input":"dimension probe"}' \
+          | grep -o '\[-[-0-9.eE+,]*\]' \
+          | sed 's/^\[//; s/\]$//' \
+          | tr ',' '\n' | grep -c . )
+        echo "[embed] dims:  ${_dims:-?}"
+        echo "[embed]       stored source_embedding vectors must match this"
+      fi
       echo "[embed] log: $LOG"
     else
       echo "[embed] FAILED to become healthy — tail of $LOG:"
