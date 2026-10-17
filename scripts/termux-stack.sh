@@ -47,6 +47,13 @@ pids_of() {
     argv0=$(tr '\0' '\n' 2>/dev/null < "$p/cmdline" | head -1) || continue
     [ -n "$argv0" ] || continue
     base=${argv0##*/}
+    # Next rewrites its own process title to `next-server (v16.3.8)`, so
+    # argv[0] arrives with the version already glued on. `${argv0##*/}` strips
+    # path components, not a version suffix, so the comparison below could
+    # never match and `next-server` reported DOWN for a web server that was
+    # serving pages - which is also why `is_up` said no and `up` started a
+    # second one. Strip the parenthetical before comparing.
+    base=${base%% (*}
     matched=0
     case "$base" in
       "$pattern_head")
@@ -64,16 +71,32 @@ pids_of() {
 }
 
 pid_of() {
-  # Capture everything before taking the first line.
+  # Return the first matching pid, and only the first.
   #
-  # `pids_of | head -1` closes the pipe as soon as head has one line, and
-  # every later `echo` inside pids_of then fails with EPIPE - printed by the
-  # shell as `echo: I/O error` on stderr, in the middle of a status table,
-  # from a *different* invocation than the one being reported. Assigning
-  # first means nothing closes the pipe early and the noise disappears.
+  # pids_of prints one pid per line, so the first *line* is what has to be
+  # taken. Stripping at the first space is wrong in a way that only shows up
+  # when there are two matches: llama-server is reliably two processes, and
+  # the status table printed
+  #
+  #     llama  up  pid 30758
+  #     30789 ? kB
+  #
+  # because the whole multi-line value was substituted into `/proc/$pid/status`
+  # and awk read nothing. `is_up` was unaffected - a non-empty string is still
+  # non-empty - so the gate kept working while the display quietly lied.
+  #
+  # `pids_of | head -1` is the obvious way to take the first line and is what
+  # this replaced, but head closes the pipe on the first line and every later
+  # echo inside pids_of then fails with EPIPE, printed by the shell as
+  # `echo: I/O error` in the middle of the status table. Capturing first and
+  # splitting afterwards keeps nothing on the other end of a pipe.
   _pids=$(pids_of "$1" 2>/dev/null) || return 1
   [ -n "$_pids" ] || return 1
-  printf '%s\n' "${_pids%% *}"
+  # A literal newline inside the expansion word: POSIX-portable, and no
+  # subshell or pipe to leak an I/O error from.
+  _first=${_pids%%'
+'*}
+  printf '%s\n' "$_first"
 }
 
 is_up() { pid_of "$1" >/dev/null 2>&1; }

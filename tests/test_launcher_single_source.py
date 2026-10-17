@@ -194,6 +194,44 @@ class TestProcessMatcher:
         assert "sh |" not in interpreter_branch
         assert "bash" not in interpreter_branch.split("esac")[0]
 
+    def test_a_rewritten_process_title_still_matches(self):
+        """`next-server DOWN` for a web server that was serving pages.
+
+        Next rewrites its own process title to `next-server (v16.3.8)`, so
+        argv[0] arrives with the version glued on. `${argv0##*/}` strips path
+        components, not a version suffix, so the comparison could never match.
+
+        This was not cosmetic: `is_up` gated on the same function, so `up`
+        started a *second* web server while the first was running.
+        """
+        body = _code_of("pids_of() {")
+        assert "base=${base%% (*}" in body, (
+            "a rewritten process title arrives as `next-server (v16.3.8)`; "
+            "the version suffix must be stripped before comparing"
+        )
+
+    def test_pid_of_returns_exactly_one_pid_from_several(self):
+        """llama-server is reliably two processes, and the status table printed
+
+            llama  up  pid 30758
+            30789 ? kB
+
+        because `pid_of` stripped at the first *space* while `pids_of` emits
+        one pid per *line*. The whole multi-line value was substituted into
+        `/proc/$pid/status` and awk read nothing.
+
+        `is_up` was unaffected - a non-empty string is still non-empty - so
+        the gate kept working while the display quietly lied.
+        """
+        body = _code_of("pid_of() {")
+        assert "${_pids%% *}" not in body, (
+            "pids_of emits one pid per line; stripping at the first space "
+            "returns every pid, not the first"
+        )
+        assert "${_pids%%" in body and "*}" in body, (
+            "the first *line* has to be what is taken"
+        )
+
     def test_pid_of_does_not_close_the_pipe_early(self):
         """`pids_of | head -1` closed the pipe, so every later echo in
         pids_of failed with EPIPE - printed by the shell as

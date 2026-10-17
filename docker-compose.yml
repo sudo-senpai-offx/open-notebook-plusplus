@@ -79,9 +79,16 @@ services:
       # the gate falls back to its own MemTotal.
       - OPEN_NOTEBOOK_MODEL_POOL_BYTES=${OPEN_NOTEBOOK_MODEL_POOL_BYTES:-}
       - OPEN_NOTEBOOK_FORCE_MINI_MODELS=true
-      - OPEN_NOTEBOOK_MINI_MODEL_CHAT=mistral-nemo:latest
-      - OPEN_NOTEBOOK_MINI_MODEL_EMBED=nomic-embed-text:latest
-      - OPEN_NOTEBOOK_MINI_MODEL_TRANSFORM=llama3.2:3b-instruct-q4_0
+      # Interpolated from .env rather than hardcoded. The literal values
+      # this replaced named three models that are not installed on this
+      # machine and that Ollama cannot pull (auto-pull is off), so every
+      # forced-mini provision 404'd, retried with backoff, and the queue
+      # never drained. Hardcoding them also made .env a fiction: the
+      # operator could edit the models there all day and compose would
+      # ignore it.
+      - OPEN_NOTEBOOK_MINI_MODEL_CHAT=${OPEN_NOTEBOOK_MINI_MODEL_CHAT:-qwen3:4b}
+      - OPEN_NOTEBOOK_MINI_MODEL_EMBED=${OPEN_NOTEBOOK_MINI_MODEL_EMBED:-bge-m3:latest}
+      - OPEN_NOTEBOOK_MINI_MODEL_TRANSFORM=${OPEN_NOTEBOOK_MINI_MODEL_TRANSFORM:-qwen3:4b}
       - OPEN_NOTEBOOK_DOCLING_FAST_PROFILE=true
       - OPEN_NOTEBOOK_EMBEDDING_BATCH_SIZE=8
     volumes:
