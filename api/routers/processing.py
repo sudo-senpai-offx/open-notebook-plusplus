@@ -161,6 +161,7 @@ async def processing_status() -> Dict[str, Any]:
     pending flag, because the two could disagree for an unbounded time. There
     is no such disagreement to report now: the window is read fresh each pass.
     """
+    queue_available = True
     try:
         states = (
             await repo_query("SELECT status, count() AS n FROM command GROUP BY status")
@@ -168,8 +169,18 @@ async def processing_status() -> Dict[str, Any]:
         )
         queue = {str(r.get("status")): r.get("n") for r in states}
     except Exception as exc:  # noqa: BLE001 - status never breaks callers
+        # Reported as unavailable, not as an empty queue. `queue = {}` made a
+        # dead database indistinguishable from an idle one: the phone had no
+        # SurrealDB listening at all and the endpoint answered
+        # `completed=0 held=0 failed=0`, which reads as "all healthy, nothing
+        # queued" on both the API and the UI. The failure is only visible in a
+        # log line nobody is watching.
+        #
+        # An operator asking "is the queue draining?" must not be told "there
+        # is no queue" when the answer is "I could not ask".
         logger.warning(f"processing status unavailable: {exc}")
         queue = {}
+        queue_available = False
 
     needs_retry: List[str] = []
     try:
@@ -217,6 +228,10 @@ async def processing_status() -> Dict[str, Any]:
         "full_throttle": window > 1,
         "in_flight": in_flight,
         "queue": queue,
+        # False when the counts above are missing rather than zero. A caller
+        # - or the UI - must be able to tell "nothing queued" from "could not
+        # look", because the whole point of asking is to find out.
+        "queue_available": queue_available,
         "held_reasons": held_reasons,
         "needs_retry": needs_retry,
         # Memory, in bytes, with `readable` rather than a zero standing in
