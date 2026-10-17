@@ -199,3 +199,61 @@ class TestStatusDistinguishesTheTwoLlamaServers:
         text = self._stack()
         assert "8081/health" in text
         assert '"embed"' in text
+
+
+class TestDownActuallyDowns:
+    """`onb-stack down` did not reliably stop anything.
+
+    Two independent gaps, both of which left a model server holding :8081
+    while a later launch believed it was fine.
+    """
+
+    def _stack(self) -> str:
+        return (REPO / "scripts" / "termux-stack.sh").read_text()
+
+    def test_down_stops_the_model_servers(self):
+        """It never mentioned llama-server at all, so neither the chat server
+        nor the embedder was touched."""
+        text = self._stack()
+        start = text.index("cmd_down() {")
+        body = text[start : text.index("\n}\n", start)]
+        assert 'kill_of "llama-server"' in body, (
+            "a full stop must clear the model servers; leaving them is how a "
+            "stale embedder keeps a port and a launch reports 'already up'"
+        )
+
+    def test_sigterm_is_escalated_to_sigkill(self):
+        """llama-server defers SIGTERM until its current request finishes.
+
+        With a 25-46s embed that is tens of seconds per call, so the process
+        outlived the shutdown. `wait_gone` waited 20s and then only warned -
+        it never escalated, so `down` could not stop it.
+        """
+        text = self._stack()
+        start = text.index("wait_gone() {")
+        body = text[start : text.index("\n}\n", start)]
+        assert "kill -9" in body, (
+            "a process that ignores SIGTERM must be escalated to SIGKILL; "
+            "warning and continuing leaves it holding its port"
+        )
+
+    def test_escalation_waits_for_the_process_to_actually_go(self):
+        text = self._stack()
+        start = text.index("wait_gone() {")
+        body = text[start : text.index("\n}\n", start)]
+        assert "survived SIGKILL" in body, (
+            "SIGKILL is not instant for a zombie whose parent has not reaped "
+            "it; the result has to be checked, not assumed"
+        )
+
+    def test_kill_of_still_sends_sigterm_first(self):
+        """Escalation is a fallback, not a replacement: SIGTERM lets the
+        model server flush and exit cleanly, which is cheaper and avoids a
+        corrupted model file."""
+        text = self._stack()
+        start = text.index("kill_of() {")
+        body = text[start : text.index("\n}\n", start)]
+        assert 'kill "$p"' in body
+        assert "kill -9" not in body, (
+            "SIGKILL belongs in wait_gone, after the grace period"
+        )

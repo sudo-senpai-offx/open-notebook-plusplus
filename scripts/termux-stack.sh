@@ -207,7 +207,28 @@ wait_gone() {
     i=$((i + 1))
     sleep 1
   done
-  echo "[stack] warning: $1 still present after 20s"
+
+    # Escalate to SIGKILL.
+    #
+    # Warning and giving up meant `down` did not reliably down anything: the
+    # only signal sent was SIGTERM, and llama-server defers SIGTERM until its
+    # current request finishes. With a slow embedder that is tens of seconds
+    # per call, so the process outlived the shutdown, kept holding :8081, and
+    # every later launch reported "already up" against a server serving the
+    # wrong model. One bge-m3 process survived three restarts this way.
+    _left=$(pids_of "$1" 2>/dev/null)
+    if [ -n "$_left" ]; then
+      echo "[stack] $1 ignored SIGTERM; SIGKILL to $(echo "$_left" | tr '\n' ' ')"
+      for p in $_left; do kill -9 "$p" 2>/dev/null; done
+      j=0
+      while [ "$j" -lt 10 ]; do
+        [ -n "$(pids_of "$1" 2>/dev/null)" ] || return 0
+        j=$((j + 1))
+        sleep 1
+      done
+      echo "[stack] warning: $1 survived SIGKILL"
+    fi
+    return 0
 }
 
 cmd_up() {
@@ -402,6 +423,16 @@ cmd_down() {
   wait_gone "uvicorn api.main:app"
   kill_of "surreal start"
   wait_gone "surreal start"
+    # Both model servers, by executable name: the chat server (:8080) and
+    # the embedder (:8081) are the same binary, and a full stop clears both.
+    #
+    # This was missing entirely, so `down` left the model servers running and
+    # a later `up` found :8081 still held - by an embedder serving whatever
+    # model it was launched with, hours earlier. It reported "already up"
+    # against that server and the wrong model stayed in use. A leftover model
+    # server is always wrong, so a full stop clears them by name.
+    kill_of "llama-server"
+    wait_gone "llama-server"
 }
 
 case "${1:-up}" in
