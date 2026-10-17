@@ -113,6 +113,7 @@ case "${1:-up}" in
     if pid=$(pid_of); then
       require_expected_model || exit 1
       echo "[embed] already up (pid $pid) port ${PORT} model $(served_model)"
+      exit 0
     fi
     if [ ! -f "$MODEL" ]; then
       echo "[embed] FATAL: model missing at $MODEL"

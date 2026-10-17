@@ -356,17 +356,38 @@ cmd_status() {
   # in this table while chat could not possibly work. A 3 MB process is
   # not a loaded 1.5B model - the loaded one is several hundred MB - so
   # that figure is also printed, as the thing worth noticing.
-  if curl -sf -m 2 http://127.0.0.1:8080/health >/dev/null 2>&1; then
-    pid=$(pid_of "llama-server")
-    rss=$(awk '/VmRSS/{print $2}' "/proc/${pid:-0}/status" 2>/dev/null)
-    printf '%-8s up    pid %-7s %s kB\n' "llama" "${pid:-?}" "${rss:-?}"
-  elif pid=$(pid_of "llama-server"); then
-    rss=$(awk '/VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null)
-    printf '%-8s STUCK pid %-7s %s kB - process present, nothing on :8080\n' \
-      "llama" "$pid" "${rss:-?}"
-  else
-    printf '%-8s DOWN\n' "llama"
-  fi
+    # Matched by port, not by executable name. The chat server (:8080) and
+    # the embedding server (:8081) are both `llama-server`, so matching the
+    # name could return the embedder for the chat row - which is how a
+    # healthy stack reported `llama STUCK` while the process it named was
+    # serving embeddings perfectly well on the other port.
+    if curl -sf -m 2 http://127.0.0.1:8080/health >/dev/null 2>&1; then
+      pid=$(pid_of "llama-server --port 8080")
+      rss=$(awk '/VmRSS/{print $2}' "/proc/${pid:-0}/status" 2>/dev/null)
+      printf '%-8s up    pid %-7s %s kB\n' "llama" "${pid:-?}" "${rss:-?}"
+    elif pid=$(pid_of "llama-server --port 8080"); then
+      rss=$(awk '/VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null)
+      printf '%-8s STUCK pid %-7s %s kB - process present, nothing on :8080\n' \
+        "llama" "$pid" "${rss:-?}"
+    else
+      printf '%-8s DOWN\n' "llama"
+    fi
+
+    # The embedder gets its own row. It was absent from this table entirely,
+    # which is the same "report what it is doing, not whether a process
+    # exists" rule the chat row follows - applied inconsistently. A vector
+    # index silently fed by the wrong model is the failure that matters here,
+    # and it is invisible unless this row exists.
+    if curl -sf -m 2 http://127.0.0.1:8081/health >/dev/null 2>&1; then
+      pid=$(pid_of "llama-server --port 8081")
+      rss=$(awk '/VmRSS/{print $2}' "/proc/${pid:-0}/status" 2>/dev/null)
+      printf '%-8s up    pid %-7s %s kB\n' "embed" "${pid:-?}" "${rss:-?}"
+    elif pid=$(pid_of "llama-server --port 8081"); then
+      printf '%-8s STUCK pid %-7s - process present, nothing on :8081\n' \
+        "embed" "$pid"
+    else
+      printf '%-8s DOWN\n' "embed"
+    fi
 }
 
 cmd_down() {

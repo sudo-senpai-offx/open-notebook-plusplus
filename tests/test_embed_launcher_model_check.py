@@ -148,3 +148,54 @@ class TestProbesAreOptional:
         were already lost to unverified assumptions about the phone."""
         body = _code_of("  served_model() {")
         assert "jq" not in body
+
+
+class TestAlreadyUpStops:
+    def test_already_up_exits(self):
+        """Regression, mine.
+
+        Inserting the model check into the `already up` branch replaced the
+        two lines it occupied, and one of them was `exit 0`. The script
+        therefore announced "already up" and then started a second embedder
+        anyway - which on a phone meant three llama-server processes
+        accumulated, one of them holding :8081 with the wrong model.
+        """
+        text = _read()
+        # Anchor on the echo, not on the comment that quotes the same words.
+        i = text.index('echo "[embed] already up')
+        window = text[i : i + 400]
+        assert "exit 0" in window, (
+            "after reporting an already-running server the script must exit; "
+            "without it, a second server is started"
+        )
+
+
+class TestStatusDistinguishesTheTwoLlamaServers:
+    """Both servers are `llama-server`; only the port tells them apart."""
+
+    def _stack(self) -> str:
+        return (REPO / "scripts" / "termux-stack.sh").read_text()
+
+    def test_chat_row_is_matched_by_port(self):
+        text = self._stack()
+        assert 'pid_of "llama-server --port 8080"' in text, (
+            "the chat row must match on :8080, or it can be handed the "
+            "embedder's pid - which is how a healthy stack reported "
+            "`llama STUCK` while the named process served :8081 fine"
+        )
+
+    def test_no_bare_llama_server_match_remains_in_status(self):
+        text = self._stack()
+        start = text.index("cmd_status() {")
+        body = text[start : text.index("\n}\n", start)]
+        assert 'pid_of "llama-server"' not in body, (
+            "a bare executable-name match in status cannot distinguish the "
+            "chat server from the embedder"
+        )
+
+    def test_embed_has_its_own_row(self):
+        """It was absent from the table entirely, so a wrong embedder was
+        invisible while still feeding every vector query."""
+        text = self._stack()
+        assert "8081/health" in text
+        assert '"embed"' in text
