@@ -88,11 +88,38 @@ llama_healthy() {
   curl -sf -m 2 http://127.0.0.1:8080/health >/dev/null 2>&1
 }
 
+  # Processes for `llama-server` listening on $1.
+  #
+  # The chat server (:8080) and the embedder (:8081) are the same executable,
+  # so matching by name returns both. `start_llama` then decided the *embedder*
+  # was stale - it had just tested :8080, which is not up yet, so nothing was
+  # answering - and killed it along with the process it meant to replace. The
+  # embedder deferred SIGTERM until its request finished, told the next check
+  # `already up`, and exited about fifteen seconds later. Both logs showed the
+  # same thing:
+  #
+  #     llama_server: listening on http://127.0.0.1:8081
+  #     ... ~15s ...
+  #     operator(): cleaning up before exit...
+  #
+  # Two logs, two graceful exits, both ~15s. Not a crash and not the OOM
+  # killer: a scheduled signal that was never meant for them.
+  pids_on_port() {
+    for p in /proc/[0-9]*; do
+      argv0=$(tr '\0' '\n' 2>/dev/null < "$p/cmdline" | head -1) || continue
+      [ -n "$argv0" ] || continue
+      [ "${argv0##*/}" = "llama-server" ] || continue
+      case "$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)" in
+        *"--port $1"*) echo "${p#/proc/}" ;;
+      esac
+    done
+  }
+
 # Clear every match, escalating. SIGTERM first because llama-server
 # frees its KV cache on the way out and the phone has 8 GB to lose;
 # SIGKILL only if it does not go.
 kill_llama() {
-  pids=$(pids_of llama-server)
+  pids=$(pids_on_port 8080)
   [ -n "$pids" ] || return 0
   for p in $pids; do kill "$p" 2>/dev/null; done
   i=0
@@ -107,7 +134,7 @@ kill_llama() {
 }
 
 stop_llama() {
-  pids=$(pids_of llama-server)
+  pids=$(pids_on_port 8080)
   [ -n "$pids" ] || return 0
   kill_llama
   echo "[onb] stopped llama-server (pid $(echo "$pids" | tr '\n' ' '))"
@@ -126,7 +153,7 @@ start_llama() {
   # both means the two checks can no longer disagree in the direction
   # that leaves nothing listening: if a match exists but health fails,
   # clear them all out and start a real one.
-  if pids=$(pids_of llama-server) && [ -n "$pids" ]; then
+  if pids=$(pids_on_port 8080) && [ -n "$pids" ]; then
     if llama_healthy; then
       echo "[onb] llama-server already running (pid $(echo "$pids" | tr '\n' ' '))"
       return 0

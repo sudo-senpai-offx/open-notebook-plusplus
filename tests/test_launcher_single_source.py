@@ -341,3 +341,51 @@ class TestBindingIsRequested:
         """An operator who knowingly wants LAN reach can ask for it."""
         text = _read("termux-stack.sh")
         assert '--host "$api_host"' in text
+
+
+class TestLauncherDoesNotKillTheEmbedder:
+    """`start_llama` killed the embedding server on every launch.
+
+    `pids_of llama-server` matches the chat server (:8080) and the embedder
+    (:8081) alike - same executable. `start_llama` tested health on :8080,
+    which is not up yet at that point, concluded "stale llama-server is not
+    serving; replacing", and signalled **both**. The embedder deferred SIGTERM
+    until its request finished, so the very next check still saw it and
+    reported `already up`; roughly fifteen seconds later it exited.
+
+    Both logs recorded the same signature - `listening on ...` then
+    `operator(): cleaning up before exit...` about fifteen seconds later -
+    which reads as a crash and is not one. Nothing in the logs said who sent
+    the signal, so this cost two rounds of guessing about OOM.
+    """
+
+    def _launcher(self) -> str:
+        return _read("termux-launch.sh")
+
+    def test_has_a_port_scoped_lookup(self):
+        assert "pids_on_port() {" in self._launcher()
+
+    def test_kill_llama_only_touches_the_chat_server(self):
+        text = self._launcher()
+        start = text.index("kill_llama() {")
+        body = text[start : text.index("\n}\n", start)]
+        assert "pids_on_port 8080" in body
+        assert "pids_of llama-server" not in body, (
+            "matching by executable name kills the embedder on :8081 as well"
+        )
+
+    def test_start_llama_does_not_treat_the_embedder_as_stale(self):
+        text = self._launcher()
+        start = text.index("start_llama() {")
+        body = text[start : text.index("\n  }\n", start)]
+        assert "pids_on_port 8080" in body, (
+            "the staleness check must only consider the server on :8080, "
+            "which is the only one whose health it has just tested"
+        )
+
+    def test_stop_llama_leaves_the_embedder_alone(self):
+        """The embedder has its own lifecycle, stopped explicitly on exit."""
+        text = self._launcher()
+        start = text.index("stop_llama() {")
+        body = text[start : text.index("\n  }\n", start)]
+        assert "pids_on_port 8080" in body
