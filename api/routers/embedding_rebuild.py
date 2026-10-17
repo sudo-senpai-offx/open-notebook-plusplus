@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from loguru import logger
 from surreal_commands import get_command_status
@@ -10,10 +12,55 @@ from api.models import (
     RebuildStats,
     RebuildStatusResponse,
 )
-from open_notebook.database.repository import repo_query
+from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.exceptions import OpenNotebookError
 
 router = APIRouter()
+
+#: Job states this API understands, and how they map onto the four the
+#: response model documents. `held` is the important one: it is the state the
+#: dispatcher parks work in, and it means "waiting", which is `queued`.
+_PUBLIC_STATUS = {
+    "held": "queued",
+    "new": "queued",
+    "queued": "queued",
+    "pending": "queued",
+    "running": "running",
+    "completed": "completed",
+    "failed": "failed",
+    "canceled": "failed",
+}
+
+
+def _public_status(raw: str) -> str:
+    """A stored status, in the vocabulary this API promises.
+
+    An unrecognised value is passed through rather than folded into
+    `completed`: reporting a running rebuild as finished would be a lie in
+    the direction that matters.
+    """
+    return _PUBLIC_STATUS.get(raw, raw or "queued")
+
+
+async def _raw_status(command_id: str) -> Optional[str]:
+    """The status column, read without the vendor's enum in the way.
+
+    `ensure_record_id` because a plain string matches no record id in
+    SurrealDB - the query would return nothing at all and look like a
+    missing command rather than an enum gap.
+    """
+    try:
+        rows = await repo_query(
+            "SELECT status FROM $id", {"id": ensure_record_id(command_id)}
+        )
+    except Exception as exc:  # noqa: BLE001 - status never breaks callers
+        logger.warning(f"could not read raw status for {command_id}: {exc}")
+        return None
+    for row in rows or []:
+        value = row.get("status")
+        if value:
+            return str(value)
+    return None
 
 
 @router.post("/rebuild", response_model=RebuildResponse)
@@ -138,7 +185,29 @@ async def get_rebuild_status(command_id: str):
     """
     try:
         # Get command status from surreal_commands
-        status = await get_command_status(command_id)
+        #
+        # That call coerces the stored status into the vendor's
+        # `CommandStatus` enum, which has no `held` member - so it raised
+        # `ValueError: 'held' is not a valid CommandStatus` and this endpoint
+        # answered 500. `held` is not an exotic state here: it is how every
+        # job is created, and on a memory-gated device the queue is *mostly*
+        # held, so this endpoint broke precisely while someone was watching a
+        # rebuild drain.
+        #
+        # A held job is waiting its turn, which is what `queued` already means
+        # to a caller. Translate the raw status instead of letting an enum gap
+        # become an opaque failure.
+        try:
+            status = await get_command_status(command_id)
+        except Exception as exc:  # noqa: BLE001 - any coercion failure lands here
+            raw = await _raw_status(command_id)
+            if raw is None:
+                raise HTTPException(
+                    status_code=404, detail="Rebuild command not found"
+                ) from exc
+            return RebuildStatusResponse(
+                command_id=command_id, status=_public_status(raw)
+            )
 
         if not status:
             raise HTTPException(status_code=404, detail="Rebuild command not found")
