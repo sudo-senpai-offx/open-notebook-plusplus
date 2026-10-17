@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from open_notebook.domain.notebook import Asset
 from open_notebook.exceptions import OpenNotebookError
+from open_notebook.peers.urls import InvalidPeerURL, validate_peer_url
 from open_notebook.storage.blobs import resolve_blob_path, store_bytes
 from open_notebook.sync.blobtransfer import (
     TOKEN_HEADER,
@@ -37,6 +38,33 @@ from open_notebook.sync.exchange import (
 )
 
 router = APIRouter()
+
+
+def checked_peer(peer: str) -> str:
+    """Validate an outbound peer address and return its canonical form.
+
+    A URL in a request body that the device then fetches is an SSRF
+    primitive: whoever holds the sync token can choose the destination, and
+    the connection is made from this device's own network position with its
+    own reach. `169.254.169.254` is the address that pays off - on a hosted
+    VM it answers with credentials for the whole account, and it is
+    reachable from every workload by default.
+
+    Loopback and private ranges stay allowed on purpose: the two devices
+    reach each other over an SSH tunnel whose local end *is* loopback, so
+    forbidding it would forbid the only topology in use. See
+    `open_notebook.peers.urls` for what that leaves open and why it is
+    accepted; the pairing registry is the layer that actually pins the
+    destination.
+    """
+    try:
+        return validate_peer_url(peer)
+    except InvalidPeerURL as exc:
+        # 400, not 403: the credential was fine, the request was not. Logging
+        # the reason and not the address keeps a probe from filling the log
+        # with whatever it tried.
+        logger.warning(f"refused outbound peer address: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class SyncExportRequest(BaseModel):
@@ -211,14 +239,15 @@ async def sync_blob_pull(
     except SyncAuthError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
-    wanted = await missing_from_peer(body.peer, token)
-    result = await pull_from(body.peer, wanted, token=token, limit=body.limit)
+    peer = checked_peer(body.peer)
+    wanted = await missing_from_peer(peer, token)
+    result = await pull_from(peer, wanted, token=token, limit=body.limit)
     # Bytes that just landed may complete sources imported earlier as
     # metadata: queue their extraction the way an upload would.
     from open_notebook.sync.extraction import enqueue_missing_extraction
 
     queued = await enqueue_missing_extraction()
-    return {"peer": body.peer, **result, "extraction_queued": queued["queued_count"]}
+    return {"peer": peer, **result, "extraction_queued": queued["queued_count"]}
 
 
 class SyncBlobOfferRequest(BaseModel):
@@ -241,8 +270,9 @@ async def sync_blob_offer_local(
         raise HTTPException(status_code=403, detail=str(exc))
 
     ours = await local_hashes()
-    ok = await offer_to(body.peer, ours, token=token)
-    return {"peer": body.peer, "count": len(ours), "offered": ok}
+    peer = checked_peer(body.peer)
+    ok = await offer_to(peer, ours, token=token)
+    return {"peer": peer, "count": len(ours), "offered": ok}
 
 
 class SyncBlobPushRequest(BaseModel):
@@ -265,8 +295,9 @@ async def sync_blob_push(
         raise HTTPException(status_code=403, detail=str(exc))
 
     ours = await local_hashes()
-    result = await push_to(body.peer, ours, token=token, limit=body.limit)
-    return {"peer": body.peer, "local": len(ours), **result}
+    peer = checked_peer(body.peer)
+    result = await push_to(peer, ours, token=token, limit=body.limit)
+    return {"peer": peer, "local": len(ours), **result}
 
 
 @router.post("/sync/blobs/process")
