@@ -89,7 +89,14 @@ case "${1:-up}" in
       --port "$PORT" >>"$LOG" 2>&1 &
     if wait_healthy; then
       echo "[embed] healthy"
-      curl -s -m 3 "http://127.0.0.1:${PORT}/v1/models" | tr ',' '\n' | grep '"name"' | head -1
+      # Pull the model name out of the JSON rather than splitting on commas.
+      # `tr ',' '\n'` put a whole `{"models":[{"name":"/data/...` prefix on
+      # every startup line, because the first comma comes *after* the name
+      # field - so the filter printed the envelope it was meant to strip.
+      # jq is not assumed present on the phone.
+      curl -s -m 3 "http://127.0.0.1:${PORT}/v1/models" \
+        | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -1
       echo "[embed] log: $LOG"
     else
       echo "[embed] FAILED to become healthy — tail of $LOG:"
