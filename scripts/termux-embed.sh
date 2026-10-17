@@ -94,9 +94,21 @@ case "${1:-up}" in
       # every startup line, because the first comma comes *after* the name
       # field - so the filter printed the envelope it was meant to strip.
       # jq is not assumed present on the phone.
-      curl -s -m 3 "http://127.0.0.1:${PORT}/v1/models" \
-        | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        | head -1
+      # Captured, not piped straight to echo. `head -1` does not add a
+      # trailing newline when its input lacks one - llama-server's last
+      # line has none - so the model path ran straight into the next echo:
+      #
+      #     .../bge-m3-Q4_K_M.gguf[embed] log: ...
+      #
+      # Command substitution strips any trailing newline and `echo` puts one
+      # back, which also gives somewhere to report when the name cannot be
+      # parsed at all - previously that printed nothing at all.
+      _served=$(
+        curl -s -m 3 "http://127.0.0.1:${PORT}/v1/models" \
+          | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+          | head -1
+      )
+      echo "[embed] model: ${_served:-not reported}"
       echo "[embed] log: $LOG"
     else
       echo "[embed] FAILED to become healthy — tail of $LOG:"
