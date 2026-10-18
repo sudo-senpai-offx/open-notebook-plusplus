@@ -389,3 +389,63 @@ class TestLauncherDoesNotKillTheEmbedder:
         start = text.index("stop_llama() {")
         body = text[start : text.index("\n  }\n", start)]
         assert "pids_on_port 8080" in body
+
+
+class TestLauncherCannotExitOnStdinEOF:
+    """The stack died with no killer visible anywhere.
+
+    `~/bin/onb` blocked on `read -r _` inside the proot session. `read`
+    returns the instant stdin reaches EOF - a closed terminal, a detached
+    session, a shell handing over a pipe - and the session then ends, running
+    `stop_llama` and `onb-embed down`.
+
+    The signature was unmistakable once the log was read: `listening` followed
+    by `operator(): cleaning up before exit...` 39 seconds later, which is a
+    signal and not the OOM killer. Nothing in the output named the sender, so
+    this was misdiagnosed as memory pressure twice before the log settled it.
+    """
+
+    def _launcher(self) -> str:
+        """Comment lines removed.
+
+        The comment explaining this fix quotes the code it replaced, so
+        asserting on the raw text fails on the explanation rather than on
+        the behaviour - the same trap twice in one file.
+        """
+        return "\n".join(
+            line
+            for line in _read("termux-launch.sh").splitlines()
+            if not line.lstrip().startswith("#")
+        )
+
+    def test_does_not_block_on_read(self):
+        """A read can return early; the session must not be able to end."""
+        assert "read -r _" not in self._launcher(), (
+            "`read` returns immediately on EOF, which ends the proot session "
+            "and takes both model servers with it"
+        )
+
+    def test_blocks_on_a_sleep_loop(self):
+        assert "while :; do sleep" in self._launcher()
+
+    def test_sleep_value_is_busybox_safe(self):
+        """`sleep infinity` is not portable; busybox rejects it."""
+        text = self._launcher()
+        assert "sleep infinity" not in text
+        assert "2147483647" in text
+
+    def test_still_tells_the_operator_how_to_stop(self):
+        text = self._launcher()
+        assert "press Ctrl+C to stop:" in text, (
+            "the prompt is the only thing telling the operator this is "
+            "foreground; removing the read must not remove the prompt"
+        )
+
+    def test_teardown_still_runs_on_ctrl_c(self):
+        """Blocking forever must not mean Ctrl+C is ignored - the trap and the
+        teardown are untouched."""
+        text = self._launcher()
+        start = text.index("guest session ended")
+        assert "stop_llama" in text[start : start + 300], (
+            "Ctrl+C has to reach the teardown, or the stack cannot be stopped at all"
+        )

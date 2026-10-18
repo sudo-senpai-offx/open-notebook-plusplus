@@ -230,7 +230,21 @@ case "${1:-up}" in
       echo "  Ctrl+C stops everything."
       echo
       printf "press Ctrl+C to stop: "
-      read -r _
+      # Block on something that cannot return early.
+      #
+      # `read -r _` returns the instant stdin reaches EOF - a closed terminal,
+      # a detached session, a shell that hands over a pipe - and the proot
+      # session then ends, which runs stop_llama and onb-embed down and takes
+      # both model servers with it. Observed: the stack reported `up` at
+      # launch, and some minutes later uvicorn, llama-server and the embedder
+      # were gone while surreal, the worker and next-server survived. The
+      # llama log showed a clean `listening` followed by
+      # `operator(): cleaning up before exit...` 39s later - a signal, not the
+      # OOM killer, and nothing in the output said who sent it.
+      #
+      # A sleep loop cannot hit EOF. `sleep infinity` is not portable to
+      # busybox, so the large finite value is used instead.
+      while :; do sleep 2147483647; done
     '
     status=$?
     echo "[onb] guest session ended (status $status)"
