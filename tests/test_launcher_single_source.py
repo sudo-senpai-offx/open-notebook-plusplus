@@ -510,9 +510,44 @@ class TestOnlyOneLauncher:
         text = self._code()
         i = text.index("already_running()")
         body = text[i : text.index("\n}\n", i)]
-        assert "/proc/$$" in body, (
+        assert '"$$"' in body, (
             "without excluding its own pid the guard always matches itself and "
             "the launcher can never start"
+        )
+
+    def test_guard_excludes_subshells_not_just_itself(self):
+        """The guard runs inside `$(already_running)`.
+
+        That subshell has our cmdline and a different pid, so excluding only
+        `$$` matches the very subshell doing the matching. Every start was
+        refused, each naming a different pid - three refusals that read as
+        three stale launchers rather than one self-match.
+        """
+        text = self._code()
+        assert "_is_ours" in text, (
+            "our own subshells carry our cmdline with a different pid; only a "
+            "process-tree check separates them from a second launcher"
+        )
+
+    def test_guard_checks_the_process_tree_not_the_cmdline(self):
+        """A genuine second launcher has an identical cmdline, so cmdline
+        equality cannot be the discriminator."""
+        text = self._code()
+        i = text.index("_is_ours()")
+        body = text[i : text.index("\n}\n", i)]
+        assert body.count("PPid:") >= 2, (
+            "both directions are needed: ancestors (a wrapper that exec'd into "
+            "us) and descendants (our subshells)"
+        )
+
+    def test_guard_still_reports_a_real_second_launcher(self):
+        """The fix must not have turned the guard off."""
+        text = self._code()
+        i = text.index("_is_ours")
+        j = text.index('case "$cmd" in', i)
+        window = text[j : j + 300]
+        assert "_is_ours" in window and "echo" in window, (
+            "a real second instance is still ours=false and must be reported"
         )
 
     def test_stop_is_still_reachable(self):
@@ -551,8 +586,8 @@ class TestLauncherDoesNotLingerWhenOrphaned:
 
     def test_exits_when_orphaned(self):
         text = self._code()
-        i = text.index("PPid:")
-        window = text[i : i + 400]
+        i = text.index('_foreground="${ONB_FOREGROUND:-0}"')
+        window = text[i : i + 700]
         assert '= "1"' in window, "PPID 1 means init adopted it - the terminal is gone"
         assert "break" in window, "the wait loop has to end so the teardown runs"
 
@@ -576,8 +611,10 @@ class TestLauncherDoesNotLingerWhenOrphaned:
         nothing in any log.
         """
         text = self._code()
-        i = text.index("PPid:")
-        window = text[i : i + 500]
+        # Anchor inside the orphan loop. The guard's process-tree walk also
+        # reads PPid, and appears earlier in the file.
+        i = text.index("_orphan=$((_orphan + 1))")
+        window = text[i - 400 : i + 400]
         assert "_orphan" in window, (
             "one sample is not proof; the condition must persist before the "
             "stack is released"
@@ -589,7 +626,7 @@ class TestLauncherDoesNotLingerWhenOrphaned:
     def test_a_live_parent_resets_the_counter(self):
         """Otherwise a launcher that reads 1 twice in an hour still exits."""
         text = self._code()
-        i = text.index("PPid:")
+        i = text.index('_foreground="${ONB_FOREGROUND:-0}"')
         window = text[i : i + 500]
         assert "_orphan=0" in window.split("else")[-1], (
             "a sample showing a live parent must clear the accumulated count"
@@ -600,8 +637,8 @@ class TestLauncherDoesNotLingerWhenOrphaned:
         deliberately: a transient read failure must not tear down a working
         stack."""
         text = self._code()
-        i = text.index("PPid:")
-        window = text[i : i + 300]
+        i = text.index('_foreground="${ONB_FOREGROUND:-0}"')
+        window = text[i : i + 900]
         assert "${_ppid:-1}" in window
 
 
