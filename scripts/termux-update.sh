@@ -46,8 +46,29 @@ REPO="$ROOTFS$REPO_IN_GUEST"
 BUNDLE_IN_GUEST="/tmp/plusplus.bundle"
 DEFAULT_BUNDLE="/data/local/tmp/plusplus.bundle"
 
-API_PORT="${ONB_API_PORT:-15055}"
-HEALTH_URL="http://127.0.0.1:$API_PORT/api/sync/status"
+API_PORT="${ONB_API_PORT:-5055}"
+# /health, not /api/sync/status.
+#
+# The port was 15055, which is the *PC's* adb-forward port
+# (`adb forward tcp:15055 tcp:5055` in phone-tunnel.sh). This script runs in
+# Termux **on the phone**, where nothing has ever listened on 15055 - the guest
+# API binds 5055. curl got connection-refused, `stack_is_up` was permanently
+# false, and both of its callers silently did nothing:
+#
+#   - the "the stack is running, stop it first" guard never fired, so an update
+#     could land underneath a live server, which is the exact hazard it exists
+#     to prevent;
+#   - `--restart` never called `stop_stack` at all, so it updated the files and
+#     launched a second `onb`, which the launcher's duplicate guard correctly
+#     refused. Exit status 0, "starting the stack again" printed, and the old
+#     processes kept running - a restart that reported success and changed
+#     nothing. The new code was on disk and never loaded.
+#
+# `/health` over `/api/sync/status` because the latter answers 401 without the
+# bearer credential and `curl` exits 0 on a 401 anyway - so the check only ever
+# worked by accident of not passing `-f`. /health is unauthenticated, and it is
+# what termux-stack.sh already probes for its own liveness check.
+HEALTH_URL="http://127.0.0.1:$API_PORT/health"
 
 STATE="${ONB_UPDATE_STATE:-$HOME/.onb-update-checked}"
 MAX_AGE="${ONB_UPDATE_MAX_AGE:-86400}"   # re-check at most once a day
@@ -99,12 +120,62 @@ stop_stack() {
   # signal or a closed stdin. Give it a moment, then escalate.
   n=0
   while [ "$n" -lt 15 ]; do
-    stack_is_up || return 0
+    stack_is_up || break
     sleep 1
     n=$((n + 1))
   done
-  say "  the API is still answering; giving up"
-  return 1
+  if stack_is_up; then
+    say "  the API is still answering; giving up"
+    return 1
+  fi
+  # The API going quiet is not the same as the stack having stopped.
+  #
+  # `onb stop` tears down the model servers, the embedder and the guest, but a
+  # foreground launcher parks on a sleep loop and only leaves on a signal or a
+  # closed stdin - and if one survives, the detached start below is refused by
+  # the launcher's own duplicate guard. The result is the silent no-op restart
+  # this function was supposed to prevent: "starting the stack again" printed,
+  # exit 0, and the old process tree still serving. So the launcher itself is
+  # checked, not just the port it was serving.
+  if [ -f "$HOME/bin/onb" ] && launcher_alive; then
+    say "  a launcher is still alive; killing it"
+    _lpids=$(launcher_pids)
+    for _p in $_lpids; do kill "$_p" 2>/dev/null; done
+    j=0
+    while [ "$j" -lt 10 ] && launcher_alive; do
+      sleep 1
+      j=$((j + 1))
+    done
+    if launcher_alive; then
+      for _p in $(launcher_pids); do kill -9 "$_p" 2>/dev/null; done
+      sleep 1
+    fi
+    if launcher_alive; then
+      say "  ERROR: a launcher survived SIGKILL (pid $(launcher_pids))."
+      say "  Starting another one would be refused, so this would be a no-op."
+      say "  Reboot the phone, then run this again."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Is a `~/bin/onb` launcher still running?
+#
+# Scans /proc for the launcher's own path, and excludes nothing - a stale
+# launcher is exactly what is being hunted here, so unlike the launcher's own
+# `already_running` guard there is nothing here to accidentally match.
+launcher_pids() {
+  for p in /proc/[0-9]*; do
+    _cl=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
+    case "$_cl" in
+      *"$HOME/bin/onb "*) echo "${p#/proc/}" ;;
+    esac
+  done
+}
+
+launcher_alive() {
+  [ -n "$(launcher_pids)" ]
 }
 
 # --- what would we update to? ---------------------------------------------

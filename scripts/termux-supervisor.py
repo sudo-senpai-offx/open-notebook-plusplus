@@ -219,10 +219,19 @@ class Residency:
     """Residency state for one role."""
 
     role: str
+    #: Weights are in RAM. False for a server that is answering with its model
+    #: paged out to zram - a state that is neither "loaded" nor "down".
     resident: bool = False
+    #: Something is answering on the role's port. True whenever `resident` is,
+    #: and also true when the process is alive with its weights swapped out.
+    serving: bool = False
     pid: str = "-"
     model: str = "-"
     disk_bytes: int = 0
+    #: Resident set size in kB, straight from /proc. The measurement behind
+    #: `resident`, published because it is the only number that cannot be
+    #: argued with.
+    rss_kb: int = 0
     last_used: float = field(default_factory=time.monotonic)
     loaded_at: Optional[float] = None
     error: Optional[str] = None
@@ -257,6 +266,15 @@ class Manager:
         state.resident = fields.get("resident") == "1" and code == 0
         state.pid = fields.get("pid", "-")
         state.model = fields.get("model", "-")
+        # `serving` and `resident` are different questions and the supervisor
+        # keeps both. A server whose weights are in zram answers /health and
+        # /v1/models perfectly, so "serving" cannot stand in for "resident" -
+        # conflating them is what made this report a 1.7 MB model as loaded.
+        state.serving = fields.get("serving") == "1" or (state.resident and code == 0)
+        try:
+            state.rss_kb = int(fields.get("rss_kb", "0") or 0)
+        except ValueError:
+            state.rss_kb = 0
         if not state.resident:
             state.loaded_at = None
         elif code == 0 and state.loaded_at is None:
@@ -288,10 +306,12 @@ class Manager:
             roles[name] = {
                 "role": name,
                 "resident": state.resident,
+                "serving": state.serving,
                 "pid": state.pid,
                 "model": state.model,
                 "disk_bytes": disk,
                 "resident_bytes": state.resident_bytes,
+                "rss_kb": state.rss_kb,
                 "port": role.port,
                 "priority": role.priority,
                 "max_concurrent_jobs": role.max_concurrent_jobs,
@@ -338,12 +358,25 @@ class Manager:
 
         with self._lock:
             state = self.probe(role)
-            if state.resident:
+            # Admission is about `serving`, not `resident`.
+            #
+            # A server whose weights are in zram will still answer a request -
+            # it faults the pages back in, which costs time (6.9s measured for
+            # the first generation) but works. Holding the job because the
+            # model is not warm would turn a slow request into a stalled one,
+            # and the caller cannot tell that apart from a real failure.
+            #
+            # So `serving` means proceed and `resident` means "cheap right
+            # now"; they are reported separately because only the second is a
+            # performance fact. Starting a second server here would also be
+            # wrong - the weights are still mapped, just not resident.
+            if state.serving:
                 state.last_used = time.monotonic()
                 return {
                     "ok": True,
                     "role": name,
                     "loaded": False,
+                    "resident": state.resident,
                     "pid": state.pid,
                     "model": state.model,
                 }
@@ -359,15 +392,16 @@ class Manager:
             # Re-probe rather than trusting the exit code. The launchers have
             # been wrong about success before - `down` reported stopping a
             # server that was still holding its port - and the only trustworthy
-            # answer to "is it loaded" is the same question asked again.
+            # answer to "is it up" is the same question asked again.
             state = self.probe(role)
             state.last_used = time.monotonic()
-            if state.resident:
+            if state.serving:
                 state.error = None
                 return {
                     "ok": True,
                     "role": name,
                     "loaded": True,
+                    "resident": state.resident,
                     "pid": state.pid,
                     "model": state.model,
                     "elapsed_s": round(time.monotonic() - started, 2),
@@ -384,18 +418,21 @@ class Manager:
             return {"ok": False, "role": name, "error": f"unknown role {name!r}"}
         with self._lock:
             state = self.probe(role)
-            if not state.resident:
+            # Unload is keyed off `serving`, not `resident`: a swapped-out
+            # server still holds its port and its mapped weights, and leaving
+            # it up is exactly what an unload is meant to prevent.
+            if not state.serving:
                 return {"ok": True, "role": name, "unloaded": False}
             code, out, err = run(role.unload, LOAD_TIMEOUT)
             state = self.probe(role)
             return {
-                "ok": not state.resident,
+                "ok": not state.serving,
                 "role": name,
-                "unloaded": not state.resident,
+                "unloaded": not state.serving,
                 "error": None
-                if not state.resident
+                if not state.serving
                 else (
-                    (err or out).strip() or f"still resident after unload (exit {code})"
+                    (err or out).strip() or f"still serving after unload (exit {code})"
                 ),
             }
 
@@ -417,7 +454,7 @@ class Manager:
         for name in sorted(ROLES, key=lambda n: ROLES[n].priority):
             role = ROLES[name]
             state = self.probe(role)
-            if not state.resident:
+            if not state.serving:
                 continue
             if time.monotonic() - state.last_used < limit:
                 continue

@@ -101,6 +101,11 @@ class ResidencyResult:
     ok: bool
     role: str
     loaded: bool = False
+    #: Weights in RAM. Distinct from `ok`: a role can be serving perfectly
+    #: while paged out to zram, which is slower but not a failure. Conflating
+    #: the two is what made the first version of this report a 1.7 MB model as
+    #: loaded.
+    resident: bool = False
     pid: str = "-"
     model: str = "-"
     error: Optional[str] = None
@@ -162,6 +167,7 @@ async def ensure_resident(role: str) -> ResidencyResult:
         ok=bool(payload.get("ok")),
         role=str(payload.get("role") or role),
         loaded=bool(payload.get("loaded")),
+        resident=bool(payload.get("resident")),
         pid=str(payload.get("pid") or "-"),
         model=str(payload.get("model") or "-"),
         error=None if payload.get("ok") else str(payload.get("error") or "load failed"),

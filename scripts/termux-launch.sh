@@ -215,16 +215,51 @@ wait_for_llama() {
 # exists *and* /health answers, for the same reason `start_llama` requires
 # both: a process that exists is not a server serving, and a stale one must
 # never be reported as a loaded model.
+# Resident kilobytes for a pid, or 0.
+#
+# VmRSS is the only local answer to "are the weights actually in RAM". The
+# alternative - asking the server - cannot work: a fully swapped-out
+# llama-server answers /health and /v1/models perfectly, because answering
+# those touches no weights. Measured on the device with the stack reporting
+# healthy: VmRSS 1748 kB against a 1066 MB model. The first generation then
+# took 6.9s and VmRSS went to 972016 kB, which is the page-in.
+#
+# sed rather than awk, matching the orphan check below: /proc/<pid>/status is
+# rewritten constantly and a read can land mid-line.
+vm_rss_kb() {
+  [ -n "${1:-}" ] || { printf '0'; return 0; }
+  sed -n 's/^VmRSS:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$1/status" 2>/dev/null \
+    | head -1 | tr -d ' '
+}
+
 probe_chat() {
   _pids=$(pids_on_port 8080 2>/dev/null || true)
-  if [ -n "$_pids" ] && llama_healthy; then
+  _pid=$(printf '%s\n' "$_pids" | head -1)
+  _rss=$(vm_rss_kb "$_pid")
+  # `resident` now means the weights are in RAM, not that a server exists.
+  #
+  # It previously meant "a pid exists and /health answers", and that reported a
+  # model with 1.7 MB resident as loaded - so the panel, the dispatcher's load
+  # decisions and the idle reaper were all working from a flag that was false
+  # exactly when it mattered. A threshold is needed because RSS is never
+  # exactly the weight size: mmap, the allocator's arena and lazily-faulted
+  # pages all move it. 50% is well clear of a swapped-out process (which reads
+  # under 1% here) and well under a warm one (972 MB against 1066 MB is 91%).
+  if [ -n "$_pids" ] && llama_healthy && [ "${_rss:-0}" -ge 500000 ]; then
     _model=$(curl -s -m 5 http://127.0.0.1:8080/v1/models 2>/dev/null \
       | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
       | head -1)
-    printf 'role=chat resident=1 pid=%s model=%s\n' \
-      "$(printf '%s\n' "$_pids" | head -1)" "${_model##*/}"
+    printf 'role=chat resident=1 pid=%s model=%s rss_kb=%s\n' \
+      "$_pid" "${_model##*/}" "$_rss"
   else
-    printf 'role=chat resident=0 pid=- model=-\n'
+    # `serving` is reported separately from `resident` on purpose. A process
+    # answering /health with its weights in zram is neither up nor loaded, and
+    # collapsing that into one bit is what made the original flag useless.
+    if [ -n "$_pids" ] && llama_healthy; then
+      printf 'role=chat resident=0 pid=%s model=- rss_kb=%s serving=1\n' "$_pid" "$_rss"
+    else
+      printf 'role=chat resident=0 pid=- model=- rss_kb=0 serving=0\n'
+    fi
   fi
 }
 

@@ -420,6 +420,42 @@ class TestAdmissionUnderResidency:
         assert outcome.promoted == ["command:run_transformation2"]
 
 
+class TestPagedOutIsNotAFailure:
+    """A model in zram is slow, not broken.
+
+    Measured on the device: a chat server holding 1748 kB of a 1066 MB model
+    answered /health and /v1/models normally, and the first generation took
+    6.9s and took RSS to 972016 kB. It worked. The kernel faults the pages
+    back in; that is what `ensure` must be allowed to rely on.
+
+    If admission keyed off `resident`, this state would hold every job - and
+    the job would be indistinguishable from a genuine load failure, so the
+    operator would be told to reboot a phone that was working.
+    """
+
+    def test_a_serving_but_swapped_out_role_is_ok(self):
+        state = sup.Residency(role="chat", serving=True, resident=False, pid="19057")
+        assert state.serving is True
+        assert state.resident is False
+
+    def test_resident_bytes_is_zero_when_not_resident(self):
+        """The estimate is of RAM held, so a paged-out model costs none."""
+        warm = sup.Residency(role="chat", serving=True, resident=True, disk_bytes=1000)
+        cold = sup.Residency(role="chat", serving=True, resident=False, disk_bytes=1000)
+        assert warm.resident_bytes > 0
+        assert cold.resident_bytes == 0
+
+    def test_client_carries_resident_separately_from_ok(self):
+        result = residency.ResidencyResult(ok=True, role="chat", resident=False)
+        assert result.ok is True
+        assert result.resident is False
+        assert result.hold_reason() == ""
+
+    def test_a_warm_role_reports_resident(self):
+        result = residency.ResidencyResult(ok=True, role="chat", resident=True)
+        assert result.ok is True and result.resident is True
+
+
 class TestClient:
     def test_disabled_by_default(self, monkeypatch):
         """A fresh checkout must behave exactly as it did before.
@@ -545,19 +581,63 @@ class TestShellContract:
         assert "  probe)" in code
         assert "  model-path)" in code
 
-    def test_probe_emits_resident_only_when_healthy(self):
-        """`resident=1` requires a pid *and* a health answer.
+    def test_probe_reports_resident_only_when_the_weights_are_in_ram(self):
+        """The bug this replaces, pinned.
 
-        A process that exists is not a server serving. Reporting `resident=1`
-        for a stale process is how a supervisor claims a model is loaded when
-        it is a corpse holding a port.
+        `resident=1` used to require a pid and a /health answer. On the device
+        that reported a model holding 1748 kB of a 1066 MB model as loaded,
+        because a swapped-out llama-server answers /health perfectly - those
+        endpoints touch no weights. So the flag was false exactly when it
+        mattered, and the panel, the dispatcher's load decisions and the idle
+        reaper were all reading it.
+
+        The fix reads VmRSS, which is the only local measurement of the thing
+        the flag is named after.
         """
         code = self._code(self._script("termux-launch.sh"))
         start = code.index("probe_chat()")
         body = code[start : code.index("\n}\n", start)]
-        assert "llama_healthy" in body
-        assert "resident=1" in body
-        assert "resident=0" in body
+        assert "vm_rss_kb" in body, (
+            "residency has to be measured from /proc/<pid>/status, not inferred "
+            "from an endpoint a swapped-out server still answers"
+        )
+        assert "VmRSS" in self._script("termux-launch.sh")
+        assert "-ge 500000" in body, (
+            "a pid plus a health check is not residency; the threshold is what "
+            "separates 1748 kB from 972016 kB"
+        )
+
+    def test_probe_separates_serving_from_resident(self):
+        """Three states, not two.
+
+        A process that is not there, a process answering with its weights in
+        zram, and a warm process are different situations needing different
+        responses. Reporting the middle one as either extreme is what made the
+        original flag useless.
+        """
+        for script, fn in (
+            ("termux-launch.sh", "probe_chat"),
+            ("termux-embed.sh", "probe_embed"),
+        ):
+            code = self._code(self._script(script))
+            start = code.index(fn)
+            body = code[
+                start : code.index("\n  }\n", start)
+                if script.endswith("embed.sh")
+                else code.index("\n}\n", start)
+            ]
+            assert "serving=1" in body, f"{fn} cannot report a paged-out server"
+            assert "serving=0" in body, f"{fn} cannot report a stopped server"
+            assert "rss_kb=" in body, f"{fn} does not publish the measurement"
+
+    def test_embedder_threshold_scales_with_its_model(self):
+        """bge-small is 35 MB; the chat floor of 500 MB would call it
+        permanently unloaded."""
+        code = self._code(self._script("termux-embed.sh"))
+        start = code.index("probe_embed")
+        body = code[start : code.index("\n  }\n", start)]
+        assert "-ge 8192" in body
+        assert "500000" not in body
 
     def test_the_supervisor_binds_loopback_only(self):
         """The guest shares Termux's loopback, so that is the whole of the

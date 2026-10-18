@@ -117,11 +117,31 @@ kill_embed() {
   # supervisor's own /proc scan, because a supervisor-side match would have to
   # re-learn that :8081 and :8080 are the same executable - the exact confusion
   # that once had `start_llama` killing the embedder it meant to replace.
+  vm_rss_kb() {
+    [ -n "${1:-}" ] || { printf '0'; return 0; }
+    sed -n 's/^VmRSS:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$1/status" 2>/dev/null \
+      | head -1 | tr -d ' '
+  }
+
   probe_embed() {
-    if _pid=$(pid_of) && [ -n "$_pid" ]; then
-      printf 'role=embed resident=1 pid=%s model=%s\n' "$_pid" "$(served_model)"
+    _pid=$(pid_of) || _pid=""
+    _rss=$(vm_rss_kb "$_pid")
+    # `resident` means the weights are in RAM. See probe_chat in
+    # termux-launch.sh for the measurement this replaces and why /health could
+    # not stand in: on the device a swapped-out server answered /health while
+    # holding 868 kB of a 35 MB model.
+    #
+    # The threshold here is a tenth of the chat one, not a tenth of the
+    # fraction: bge-small is 35 MB on disk, so an absolute 500 MB floor would
+    # call it permanently unloaded. 8 MB is well clear of a swapped-out
+    # process and well under a warm 35 MB model.
+    if [ -n "$_pid" ] && [ "${_rss:-0}" -ge 8192 ]; then
+      printf 'role=embed resident=1 pid=%s model=%s rss_kb=%s\n' \
+        "$_pid" "$(served_model)" "$_rss"
+    elif [ -n "$_pid" ]; then
+      printf 'role=embed resident=0 pid=%s model=- rss_kb=%s serving=1\n' "$_pid" "$_rss"
     else
-      printf 'role=embed resident=0 pid=- model=-\n'
+      printf 'role=embed resident=0 pid=- model=- rss_kb=0 serving=0\n'
     fi
   }
 
