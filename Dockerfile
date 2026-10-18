@@ -28,7 +28,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # Stage 2: Backend builder
-FROM python:3.12-slim-trixie AS backend-builder
+FROM python:3.14-slim-trixie AS backend-builder
 
 # Install build dependencies (uv downloads pre-built wheels for most packages)
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
@@ -77,7 +77,7 @@ RUN mkdir -p /app/tiktoken-cache && \
 FROM surrealdb/surrealdb:v2 AS surreal-binary
 
 # Stage 4: Shared runtime base (everything common to both variants)
-FROM python:3.12-slim-trixie AS runtime-base
+FROM python:3.14-slim-trixie AS runtime-base
 
 # Install runtime system dependencies
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
