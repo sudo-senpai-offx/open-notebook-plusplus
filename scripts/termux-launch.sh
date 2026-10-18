@@ -155,6 +155,56 @@ stop_all() {
   if command -v proot-distro >/dev/null && proot-distro ps 2>/dev/null | grep -q ubuntu; then
     proot-distro kill ubuntu 2>/dev/null && echo "[onb] stopped proot session(s)"
   fi
+  # Finally, the launcher itself - which SIGTERM cannot reach.
+  #
+  # `onb stop` runs in its own shell, so it can signal the launcher that is
+  # holding the stack up. But that launcher spends its life blocked on a
+  # foreground `proot-distro login`, and a POSIX shell defers traps until the
+  # foreground command returns. The guest does not return while the guest is
+  # running. So the SIGTERM lands, sets a pending flag, and the `trap ...
+  # exit 0` never fires - observed on the device as `kill 19015` leaving the
+  # process alive, sleeping, still holding everything.
+  #
+  # There is no signal that resolves this except SIGKILL, and by this point
+  # the services have already been torn down deliberately, so there is nothing
+  # left for the trap to have cleaned up.
+  kill_stragglers
+}
+
+# Any `~/bin/onb` launcher other than this one.
+launcher_pids() {
+  for p in /proc/[0-9]*; do
+    _cl=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
+    case "$_cl" in
+      *"$HOME/bin/onb "*) echo "${p#/proc/}" ;;
+    esac
+  done
+}
+
+kill_stragglers() {
+  pids=$(launcher_pids | grep -v "^$$\$" || true)
+  [ -n "$pids" ] || return 0
+  echo "[onb] stopping launcher(s) (pid $(echo "$pids" | tr '\n' ' '))"
+  # SIGTERM first in case one of them is not actually blocked, then SIGKILL,
+  # because for the blocked ones only the second works.
+  for p in $pids; do kill "$p" 2>/dev/null; done
+  i=0
+  while [ "$i" -lt 5 ]; do
+    left=$(launcher_pids | grep -v "^$$\$" || true)
+    [ -n "$left" ] || return 0
+    sleep 1
+    i=$((i + 1))
+  done
+  for p in $pids; do kill -9 "$p" 2>/dev/null; done
+  sleep 1
+  left=$(launcher_pids | grep -v "^$$\$" || true)
+  if [ -n "$left" ]; then
+    echo "[onb] WARNING: launcher(s) survived SIGKILL (pid $(echo "$left" | tr '\n' ' '))"
+    echo "         reboot, or: kill -9 $(echo "$left" | tr '\n' ' ')"
+    return 1
+  fi
+  echo "[onb] stopped launcher(s)"
+  return 0
 }
 
 start_llama() {

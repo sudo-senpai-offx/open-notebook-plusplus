@@ -420,6 +420,152 @@ class TestAdmissionUnderResidency:
         assert outcome.promoted == ["command:run_transformation2"]
 
 
+class TestReaperOnlyReapsWhatItLoaded:
+    """The supervisor unloaded the stack's own boot-time models.
+
+    Observed on the device: `~/bin/onb` starts chat and embed deliberately,
+    then `[residency] idle-unloaded chat, embed` appeared in the log five
+    minutes later and both were gone. Nothing else in any log said what
+    happened.
+
+    The cause is not a bad threshold. It is that no guest ever called
+    `ensure_resident` - residency was never enabled - so `last_used` never
+    advanced, and the reaper saw two models it had never touched as merely
+    idle. Two owners of one lifecycle.
+
+    The fix is narrow and is the only safe one: the supervisor reaps only what
+    it started. The launcher remains the authority on what exists at boot.
+    """
+
+    def test_a_launcher_started_role_is_not_owned(self):
+        state = sup.Residency(role="chat", serving=True, resident=True, owned=False)
+        assert state.owned is False
+
+    def test_nothing_is_owned_until_something_loads_it(self):
+        """Ownership is not implied by the role existing or by `serving`."""
+        assert sup.Residency(role="chat", serving=True).owned is False
+        assert sup.Residency(role="chat", resident=True).owned is False
+
+    def test_ownership_is_published(self):
+        """Otherwise a model vanishing has nothing to point at."""
+        catalogue = sup.Manager().catalogue()
+        assert "owned" in catalogue["roles"]["chat"]
+
+    def test_the_reaper_filters_on_ownership(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "scripts" / "termux-supervisor.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("def reap_idle")
+        body = source[start : source.index("\n    def _reap_loop", start)]
+        assert "state.owned" in body, (
+            "the reaper must skip roles it did not load; otherwise it tears "
+            "down whatever the launcher started"
+        )
+        # `serving` alone is what the old filter used, and it is not enough.
+        assert "not state.owned or not state.serving" in body
+
+    def test_ensure_claims_ownership_only_after_a_successful_load(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "scripts" / "termux-supervisor.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("def ensure")
+        body = source[start : source.index("\n    def release", start)]
+        assert "state.owned = True" in body
+        after_probe = body.index(
+            "state = self.probe(role)", body.index("run(role.load")
+        )
+        assert body.index("state.owned = True") > after_probe, (
+            "claiming ownership before the load is verified means a failed load "
+            "leaves a role the reaper will chase"
+        )
+
+    def test_release_gives_up_ownership_even_when_the_stop_failed(self):
+        """Otherwise a process it no longer controls is retried forever."""
+        source = (
+            Path(__file__).resolve().parents[1] / "scripts" / "termux-supervisor.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("def release(self, name")
+        body = source[start : source.index("\n    def release_all", start)]
+        assert "self._state[name].owned = False" in body
+        # Placed on the unload path, after the stop has been attempted, so a
+        # failed unload cannot leave the role permanently reapable. The early
+        # return for an already-stopped role also contains "unloaded", so the
+        # anchor is the `run` call rather than the first occurrence.
+        unload = body.index("run(role.unload")
+        assert body.index("self._state[name].owned = False") > unload
+
+    def test_serving_alone_does_not_make_a_role_reapable(self):
+        """The exact pre-fix condition: up, healthy, and still not ours."""
+        state = sup.Residency(role="chat", serving=True, resident=True, owned=False)
+        assert state.serving and state.resident
+        assert state.owned is False
+
+
+class TestLauncherCanActuallyBeStopped:
+    """SIGTERM does not reach the launcher.
+
+    `onb stop` runs in its own shell and signals the launcher holding the stack
+    up, but that launcher spends its life blocked on a foreground
+    `proot-distro login`, and a POSIX shell defers traps until the foreground
+    command returns. The guest does not return while the guest is running, so
+    the `trap ... exit 0` never fires.
+
+    Measured on the device: `kill 19015` left the process alive, state `S`, with
+    `SigCgt` bit 14 set - a handler installed that could not be reached. So
+    SIGKILL is the only thing that works, and `stop_all` has to do it.
+    """
+
+    @staticmethod
+    def _launcher() -> str:
+        return (
+            Path(__file__).resolve().parents[1] / "scripts" / "termux-launch.sh"
+        ).read_text(encoding="utf-8")
+
+    def test_stop_all_kills_stragglers(self):
+        code = self._launcher()
+        start = code.index("stop_all() {")
+        body = code[start : code.index("\n}\n", start)]
+        assert "kill_stragglers" in body, (
+            "the launcher's own SIGTERM trap is deferred behind a foreground "
+            "proot-distro login, so stopping it needs more than a signal"
+        )
+
+    def test_escalates_to_sigkill(self):
+        code = self._launcher()
+        start = code.index("kill_stragglers() {")
+        body = code[start : code.index("\n}\n", start)]
+        assert "kill -9" in body, (
+            "SIGTERM demonstrably does not work here; without escalation the "
+            "stop reports success and leaves the launcher holding the stack"
+        )
+
+    def test_does_not_kill_itself(self):
+        """`onb stop` runs inside a launcher; that one must survive the sweep."""
+        code = self._launcher()
+        # The exclusion lives in the caller, not in the scan: `launcher_pids`
+        # reports every match honestly and each caller filters out `$$`.
+        sweep = code[
+            code.index("kill_stragglers() {") : code.index(
+                "\n}\n", code.index("kill_stragglers() {")
+            )
+        ]
+        assert 'grep -v "^$$\\$"' in sweep, (
+            "the stop path matches every ~/bin/onb, which includes the shell "
+            "doing the stopping"
+        )
+        assert sweep.count('grep -v "^$$\\$"') >= 3, (
+            "every pid list has to drop $$ - the initial sweep, the SIGTERM wait "
+            "and the post-SIGKILL confirmation - or the stop kills itself"
+        )
+
+    def test_says_so_when_one_survives(self):
+        """A launcher that outlives SIGKILL has to be named, not hidden."""
+        code = self._launcher()
+        start = code.index("kill_stragglers() {")
+        body = code[start : code.index("\n}\n", start)]
+        assert "survived SIGKILL" in body and "kill -9" in body
+
+
 class TestPagedOutIsNotAFailure:
     """A model in zram is slow, not broken.
 

@@ -232,6 +232,20 @@ class Residency:
     #: `resident`, published because it is the only number that cannot be
     #: argued with.
     rss_kb: int = 0
+    #: Did *this supervisor* start it?
+    #:
+    #: The single most important field here, and the one whose absence caused
+    #: the bug this fixes. `~/bin/onb` starts chat and embed deliberately at
+    #: boot. This supervisor then found them idle for 300s - because no guest
+    #: was calling `ensure_resident`, since residency was not enabled - and
+    #: unloaded both. It was tearing down processes it had never started,
+    #: five minutes after the operator started the stack on purpose.
+    #:
+    #: Two owners of one lifecycle is the actual defect. Collapsing two
+    #: *implementations* of start/stop into one set of shell verbs was not
+    #: enough, because ownership was still split. So the rule is narrow: this
+    #: process only reaps what it loaded itself.
+    owned: bool = False
     last_used: float = field(default_factory=time.monotonic)
     loaded_at: Optional[float] = None
     error: Optional[str] = None
@@ -307,6 +321,10 @@ class Manager:
                 "role": name,
                 "resident": state.resident,
                 "serving": state.serving,
+                # False means the launcher started it, and the idle reaper will
+                # not touch it. Published because the alternative is a model
+                # vanishing with nothing in any log to say who took it.
+                "owned": state.owned,
                 "pid": state.pid,
                 "model": state.model,
                 "disk_bytes": disk,
@@ -397,6 +415,10 @@ class Manager:
             state.last_used = time.monotonic()
             if state.serving:
                 state.error = None
+                # Claim it. Only a role this supervisor started is ever a
+                # candidate for the idle reaper, so the act of loading is what
+                # creates the obligation to clean up.
+                state.owned = True
                 return {
                     "ok": True,
                     "role": name,
@@ -425,6 +447,10 @@ class Manager:
                 return {"ok": True, "role": name, "unloaded": False}
             code, out, err = run(role.unload, LOAD_TIMEOUT)
             state = self.probe(role)
+            # No longer ours to reap, whether or not the stop worked. Leaving
+            # `owned` set after a failed unload would keep retrying forever
+            # against a process it no longer controls.
+            self._state[name].owned = False
             return {
                 "ok": not state.serving,
                 "role": name,
@@ -445,8 +471,18 @@ class Manager:
     # -- idle reaping ---------------------------------------------------
 
     def reap_idle(self) -> List[str]:
-        """Unload anything idle past the threshold. Never unloads a role that
-        is mid-use, and never returns a partial answer."""
+        """Unload what *we* loaded, once it has been idle past the threshold.
+
+        `owned` is the whole filter. A role the launcher started is left alone
+        however long it sits there: the operator asked for it, and this process
+        did not put it there. Reaping it anyway is what made the stack's own
+        boot-time servers disappear five minutes after a start, with the log
+        saying `idle-unloaded chat, embed` and nothing else to explain it.
+
+        The launcher remains the authority on what exists at boot. This is
+        only ever a garbage collector for models this supervisor started on
+        request.
+        """
         limit = idle_seconds()
         if limit <= 0:
             return []
@@ -454,7 +490,7 @@ class Manager:
         for name in sorted(ROLES, key=lambda n: ROLES[n].priority):
             role = ROLES[name]
             state = self.probe(role)
-            if not state.serving:
+            if not state.owned or not state.serving:
                 continue
             if time.monotonic() - state.last_used < limit:
                 continue
