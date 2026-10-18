@@ -426,13 +426,21 @@ class TestLauncherCannotExitOnStdinEOF:
         )
 
     def test_blocks_on_a_sleep_loop(self):
-        assert "while :; do sleep" in self._launcher()
+        assert "while :; do" in self._launcher()
 
-    def test_sleep_value_is_busybox_safe(self):
-        """`sleep infinity` is not portable; busybox rejects it."""
+    def test_sleep_values_are_busybox_safe(self):
+        """`sleep infinity` is not portable; busybox rejects it.
+
+        The loop also wakes every few seconds to notice being orphaned, so the
+        values are short and finite rather than one long sleep.
+        """
         text = self._launcher()
         assert "sleep infinity" not in text
-        assert "2147483647" in text
+        assert "2147483647" not in text, (
+            "the loop wakes periodically to check whether the launcher has "
+            "been orphaned, so a single hour-long sleep would leave the stack "
+            "running long after the terminal closed"
+        )
 
     def test_still_tells_the_operator_how_to_stop(self):
         text = self._launcher()
@@ -511,3 +519,58 @@ class TestOnlyOneLauncher:
         """The guard must not stop someone cleaning up."""
         text = self._code()
         assert "\n  stop)" in text
+
+
+class TestLauncherDoesNotLingerWhenOrphaned:
+    """A launcher whose terminal closed kept the whole stack hostage.
+
+    Measured on the device: `sh ~/bin/onb` with PPID=1, still running, still
+    holding :8080, :8081, the proot session and the guest stack. Its parent
+    terminal had gone, so init had adopted it.
+
+    `~/bin/onb stop` from a new terminal could not clear it: `proot-distro kill
+    ubuntu` only reaches sessions the *current* proot-distro invocation knows
+    about, and the login that registered that session exited long before. So
+    the next launch matched processes nothing was supervising and reported
+    `already up`.
+    """
+
+    def _code(self) -> str:
+        return "\n".join(
+            line
+            for line in _read("termux-launch.sh").splitlines()
+            if not line.lstrip().startswith("#")
+        )
+
+    def test_watches_its_own_parent(self):
+        text = self._code()
+        assert "PPid:" in text, (
+            "the launcher must notice being reparented to init; without that "
+            "check a closed terminal leaves the stack running forever"
+        )
+
+    def test_exits_when_orphaned(self):
+        text = self._code()
+        i = text.index("PPid:")
+        window = text[i : i + 400]
+        assert '= "1"' in window, "PPID 1 means init adopted it - the terminal is gone"
+        assert "break" in window, "the wait loop has to end so the teardown runs"
+
+    def test_wakes_often_enough_to_notice(self):
+        """A single long sleep would hold the stack for that long after the
+        terminal closes."""
+        text = self._code()
+        i = text.index("while :; do")
+        window = text[i : i + 200]
+        assert "sleep 5" in window or "sleep 3" in window, (
+            "the parent check has to run every few seconds, not once an hour"
+        )
+
+    def test_an_unreadable_status_does_not_kill_the_stack(self):
+        """`${_ppid:-1}` defaults to 1, which *looks* like an orphan. Verified
+        deliberately: a transient read failure must not tear down a working
+        stack."""
+        text = self._code()
+        i = text.index("PPid:")
+        window = text[i : i + 300]
+        assert "${_ppid:-1}" in window

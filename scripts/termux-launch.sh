@@ -283,8 +283,34 @@ case "${1:-up}" in
       # OOM killer, and nothing in the output said who sent it.
       #
       # A sleep loop cannot hit EOF. `sleep infinity` is not portable to
-      # busybox, so the large finite value is used instead.
-      while :; do sleep 2147483647; done
+      # busybox, so a long sleep is used - in short steps, because this loop
+      # also watches for the launcher being orphaned.
+      #
+      # Observed: PPID=1 on the launcher while it still held the stack. Its
+      # parent terminal had gone, so it was reparented to init and kept
+      # running - holding :8080, :8081, the proot session and the guest stack
+      # open indefinitely. `proot-distro kill ubuntu` could not reach the
+      # session, because the `proot-distro login` that registered it had long
+      # since exited, so `~/bin/onb stop` from a new terminal left everything
+      # in place.
+      #
+      # A foreground process whose terminal closes should go away. Exit when
+      # the parent does, and let --kill-on-exit and the teardown run: an
+      # orphaned launcher holding two ports and a whole guest stack is worse
+      # than no stack at all, because the next launch reports `already up`
+      # against processes nothing is supervising.
+      while :; do
+        sleep 5
+        # sed rather than awk: /proc/$$/status is rewritten constantly and a
+        # read can land on a partial line, which awk tolerates and sed does
+        # not - but the fallback below covers that case anyway.
+        _ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$$/status" 2>/dev/null)
+        if [ "${_ppid:-1}" = "1" ]; then
+          echo
+          echo "[onb] parent shell closed; shutting down"
+          break
+        fi
+      done
     '
     status=$?
     echo "[onb] guest session ended (status $status)"
