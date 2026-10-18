@@ -111,11 +111,86 @@ class TestHealthUrlPort:
 
 
 def _stop_body() -> str:
-    """`stop_stack`'s body, comments stripped."""
+    """`stop_stack`'s body, comments stripped.
+
+    Ends at the next *function definition* rather than at a comment, since the
+    body is read comment-free and a comment anchor cannot be found in it.
+    """
     code = _code(_read("termux-update.sh"))
     start = code.index("stop_stack() {")
-    end = code.index("launcher_pids() {", start)
-    return code[start:end]
+    return code[start : code.index("\nteardown_guest() {", start)]
+
+
+class TestUpdaterOwnsItsOwnTeardown:
+    """The updater cannot delegate its stop to the installed launcher.
+
+    `stop_stack` used to run `sh ~/bin/onb stop`. But `install-bin.sh`
+    reinstalls the wrappers during `do_apply`, which runs *after* `stop_stack`
+    in the main flow. So a `--restart` always stops the stack with the
+    previously installed launcher's logic, and a fix to the stop path cannot
+    take effect on the run that deploys it - only on the one after.
+
+    Observed on the device: a run that resolved 4dd3da5, which contains the
+    proot-distro teardown fix, still reported `the API is still answering`,
+    because `~/bin/onb` was still the copy from before it. The fix was present
+    in the repo and absent from the process that needed it.
+    """
+
+    @staticmethod
+    def _update() -> str:
+        return (REPO / "scripts" / "termux-update.sh").read_text(encoding="utf-8")
+
+    @classmethod
+    def _code(cls) -> str:
+        return "\n".join(
+            line
+            for line in cls._update().splitlines()
+            if not line.strip().startswith("#")
+        )
+
+    def test_stop_does_not_shell_out_to_the_installed_launcher(self):
+        body = _stop_body()
+        assert 'sh "$HOME/bin/onb" stop' not in body, (
+            "the installed launcher is reinstalled after this runs, so the stop "
+            "path is always one version behind the code being deployed"
+        )
+
+    def test_teardown_covers_guest_proot_and_launcher(self):
+        """Three owners, three calls, all inside stop_stack."""
+        body = _stop_body()
+        for call in ("teardown_guest", "kill_proot_sessions", "kill_launchers"):
+            assert call in body, f"stop_stack no longer calls {call}"
+
+    def test_guest_teardown_output_is_reported_not_discarded(self):
+        """Two failures here were invisible because stderr went to /dev/null."""
+        code = self._code()
+        start = code.index("teardown_guest() {")
+        body = code[start : code.index("\nproot_pids() {", start)]
+        assert "2>&1" in body and "$_out" in body, (
+            "the guest teardown's exit code and tail must reach the operator"
+        )
+        assert "say" in body, "a non-zero exit has to say so, not continue quietly"
+
+    def test_still_answering_names_what_to_inspect(self):
+        body = _stop_body()
+        assert "the API is still answering" in body
+        assert "Inspect with" in body, (
+            "the failure has to say how to find the holder, or it is a dead end"
+        )
+
+    def test_define_each_helper_once(self):
+        """A later definition silently wins in shell.
+
+        This file grew a second `launcher_pids` and `launcher_alive` when the
+        teardown moved here - and the older pair excluded nothing, so it would
+        have overridden the newer `$$` exclusion and had `kill_launchers` signal
+        the shell doing the stopping.
+        """
+        code = self._code()
+        for name in ("launcher_pids", "proot_pids"):
+            assert code.count(f"\n{name}() {{") == 1, (
+                f"{name} is defined more than once; the last one wins in shell"
+            )
 
 
 class TestStopActuallyStops:
@@ -143,10 +218,18 @@ class TestStopActuallyStops:
         it gets a signal. If one survives, the detached start below is refused
         by the launcher's own duplicate guard - which is how `--restart` came to
         report success while the old process tree kept serving.
+
+        The check now lives in `kill_launchers`, which stop_stack calls; it is
+        asserted there because that is where it is implemented.
         """
-        body = _stop_body()
+        code = _code(_read("termux-update.sh"))
+        body = code[
+            code.index("kill_launchers() {") : code.index(
+                "\n}\n", code.index("kill_launchers() {")
+            )
+        ]
         assert "launcher_alive" in body, (
-            "a launcher that outlives `onb stop` turns the restart into a no-op"
+            "a launcher that outlives the teardown turns the restart into a no-op"
         )
         assert "kill -9" in body, (
             "the launcher parks on a sleep loop and defers SIGTERM; without "
@@ -155,8 +238,17 @@ class TestStopActuallyStops:
 
     def test_refuses_to_start_when_a_launcher_cannot_be_killed(self):
         """Better to fail loudly than to print 'starting the stack again'."""
-        body = _stop_body()
+        code = _code(_read("termux-update.sh"))
+        body = code[
+            code.index("kill_launchers() {") : code.index(
+                "\n}\n", code.index("kill_launchers() {")
+            )
+        ]
         assert "survived SIGKILL" in body and "return 1" in body
+
+    def test_stop_stack_still_reaches_the_launcher_check(self):
+        """The move must not have orphaned the check."""
+        assert "kill_launchers" in _stop_body()
 
     def test_launcher_scan_matches_the_installed_path(self):
         """The scan has to look for the name the operator actually runs.

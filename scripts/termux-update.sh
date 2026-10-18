@@ -112,12 +112,24 @@ stack_is_up() {
 }
 
 stop_stack() {
-  say "  stopping the stack (onb stop)"
-  if [ -f "$HOME/bin/onb" ]; then
-    sh "$HOME/bin/onb" stop >/dev/null 2>&1
-  fi
-  # Belt and braces: the launcher parks on `read`, so it only exits on a
-  # signal or a closed stdin. Give it a moment, then escalate.
+  say "  stopping the stack"
+  # The teardown is done HERE, not delegated to `~/bin/onb stop`.
+  #
+  # That delegation was a structural bug: `install-bin.sh` reinstalls the
+  # wrappers during `do_apply`, which runs *after* this function. So a
+  # `--restart` always stops the stack with the previously installed
+  # launcher's logic, and a fix to the stop path cannot take effect on the run
+  # that deploys it - only on the next one. Observed on the device: a run that
+  # resolved 4dd3da5, which contains the proot-distro teardown fix, still
+  # reported "the API is still answering" because ~/bin/onb was still the copy
+  # from before it.
+  #
+  # An updater that cannot stop the stack with the code it already has is not
+  # an updater. So it stops it itself.
+  teardown_guest
+  kill_proot_sessions
+  kill_launchers
+
   n=0
   while [ "$n" -lt 15 ]; do
     stack_is_up || break
@@ -126,45 +138,81 @@ stop_stack() {
   done
   if stack_is_up; then
     say "  the API is still answering; giving up"
+    say "  something is holding :$API_PORT that this teardown does not name."
+    say "  Inspect with:  proot-distro login ubuntu -- sh -c 'ss -tlnp | grep $API_PORT'"
     return 1
-  fi
-  # The API going quiet is not the same as the stack having stopped.
-  #
-  # `onb stop` tears down the model servers, the embedder and the guest, but a
-  # foreground launcher parks on a sleep loop and only leaves on a signal or a
-  # closed stdin - and if one survives, the detached start below is refused by
-  # the launcher's own duplicate guard. The result is the silent no-op restart
-  # this function was supposed to prevent: "starting the stack again" printed,
-  # exit 0, and the old process tree still serving. So the launcher itself is
-  # checked, not just the port it was serving.
-  if [ -f "$HOME/bin/onb" ] && launcher_alive; then
-    say "  a launcher is still alive; killing it"
-    _lpids=$(launcher_pids)
-    for _p in $_lpids; do kill "$_p" 2>/dev/null; done
-    j=0
-    while [ "$j" -lt 10 ] && launcher_alive; do
-      sleep 1
-      j=$((j + 1))
-    done
-    if launcher_alive; then
-      for _p in $(launcher_pids); do kill -9 "$_p" 2>/dev/null; done
-      sleep 1
-    fi
-    if launcher_alive; then
-      say "  ERROR: a launcher survived SIGKILL (pid $(launcher_pids))."
-      say "  Starting another one would be refused, so this would be a no-op."
-      say "  Reboot the phone, then run this again."
-      return 1
-    fi
   fi
   return 0
 }
 
-# Is a `~/bin/onb` launcher still running?
+# Ask the guest to tear down its own services, by name.
 #
-# Scans /proc for the launcher's own path, and excludes nothing - a stale
-# launcher is exactly what is being hunted here, so unlike the launcher's own
-# `already_running` guard there is nothing here to accidentally match.
+# The guest services are the purpose-built script's to stop, and they are
+# `PPid 1` - reparented to init, not children of either proot. So killing the
+# proot processes does not touch them, and `--kill-on-exit` cannot either. Name
+# matching is the only thing that works, and termux-stack.sh owns those names.
+#
+# Output is captured rather than discarded. Two separate failures here have been
+# invisible because stderr went to /dev/null and the caller carried on.
+teardown_guest() {
+  if ! command -v proot-distro >/dev/null 2>&1; then
+    say "  (no proot-distro; skipping guest teardown)"
+    return 0
+  fi
+  _out=$(proot-distro login ubuntu -- \
+    sh /root/app/open-notebook-plusplus/scripts/termux-stack.sh down 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then
+    say "  guest stack stopped"
+  else
+    say "  guest teardown exited $_rc${_out:+: $(printf '%s' "$_out" | tail -2 | tr '\n' ' ')}"
+  fi
+}
+
+# proot processes for the ubuntu container, orphans included.
+#
+# There is no `proot-distro ps` in 5.3.0, so the command line is the only
+# handle. `--rootfs=` identifies them. Matches the bare path too, so a
+# non-default $PREFIX still resolves: over-matching is harmless here, and
+# under-matching would leave an orphan holding the database.
+proot_pids() {
+  for p in /proc/[0-9]*; do
+    _cl=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
+    case "$_cl" in
+      *"/containers/ubuntu/rootfs"*) echo "${p#/proc/}" ;;
+    esac
+  done
+}
+
+kill_proot_sessions() {
+  pids=$(proot_pids | grep -v "^$$\$" || true)
+  [ -n "$pids" ] || return 0
+  say "  stopping proot session(s) (pid $(echo "$pids" | tr '\n' ' '))"
+  for p in $pids; do kill "$p" 2>/dev/null; done
+  n=0
+  while [ "$n" -lt 8 ]; do
+    left=$(proot_pids | grep -v "^$$\$" || true)
+    [ -n "$left" ] || return 0
+    sleep 1
+    n=$((n + 1))
+  done
+  for p in $pids; do kill -9 "$p" 2>/dev/null; done
+  sleep 1
+  left=$(proot_pids | grep -v "^$$\$" || true)
+  if [ -n "$left" ]; then
+    say "  WARNING: proot survived SIGKILL (pid $(echo "$left" | tr '\n' ' '))"
+    return 1
+  fi
+  return 0
+}
+
+# Any `~/bin/onb` launcher. SIGTERM first, then SIGKILL.
+#
+# A launcher spends its life blocked on a foreground `proot-distro login`, and a
+# POSIX shell defers traps until the foreground command returns. The guest does
+# not return while the guest is running, so `kill <pid>` set a pending flag and
+# left the process alive - measured on the device, with SigCgt bit 14 set and
+# the process still in state S. Only SIGKILL reaches it.
 launcher_pids() {
   for p in /proc/[0-9]*; do
     _cl=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
@@ -174,8 +222,25 @@ launcher_pids() {
   done
 }
 
-launcher_alive() {
-  [ -n "$(launcher_pids)" ]
+kill_launchers() {
+  launcher_alive() { [ -n "$(launcher_pids | grep -v "^$$\$" || true)" ]; }
+  launcher_alive || return 0
+  say "  stopping launcher(s)"
+  for _p in $(launcher_pids | grep -v "^$$\$"); do kill "$_p" 2>/dev/null; done
+  j=0
+  while [ "$j" -lt 5 ] && launcher_alive; do
+    sleep 1
+    j=$((j + 1))
+  done
+  launcher_alive || return 0
+  for _p in $(launcher_pids | grep -v "^$$\$"); do kill -9 "$_p" 2>/dev/null; done
+  sleep 1
+  if launcher_alive; then
+    say "  ERROR: a launcher survived SIGKILL (pid $(launcher_pids))."
+    say "  Starting another would be refused, so this would be a no-op."
+    return 1
+  fi
+  return 0
 }
 
 # --- what would we update to? ---------------------------------------------
