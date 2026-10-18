@@ -566,6 +566,35 @@ class TestLauncherDoesNotLingerWhenOrphaned:
             "the parent check has to run every few seconds, not once an hour"
         )
 
+    def test_requires_sustained_orphaning(self):
+        """A single PPID=1 sample is not proof the terminal closed.
+
+        The launcher can briefly read 1 while the shell that spawned it is
+        being replaced. Tearing down on one sample looked exactly like the
+        stack dying by itself: `~/bin/onb` reported a duplicate within a
+        minute of starting, and was gone seconds later with nothing running and
+        nothing in any log.
+        """
+        text = self._code()
+        i = text.index("PPid:")
+        window = text[i : i + 500]
+        assert "_orphan" in window, (
+            "one sample is not proof; the condition must persist before the "
+            "stack is released"
+        )
+        assert "-ge 12" in window, (
+            "a full minute of sustained orphaning, not a single sample"
+        )
+
+    def test_a_live_parent_resets_the_counter(self):
+        """Otherwise a launcher that reads 1 twice in an hour still exits."""
+        text = self._code()
+        i = text.index("PPid:")
+        window = text[i : i + 500]
+        assert "_orphan=0" in window.split("else")[-1], (
+            "a sample showing a live parent must clear the accumulated count"
+        )
+
     def test_an_unreadable_status_does_not_kill_the_stack(self):
         """`${_ppid:-1}` defaults to 1, which *looks* like an orphan. Verified
         deliberately: a transient read failure must not tear down a working

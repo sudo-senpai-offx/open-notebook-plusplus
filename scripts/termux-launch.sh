@@ -299,6 +299,14 @@ case "${1:-up}" in
       # orphaned launcher holding two ports and a whole guest stack is worse
       # than no stack at all, because the next launch reports `already up`
       # against processes nothing is supervising.
+      # The condition has to *persist*. A single PPID=1 sample is not proof
+      # that the terminal closed: the launcher can briefly read 1 while the
+      # shell that spawned it is being replaced, and tearing the stack down on
+      # that looks like the stack spontaneously dying. Observed on the
+      # device - `~/bin/onb` reported a duplicate within a minute of starting
+      # and was gone seconds later, with nothing left running and nothing in
+      # any log.
+      _orphan=0
       while :; do
         sleep 5
         # sed rather than awk: /proc/$$/status is rewritten constantly and a
@@ -306,9 +314,16 @@ case "${1:-up}" in
         # not - but the fallback below covers that case anyway.
         _ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$$/status" 2>/dev/null)
         if [ "${_ppid:-1}" = "1" ]; then
-          echo
-          echo "[onb] parent shell closed; shutting down"
-          break
+          _orphan=$((_orphan + 1))
+          # 12 samples at 5s: a full minute of sustained orphaning before the
+          # stack is released.
+          if [ "$_orphan" -ge 12 ]; then
+            echo
+            echo "[onb] parent shell closed; shutting down"
+            break
+          fi
+        else
+          _orphan=0
         fi
       done
     '
