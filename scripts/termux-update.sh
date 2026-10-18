@@ -101,36 +101,31 @@ stack_is_up() {
   if command -v curl >/dev/null 2>&1; then
     curl -s -m 3 -o /dev/null "$HEALTH_URL" 2>/dev/null && return 0
   fi
-  # No curl: fall back to the guest's python, which is always present.
-  if [ -x "$ROOTFS/usr/bin/python3" ] && [ -d "$REPO" ]; then
-    proot-distro login ubuntu -- \
-      /usr/bin/python3 -c \
-      "import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(0 if s.connect_ex(('127.0.0.1',$API_PORT))==0 else 1)" \
-      >/dev/null 2>&1 && return 0
-  fi
+  # No curl: look for the uvicorn process directly in Termux's own /proc.
+  # Runs as the same UID, so /proc is readable, and avoids proot-distro login
+  # entirely - that can hang when the guest session is gone.
+  for _d in /proc/[0-9]*; do
+    _cl=$(tr '\0' ' ' <"$_d/cmdline" 2>/dev/null) || continue
+    case "$_cl" in *"uvicorn api.main:app"*) return 0 ;; esac
+  done
   return 1
 }
 
 stop_stack() {
   say "  stopping the stack"
 
-  # First, ask the guest to tear itself down - it knows its own services and
-  # can shut them down cleanly. Runs via proot-distro login.
-  teardown_guest || true
-
-  # Then, directly kill anything still running. The guest services are
-  # `PPid 1` - reparented to init when their proot session died - so killing
-  # proot does not touch them, and `--kill-on-exit` cannot reach them either.
-  # They are visible in Termux's own /proc and run as the same UID, so
-  # SIGTERM/SIGKILL reaches them. This avoids proot-distro entirely: 5.3.0
-  # removed both `ps` and `kill`, and `proot-distro login` depends on a
-  # session that may not exist or may not reach PPid-1 processes.
-  #
-  # Matched on the full cmdline, not argv0 - argv0 is just "python" or
-  # "surreal" for all four services and cannot tell them apart.
+  # Kill the guest services directly from Termux - they are visible in our own
+  # /proc and run as the same UID, so SIGTERM/SIGKILL reaches them even though
+  # they are PPid 1 (reparented to init when their proot session died).
   kill_guest_services || say "  WARNING: some guest services could not be stopped"
   kill_proot_sessions || say "  WARNING: some proot sessions could not be stopped"
   kill_launchers || return 1
+
+  # Best-effort: ask the guest to tear itself down cleanly too, in case any
+  # service name we don't match is still running. proot-distro login can hang
+  # when the guest session is gone, so this is after the direct kill, not
+  # before it.
+  teardown_guest || true
 
   n=0
   while [ "$n" -lt 15 ]; do
