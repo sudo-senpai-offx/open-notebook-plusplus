@@ -192,11 +192,42 @@ wait_for_llama() {
   return 1
 }
 
+# Refuse a second launcher while one is already up.
+#
+# Two `~/bin/onb` processes each start a chat server and each run onb-embed up,
+# and they race: the second sees the embedder mid-start, gets no health check
+# back inside its timeout, decides it is stale, and starts another. Observed on
+# the device - five processes claiming :8081, two of which appeared between two
+# consecutive checks seconds apart. llama-server binds with SO_REUSEPORT, so
+# several can hold the port and the kernel hands requests to whichever it picks,
+# some of which have no model loaded.
+#
+# The two launchers then fight on the way out: whichever exits first runs
+# stop_llama and onb-embed down and takes the other's servers with it. Same
+# failure as the EOF bug, reached by a different route.
+already_running() {
+  for p in /proc/[0-9]*; do
+    [ "$p" = "/proc/$$" ] && continue
+    cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    case "$cmd" in
+      *"$HOME/bin/onb"*) echo "${p#/proc/}"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
 case "${1:-up}" in
   stop)
     stop_all
     ;;
   up)
+    if other=$(already_running); then
+      echo "[onb] already running (pid $other) - not starting a second launcher."
+      echo "      Two launchers race for :8080 and :8081, and the first to exit"
+      echo "      stops the other's servers. Use the running one, or:"
+      echo "        ~/bin/onb stop      # then start again"
+      exit 1
+    fi
     trap 'stop_llama; exit 0' INT TERM
     start_llama || exit 1
     wait_for_llama

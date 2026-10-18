@@ -449,3 +449,65 @@ class TestLauncherCannotExitOnStdinEOF:
         assert "stop_llama" in text[start : start + 300], (
             "Ctrl+C has to reach the teardown, or the stack cannot be stopped at all"
         )
+
+
+class TestOnlyOneLauncher:
+    """Two `~/bin/onb` processes race, and llama-server binds SO_REUSEPORT.
+
+    Each launcher starts a chat server and runs `onb-embed up`. The second
+    sees the embedder mid-start, gets no health check back inside its timeout,
+    decides it is stale, and starts another. Measured on the device: five
+    processes claiming :8081, two of which appeared between two consecutive
+    checks seconds apart. With SO_REUSEPORT several can hold the port and the
+    kernel hands requests to whichever it picks - some with no model loaded.
+
+    They also fight on exit: whichever ends first runs `stop_llama` and
+    `onb-embed down` and takes the other's servers with it. That is the
+    launcher-exit failure reached by a different route.
+    """
+
+    def _code(self) -> str:
+        return "\n".join(
+            line
+            for line in _read("termux-launch.sh").splitlines()
+            if not line.lstrip().startswith("#")
+        )
+
+    def test_has_a_duplicate_guard(self):
+        assert "already_running()" in self._code()
+
+    def test_guard_is_on_the_up_path(self):
+        text = self._code()
+        i = text.index("  up)")
+        assert "already_running" in text[i : i + 300], (
+            "the guard has to run before anything is started, or the second "
+            "launcher has already raced by then"
+        )
+
+    def test_guard_refuses_rather_than_replacing(self):
+        """Silently taking over would kill the first launcher's servers, which
+        is the same failure as the EOF bug."""
+        text = self._code()
+        i = text.index("if other=$(already_running); then")
+        # End at the refusal, not after it: the next line installs the INT
+        # trap, which legitimately mentions stop_llama.
+        window = text[i : text.index("exit 1", i)]
+        assert "exit 1" not in window
+        assert "stop_llama" not in window, (
+            "the refusal path must not stop anything - that is what the "
+            "running launcher owns"
+        )
+
+    def test_guard_excludes_itself(self):
+        text = self._code()
+        i = text.index("already_running()")
+        body = text[i : text.index("\n}\n", i)]
+        assert "/proc/$$" in body, (
+            "without excluding its own pid the guard always matches itself and "
+            "the launcher can never start"
+        )
+
+    def test_stop_is_still_reachable(self):
+        """The guard must not stop someone cleaning up."""
+        text = self._code()
+        assert "\n  stop)" in text
