@@ -30,6 +30,20 @@ PORT="${EMBED_PORT:-8081}"
 LLAMA="$HOME/llama.cpp/build/bin/llama-server"
 LOG="$HOME/llama-embed.log"
 
+# The same derived budget the chat server uses, from the same library - so the
+# two classes together stay inside one shared allowance rather than each
+# claiming threads on its own account.
+if [ -f "$HOME/bin/onb-cpu" ]; then
+  . "$HOME/bin/onb-cpu" >/dev/null 2>&1 || true
+fi
+if command -v cpu_threads >/dev/null 2>&1; then
+  EMBED_THREADS=$(cpu_threads embed)
+  CPU_AFFINITY=$(cpu_affinity_prefix)
+else
+  EMBED_THREADS=2
+  CPU_AFFINITY=""
+fi
+
 pid_of() {
   for p in /proc/[0-9]*; do
     cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
@@ -183,8 +197,10 @@ case "${1:-up}" in
       echo "          https://huggingface.co/ggml-org/bge-small-en-v1.5-Q8_0-GGUF/resolve/main/bge-small-en-v1.5-q8_0.gguf"
       exit 1
     fi
-    echo "[embed] starting $(basename "$MODEL") on :${PORT} (2 threads, 512 ctx, embeddings)"
-    nohup "$LLAMA" -m "$MODEL" --embeddings -t 2 -c 512 \
+    echo "[embed] starting $(basename "$MODEL") on :${PORT} (${EMBED_THREADS} threads, 512 ctx, embeddings)"
+    # Unquoted on purpose: empty, or the words `taskset -c <list>`.
+    # shellcheck disable=SC2086
+    nohup $CPU_AFFINITY "$LLAMA" -m "$MODEL" --embeddings -t "$EMBED_THREADS" -c 512 \
       --port "$PORT" >>"$LOG" 2>&1 &
     if wait_healthy; then
       echo "[embed] healthy"

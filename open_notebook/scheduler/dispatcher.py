@@ -52,7 +52,9 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from open_notebook.residency import client as residency
+from open_notebook.residency import (
+    client as residency,
+)
 from open_notebook.scheduler.footprint import (
     FootprintEstimate,
     JobFootprint,
@@ -186,6 +188,32 @@ class DispatchOutcome:
         return len(self.promoted)
 
 
+#: Threads each workload class wants while a job of it is in flight.
+#:
+#: Read from the supervisor's catalogue rather than stated here, because the
+#: supervisor derives them from the device's actual topology and the launchers
+#: start the servers with those same numbers. A copy in this file would be a
+#: third answer to "how many threads does chat use", and it would be the one
+#: nothing else is obeying.
+#:
+#: None means unknown - no supervisor, or an unreadable topology - and then no
+#: CPU limit is enforced at all, which is the safe direction: it holds nothing
+#: on the strength of a guess.
+DEFAULT_ROLE_THREADS: Dict[str, int] = {"chat": 2, "embed": 2}
+
+
+def role_threads(
+    policy: Optional[Dict[str, residency.RolePolicy]],
+) -> Dict[str, int]:
+    """Threads per class, from the supervisor."""
+    if policy is None:
+        return {}
+    found: Dict[str, int] = {}
+    for role in policy.values():
+        found[role.role] = role.threads
+    return found
+
+
 async def _fetch_jobs() -> Dict[str, List[Dict[str, Any]]]:
     """Held and in-flight jobs, split by what the gate needs from each.
 
@@ -301,6 +329,15 @@ def _role_counts(
     return counts
 
 
+def _cpu_committed(live: List[Dict[str, Any]], threads: Dict[str, int]) -> int:
+    """Thread-holdings of in-flight jobs, one entry per class."""
+    counts = _role_counts(live, None)
+    total = 0
+    for role, count in counts.items():
+        total += count * threads.get(role, 0)
+    return total
+
+
 def _order_held(
     held: List[Dict[str, Any]],
     policy: Optional[Dict[str, residency.RolePolicy]],
@@ -390,6 +427,12 @@ async def dispatch_once(
     if policy:
         held_rows = _order_held(held_rows, policy, generation_bytes)
 
+    # Shared CPU budget, fetched once like the policy. None means unknown - no
+    # supervisor or an unreadable topology - and then nothing is enforced.
+    cap = await residency.cpu_budget() if residency.enabled() else None
+    threads = role_threads(policy) if policy else {}
+    committed_cpu = _cpu_committed(live_rows, threads)
+
     for row in held_rows:
         roles = _roles_of(row, generation_bytes)
 
@@ -441,6 +484,9 @@ async def dispatch_once(
             committed=committed,
             candidate=_footprint_of(row, generation_bytes),
             memory=reading,
+            cpu_committed=committed_cpu,
+            cpu_candidate=sum(threads.get(r, 0) for r in roles),
+            cpu_budget=cap,
         )
         if not decision.admit:
             outcome.held_reasons[decision.reason] = (
@@ -472,6 +518,7 @@ async def dispatch_once(
         # would be admitted in the same pass past a limit just reached.
         for role in roles:
             counts[role] = counts.get(role, 0) + 1
+        committed_cpu += sum(threads.get(r, 0) for r in roles)
         # Recompute after every promotion. Reusing a snapshot taken once per
         # pass is how a pass admits three jobs that only fit one at a time.
         committed = committed.merge(

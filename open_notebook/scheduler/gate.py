@@ -66,6 +66,7 @@ HeldReason = Literal[
     "memory",
     "unknown-footprint",
     "memory-unreadable",
+    "cpu-budget",
 ]
 
 
@@ -161,8 +162,24 @@ def evaluate(
     reserve: int | None = None,
     ceiling_fraction: float = 0.85,
     model_pool: int | None = None,
+    cpu_committed: int = 0,
+    cpu_candidate: int = 0,
+    cpu_budget: int | None = None,
 ) -> GateDecision:
-    """Decide whether to admit `candidate` right now."""
+    """Decide whether to admit `candidate` right now.
+
+    CPU is a second, independent resource and is held the same way memory is:
+    a job that will not fit is postponed, never shrunk. It is checked
+    separately and reported under its own reason, because "the device has no
+    memory" and "the device has no CPU headroom" need different responses and
+    an operator told the wrong one will change the wrong setting.
+
+    `cpu_budget=None` means the budget is unknown - no supervisor, or a device
+    whose topology could not be read - and then nothing is enforced. That is
+    deliberate: inventing a budget from a core count guessed in this file would
+    hold work for limits nothing else is obeying, with no way to explain the
+    hold.
+    """
     incremental = incremental_cost(committed, candidate)
     projected = committed.total + incremental
 
@@ -174,6 +191,21 @@ def evaluate(
         return GateDecision(
             admit=False, reason="window-full", incremental=incremental, projected=0
         )
+
+    if cpu_budget is not None:
+        cpu_projected = cpu_committed + max(0, cpu_candidate)
+        if cpu_projected > cpu_budget:
+            # Postponed, not killed, and not queued behind itself. The work is
+            # still held; it becomes admissible when another class finishes and
+            # returns its threads. Chat outranks embedding because the ordering
+            # that reaches this gate already put it first, which is what makes
+            # "deprioritise, never kill" true for CPU as well as for memory.
+            return GateDecision(
+                admit=False,
+                reason="cpu-budget",
+                incremental=incremental,
+                projected=projected,
+            )
 
     if not memory.readable:
         # Degraded, not blocked. One at a time.

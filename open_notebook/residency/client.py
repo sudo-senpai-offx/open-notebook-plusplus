@@ -179,14 +179,19 @@ class RolePolicy:
     """Per-class admission limits, owned by the supervisor.
 
     Fetched rather than duplicated. The same numbers appear in
-    `termux-supervisor.py`, and a second copy in the guest would drift the
-    moment one side changed - and the drift would be silent, because each side
-    would still be self-consistent.
+    `termux-supervisor.py` and are derived there from the device's actual core
+    topology, and the launchers start the servers with those same figures. A
+    copy in the guest would drift the moment one side changed - and the drift
+    would be silent, because each side would still be self-consistent.
     """
 
     role: str
     priority: int = 50
     max_concurrent_jobs: int = 1
+    #: Threads this class holds while a job of it runs. Charged against the
+    #: shared CPU budget alongside memory, so the two resources are held the
+    #: same way and for the same reason.
+    threads: int = 2
 
 
 async def policies() -> Optional[Dict[str, RolePolicy]]:
@@ -224,10 +229,48 @@ async def policies() -> Optional[Dict[str, RolePolicy]]:
                 role=str(name),
                 priority=int(entry.get("priority", 50)),
                 max_concurrent_jobs=int(entry.get("max_concurrent_jobs", 1)),
+                threads=max(0, int(entry.get("threads", 2))),
             )
         except (TypeError, ValueError):
             continue
     return found or None
+
+
+async def cpu_budget() -> Optional[int]:
+    """The shared thread allowance, or None when it cannot be had.
+
+    None means no CPU limit is enforced. That is the safe direction: the gate
+    would otherwise hold work against a budget derived from a core count
+    guessed somewhere other than the device, and the hold would have no cause
+    the operator could find.
+    """
+    if not enabled():
+        return None
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{base_url()}/models")
+    except Exception as exc:  # noqa: BLE001 - no budget is no cpu limit
+        logger.debug(f"residency cpu budget unavailable: {exc}")
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    cpu = payload.get("cpu")
+    if not isinstance(cpu, dict) or not cpu.get("available"):
+        return None
+    budget_raw = cpu.get("budget")
+    if not isinstance(budget_raw, (int, str)):
+        return None
+    try:
+        value = int(budget_raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 async def state() -> Optional[Dict[str, Any]]:

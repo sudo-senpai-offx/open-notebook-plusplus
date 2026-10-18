@@ -58,6 +58,29 @@ fi
 LLAMA="$HOME/llama.cpp/build/bin/llama-server"
 LOG="$HOME/llama-server.log"
 
+# CPU topology and the derived thread budget. Sourced, not run, so the chat
+# server, the embedder and the supervisor cannot each derive their own.
+#
+# The budget is a fraction of total cores, not a fixed number, so an 8-core
+# Cortex-A53 floor and a 4x A73 + 4x A53 phone get the same *share* and the
+# phone cashes the difference in as faster threads rather than more of them.
+# Android, the WebView and the guest's four services keep their half.
+if [ -f "$HOME/bin/onb-cpu" ]; then
+  . "$HOME/bin/onb-cpu" >/dev/null 2>&1 || true
+fi
+if command -v cpu_threads >/dev/null 2>&1; then
+  CHAT_THREADS=$(cpu_threads chat)
+  CHAT_BATCH=$(cpu_batch_threads)
+  CPU_AFFINITY=$(cpu_affinity_prefix)
+else
+  # The library is missing or failed to source. These are the values it
+  # derives on an 8-core device, so a stack with no topology library behaves
+  # like the floor rather than like something undefined.
+  CHAT_THREADS=2
+  CHAT_BATCH=4
+  CPU_AFFINITY=""
+fi
+
 # Where the ubuntu container lives, for identifying its proot processes.
 #
 # Derived rather than hardcoded so it follows a non-default Termux prefix, and
@@ -69,7 +92,11 @@ ROOTFS_UBUNTU="$PREFIX/var/lib/proot-distro/containers/ubuntu/rootfs"
 # Always pin these. llama-server defaults allocate 4x32768 = 131072 tokens of
 # KV cache, which is ~1.6 GB for a 390 MB model and more for the 1.5B. On
 # SD680 the 0.5B sits at 492 MB RSS with these values.
-LLAMA_ARGS="-t 2 -c $LLAMA_CTX -np 1 --port 8080"
+# `-t` is decode threads and `-tb` is prompt-ingestion threads, and they are
+# different jobs: decode waits on the memory bus, prefill is compute bound and
+# scales. So prefill gets the whole inference share while the decode budget
+# stays reserved for the interactive path that needs it.
+LLAMA_ARGS="-t $CHAT_THREADS -tb $CHAT_BATCH -c $LLAMA_CTX -np 1 --port 8080"
 
 pids_of() {
   # Every process whose *executable* is $1. Not the first match.
@@ -303,9 +330,15 @@ start_llama() {
   }
   [ -x "$LLAMA" ] || { echo "[onb] FATAL: llama-server missing at $LLAMA"; return 1; }
 
+  # $CPU_AFFINITY is intentionally unquoted: it is either empty or the three
+  # words `taskset -c <list>`, and quoting it would pass one argument.
   # shellcheck disable=SC2086
-  nohup "$LLAMA" -m "$MODEL" $LLAMA_ARGS >>"$LOG" 2>&1 &
-  echo "[onb] llama-server starting (2 threads, ${LLAMA_CTX} ctx)"
+  nohup $CPU_AFFINITY "$LLAMA" -m "$MODEL" $LLAMA_ARGS >>"$LOG" 2>&1 &
+  if [ -n "$CPU_AFFINITY" ]; then
+    echo "[onb] llama-server starting (${CHAT_THREADS} threads / ${CHAT_BATCH} batch, pinned to ${CPU_FAST_MASK}, ${LLAMA_CTX} ctx)"
+  else
+    echo "[onb] llama-server starting (${CHAT_THREADS} threads / ${CHAT_BATCH} batch, ${LLAMA_CTX} ctx)"
+  fi
 }
 
 wait_for_llama() {

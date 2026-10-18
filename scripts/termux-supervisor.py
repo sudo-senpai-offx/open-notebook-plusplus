@@ -96,6 +96,10 @@ class Role:
     #: Jobs of this class that may run at once. Embedding is small and benefits
     #: from a little parallelism; chat generation is single-stream.
     max_concurrent_jobs: int
+    #: Threads this class holds while a job of it runs, from `cpu_threads` in
+    #: onb-cpu. Charged against the shared CPU budget by the guest's admission
+    #: gate so CPU and memory are held alike.
+    threads: int = 2
 
 
 ROLES: Dict[str, Role] = {
@@ -108,6 +112,7 @@ ROLES: Dict[str, Role] = {
         port=8080,
         priority=10,
         max_concurrent_jobs=1,
+        threads=2,
     ),
     "embed": Role(
         name="embed",
@@ -118,6 +123,7 @@ ROLES: Dict[str, Role] = {
         port=8081,
         priority=50,
         max_concurrent_jobs=2,
+        threads=2,
     ),
 }
 
@@ -212,6 +218,87 @@ def idle_seconds() -> int:
         return max(0, int(raw))
     except ValueError:
         return DEFAULT_IDLE_SECONDS
+
+
+_CPU_CACHE: Optional[Dict[str, Any]] = None
+
+
+def cpu_budget() -> Dict[str, Any]:
+    """Ask the shell library for the shared CPU allowance.
+
+    Read by running `onb-cpu` with a probe command, because that library is the
+    single derivation the launchers use. Re-implementing the arithmetic here
+    would be a second answer to "how many threads may inference use", and the
+    two could disagree while each stayed self-consistent - which is the shape of
+    every drift bug in this project.
+
+    Cached: the topology does not move, and this is polled.
+    """
+    global _CPU_CACHE
+    if _CPU_CACHE is not None:
+        return _CPU_CACHE
+    probe = (
+        '. "$HOME/bin/onb-cpu" >/dev/null 2>&1 || true; '
+        "if command -v cpu_summary >/dev/null 2>&1; then cpu_summary; fi"
+    )
+    code, out, _ = run(["sh", "-c", probe], 10.0)
+    if code != 0 or not out.strip():
+        _CPU_CACHE = {
+            "available": False,
+            "reason": "onb-cpu not installed or unreadable",
+        }
+        return _CPU_CACHE
+    _CPU_CACHE = {
+        "available": True,
+        "summary": out.strip(),
+        "cores": _int_from(out, "cores"),
+        "big_cores": _int_from(out, "big"),
+        "budget": _int_from(out, "budget"),
+    }
+    return _CPU_CACHE
+
+
+_THREADS_CACHE: Dict[str, int] = {}
+
+
+def role_threads(name: str) -> int:
+    """Threads one class uses, from the derivation the launchers used.
+
+    Read through the same shell library rather than stated here, so the number
+    the gate charges against the budget is the number the server was started
+    with. Cached because the topology does not move and this sits in a probe
+    path.
+
+    Falls back to 2 - what an 8-core device derives anyway - when the library is
+    absent, so the budget stays coherent rather than one side guessing.
+    """
+    if not _THREADS_CACHE and cpu_budget().get("available"):
+        probe = (
+            '. "$HOME/bin/onb-cpu" >/dev/null 2>&1 || true; '
+            "if command -v cpu_threads >/dev/null 2>&1; then "
+            f"cpu_threads {name}; fi"
+        )
+        code, out, _ = run(["sh", "-c", probe], 10.0)
+        if code == 0 and out.strip().isdigit():
+            _THREADS_CACHE[name] = max(1, int(out.strip()))
+    return _THREADS_CACHE.get(name, 2)
+
+
+def _int_from(text: str, key: str) -> Optional[int]:
+    """Pull an integer out of the library's one-line summary.
+
+    Two orders, because the summary reads naturally either way: `cores 8` puts
+    the value after the word, `(4 big: 4,5,6,7)` puts it before. Both are
+    tried rather than guessing which, and neither matching returns None rather
+    than a plausible wrong number.
+    """
+    import re
+
+    after = re.search(rf"\b{key}\s+(\d+)", text)
+    if after:
+        return int(after.group(1))
+    before = re.search(rf"\b(\d+)\s+{key}\b", text)
+    return int(before.group(1)) if before else None
 
 
 @dataclass
@@ -312,6 +399,7 @@ class Manager:
         stale the moment a model is added or removed, and a stale size is worse
         than no size here - it is what the memory ceiling is computed from.
         """
+        cpu = cpu_budget()
         roles: Dict[str, Any] = {}
         for name, role in ROLES.items():
             state = self.probe(role)
@@ -333,10 +421,23 @@ class Manager:
                 "port": role.port,
                 "priority": role.priority,
                 "max_concurrent_jobs": role.max_concurrent_jobs,
+                # What the launchers actually started this class with, from the
+                # same derivation. Charged against the shared budget by the
+                # guest's admission gate, so CPU and memory are held alike.
+                "threads": role.threads,
                 "idle_seconds": idle_seconds(),
                 "last_used_age": round(time.monotonic() - state.last_used, 1),
             }
-        return {"roles": roles}
+        return {"roles": roles, "cpu": cpu}
+
+    def cpu(self) -> Dict[str, Any]:
+        """The shared CPU allowance, for the guest's admission gate.
+
+        Sourced from the same shell library the launchers use, so the gate holds
+        a job against the same budget the launchers actually started with. A
+        second derivation in Python would be a second answer.
+        """
+        return cpu_budget()
 
     def snapshot(self) -> Dict[str, Any]:
         return {

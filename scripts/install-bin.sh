@@ -95,6 +95,11 @@ install_one termux-config.sh onb-config || rc=1
 # types matches what they read in the repo, and `install_one` stays the only
 # place the mapping is written down.
 install_one termux-supervisor.py onb-residency || rc=1
+# onb-cpu is *sourced*, not run, and is executable only because install_one
+# chmods everything it copies. The launcher and the embedder both read their
+# thread budgets from it, so it has to land in the same deploy as the scripts
+# that consume it - a missing one silently falls back to the floor's values.
+install_one termux-cpu.sh     onb-cpu      || rc=1
 refresh_guest_launcher || true
 
 echo
