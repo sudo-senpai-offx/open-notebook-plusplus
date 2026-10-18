@@ -237,6 +237,15 @@ case "${1:-up}" in
       echo "        ~/bin/onb stop      # then start again"
       exit 1
     fi
+    # Whether this launch is in the foreground, decided HERE.
+    #
+    # Inside the guest session stdin is a pipe, so `test -t 0` there is always
+    # false and the orphan check would never arm. The value is exported and
+    # read back by the guest block below.
+    ONB_FOREGROUND=0
+    [ -t 0 ] && ONB_FOREGROUND=1
+    export ONB_FOREGROUND
+
     trap 'stop_llama; exit 0' INT TERM
     start_llama || exit 1
     wait_for_llama
@@ -306,6 +315,17 @@ case "${1:-up}" in
       # device - `~/bin/onb` reported a duplicate within a minute of starting
       # and was gone seconds later, with nothing left running and nothing in
       # any log.
+      # Only a *foreground* launcher can have its terminal close under it.
+      #
+      # `onb-update --restart` starts the stack with `nohup ... &`, so a
+      # detached launcher has PPID=1 from the moment it begins - by design -
+      # and applying the check to it tears the stack down a minute later. That
+      # broke the documented restart path: the updater reported success, and
+      # the stack it started was gone before anyone looked at it.
+      #
+      # `test -t 0` is taken here, in the launcher shell, before the
+      # guest session replaces stdin with a pipe.
+      _foreground="${ONB_FOREGROUND:-0}"
       _orphan=0
       while :; do
         sleep 5
@@ -313,6 +333,10 @@ case "${1:-up}" in
         # read can land on a partial line, which awk tolerates and sed does
         # not - but the fallback below covers that case anyway.
         _ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$$/status" 2>/dev/null)
+        if [ "$_foreground" = "0" ]; then
+          # Detached by the updater. Nothing to observe; just stay up.
+          continue
+        fi
         if [ "${_ppid:-1}" = "1" ]; then
           _orphan=$((_orphan + 1))
           # 12 samples at 5s: a full minute of sustained orphaning before the

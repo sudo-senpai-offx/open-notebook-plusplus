@@ -603,3 +603,62 @@ class TestLauncherDoesNotLingerWhenOrphaned:
         i = text.index("PPid:")
         window = text[i : i + 300]
         assert "${_ppid:-1}" in window
+
+
+class TestDetachedLauncherIsNotAnOrphan:
+    """`onb-update --restart` starts the stack detached, and must survive.
+
+    The updater runs `nohup sh "$HOME/bin/onb" >/dev/null 2>&1 &`, so a
+    detached launcher has PPID=1 from the moment it begins - by design.
+    Applying the orphan check to it tore the stack down a minute later: the
+    updater reported success, and the stack it had just started was gone before
+    anyone looked at it. The user then ran `~/bin/onb` and got a refusal to
+    start a second launcher, naming a pid that no longer existed.
+    """
+
+    def _code(self) -> str:
+        return "\n".join(
+            line
+            for line in _read("termux-launch.sh").splitlines()
+            if not line.lstrip().startswith("#")
+        )
+
+    def test_records_whether_it_is_foreground(self):
+        text = self._code()
+        assert "[ -t 0 ]" in text, (
+            "only a foreground launch can have a terminal close under it; a "
+            "detached one is orphaned by design"
+        )
+
+    def test_the_value_is_exported_to_the_guest(self):
+        """Inside the guest session stdin is a pipe, so testing it there is
+        always false and the check would silently never arm."""
+        text = self._code()
+        assert "export ONB_FOREGROUND" in text, (
+            "the tty test has to happen in the launcher shell and be passed "
+            "into the guest block; stdin inside proot is a pipe"
+        )
+        assert "${ONB_FOREGROUND:-0}" in text, (
+            "the guest block must read the exported value, not test stdin"
+        )
+
+    def test_skips_the_orphan_check_when_detached(self):
+        text = self._code()
+        i = text.index("[ -t 0 ]")
+        window = text[i : i + 900]
+        assert '_foreground" = "0"' in window, (
+            "a detached launcher must not tear the stack down for having "
+            "PPID=1, which is how it was started"
+        )
+        assert "continue" in window, "the check has to be skipped, not merely softened"
+
+    def test_the_tty_check_runs_before_proot_replaces_stdin(self):
+        """Inside the guest session stdin is a pipe, so `test -t 0` there is
+        always false and the check would never arm."""
+        text = self._code()
+        tty = text.index("[ -t 0 ]")
+        guest = text.index("proot-distro login ubuntu")
+        assert tty < guest, (
+            "test -t 0 has to be evaluated in the launcher shell, before the "
+            "guest session substitutes stdin with a pipe"
+        )
