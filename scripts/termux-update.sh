@@ -113,22 +113,24 @@ stack_is_up() {
 
 stop_stack() {
   say "  stopping the stack"
-  # The teardown is done HERE, not delegated to `~/bin/onb stop`.
+
+  # First, ask the guest to tear itself down - it knows its own services and
+  # can shut them down cleanly. Runs via proot-distro login.
+  teardown_guest || true
+
+  # Then, directly kill anything still running. The guest services are
+  # `PPid 1` - reparented to init when their proot session died - so killing
+  # proot does not touch them, and `--kill-on-exit` cannot reach them either.
+  # They are visible in Termux's own /proc and run as the same UID, so
+  # SIGTERM/SIGKILL reaches them. This avoids proot-distro entirely: 5.3.0
+  # removed both `ps` and `kill`, and `proot-distro login` depends on a
+  # session that may not exist or may not reach PPid-1 processes.
   #
-  # That delegation was a structural bug: `install-bin.sh` reinstalls the
-  # wrappers during `do_apply`, which runs *after* this function. So a
-  # `--restart` always stops the stack with the previously installed
-  # launcher's logic, and a fix to the stop path cannot take effect on the run
-  # that deploys it - only on the next one. Observed on the device: a run that
-  # resolved 4dd3da5, which contains the proot-distro teardown fix, still
-  # reported "the API is still answering" because ~/bin/onb was still the copy
-  # from before it.
-  #
-  # An updater that cannot stop the stack with the code it already has is not
-  # an updater. So it stops it itself.
-  teardown_guest
-  kill_proot_sessions
-  kill_launchers
+  # Matched on the full cmdline, not argv0 - argv0 is just "python" or
+  # "surreal" for all four services and cannot tell them apart.
+  kill_guest_services || say "  WARNING: some guest services could not be stopped"
+  kill_proot_sessions || say "  WARNING: some proot sessions could not be stopped"
+  kill_launchers || return 1
 
   n=0
   while [ "$n" -lt 15 ]; do
@@ -147,13 +149,9 @@ stop_stack() {
 
 # Ask the guest to tear down its own services, by name.
 #
-# The guest services are the purpose-built script's to stop, and they are
-# `PPid 1` - reparented to init, not children of either proot. So killing the
-# proot processes does not touch them, and `--kill-on-exit` cannot either. Name
-# matching is the only thing that works, and termux-stack.sh owns those names.
-#
-# Output is captured rather than discarded. Two separate failures here have been
-# invisible because stderr went to /dev/null and the caller carried on.
+# Best effort: if proot-distro login cannot reach the guest (session missing,
+# or the guest processes are already PPid 1), this returns non-zero and the
+# direct kill below takes over. Output is captured rather than discarded.
 teardown_guest() {
   if ! command -v proot-distro >/dev/null 2>&1; then
     say "  (no proot-distro; skipping guest teardown)"
@@ -167,6 +165,41 @@ teardown_guest() {
   else
     say "  guest teardown exited $_rc${_out:+: $(printf '%s' "$_out" | tail -2 | tr '\n' ' ')}"
   fi
+  return "$_rc"
+}
+
+# Kill the guest services directly from Termux by matching their full cmdline.
+#
+# Returns 0 when nothing matching remains, 1 when something survives.
+kill_guest_services() {
+  _sig=TERM
+  _n=0
+  while [ "$_n" -lt 2 ]; do
+    _pids=""
+    for _d in /proc/[0-9]*; do
+      _cl=$(tr '\0' ' ' <"$_d/cmdline" 2>/dev/null) || continue
+      case "$_cl" in
+        *"surreal start"*) _pids="$_pids ${_d#/proc/}" ;;
+        *"uvicorn api.main:app"*) _pids="$_pids ${_d#/proc/}" ;;
+        *"surreal-commands-worker"*) _pids="$_pids ${_d#/proc/}" ;;
+        *"next-server"*) _pids="$_pids ${_d#/proc/}" ;;
+      esac
+    done
+    [ -n "$_pids" ] || return 0
+    for _p in $_pids; do kill -$_sig "$_p" 2>/dev/null; done
+    sleep 2
+    _sig=KILL
+    _n=$((_n + 1))
+  done
+  # Final check: anything still matching?
+  for _d in /proc/[0-9]*; do
+    _cl=$(tr '\0' ' ' <"$_d/cmdline" 2>/dev/null) || continue
+    case "$_cl" in
+      *"surreal start"*|*"uvicorn api.main:app"*|*"surreal-commands-worker"*|*"next-server"*)
+        return 1 ;;
+    esac
+  done
+  return 0
 }
 
 # proot processes for the ubuntu container, orphans included.
