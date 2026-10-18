@@ -109,9 +109,38 @@ kill_embed() {
     return 0
   }
 
+  # Machine-readable residency answer, matching `probe_chat` in termux-launch.sh
+  # byte for byte in shape: one line of key=value.
+  #
+  # The supervisor drives two roles and must not special-case one of them. The
+  # pid comes from this script's own port-scoped `pid_of` rather than the
+  # supervisor's own /proc scan, because a supervisor-side match would have to
+  # re-learn that :8081 and :8080 are the same executable - the exact confusion
+  # that once had `start_llama` killing the embedder it meant to replace.
+  probe_embed() {
+    if _pid=$(pid_of) && [ -n "$_pid" ]; then
+      printf 'role=embed resident=1 pid=%s model=%s\n' "$_pid" "$(served_model)"
+    else
+      printf 'role=embed resident=0 pid=- model=-\n'
+    fi
+  }
+
 case "${1:-up}" in
   down)
     kill_embed
+    ;;
+  probe)
+    probe_embed
+    ;;
+  # Which model `up` would load, and how big it is on disk. See the identical
+  # verb in termux-launch.sh: the supervisor needs the size before loading so a
+  # load that cannot fit is refused rather than attempted.
+  model-path)
+    if [ -f "$MODEL" ]; then
+      printf 'model=%s bytes=%s\n' "$MODEL" "$(wc -c <"$MODEL" | tr -d ' ')"
+    else
+      printf 'model=- bytes=0\n'
+    fi
     ;;
   status)
     if pid=$(pid_of); then
@@ -186,7 +215,7 @@ case "${1:-up}" in
     fi
     ;;
   *)
-    echo "usage: $0 up|down|status"
+    echo "usage: $0 up|down|status|probe|model-path"
     exit 1
     ;;
 esac

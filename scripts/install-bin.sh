@@ -89,6 +89,12 @@ install_one termux-update.sh onb-update || rc=1
 # `KEY=` that looks configured and is not has already cost one debugging
 # session - and it reports lengths, never values.
 install_one termux-config.sh onb-config || rc=1
+# onb-residency: the residency supervisor, as `onb-residency` rather than
+# `termux-supervisor.py`. Renamed on install for the same reason as the rest -
+# every other wrapper drops its `termux-` prefix - so that what an operator
+# types matches what they read in the repo, and `install_one` stays the only
+# place the mapping is written down.
+install_one termux-supervisor.py onb-residency || rc=1
 refresh_guest_launcher || true
 
 echo

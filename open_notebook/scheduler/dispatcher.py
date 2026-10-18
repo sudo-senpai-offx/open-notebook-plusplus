@@ -52,6 +52,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from open_notebook.residency import client as residency
 from open_notebook.scheduler.footprint import (
     FootprintEstimate,
     JobFootprint,
@@ -173,6 +174,12 @@ class DispatchOutcome:
     projected_bytes: int = 0
     memory: Optional[MemoryReading] = None
     error: Optional[str] = None
+    #: In-flight jobs per workload class, for the status panel. Empty when
+    #: residency control is off, which is the only honest value then - the
+    #: classes exist regardless, but nothing is counting them.
+    role_counts: Dict[str, int] = field(default_factory=dict)
+    #: Roles this pass asked the supervisor to load, and how it answered.
+    residency: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def promoted_count(self) -> int:
@@ -278,6 +285,59 @@ async def _record_hold(command_id: str, reason: str) -> None:
         logger.debug(f"could not record hold reason for {command_id}: {exc}")
 
 
+def _roles_of(row: Dict[str, Any], generation_bytes: Optional[int]) -> List[str]:
+    """The workload classes one job needs served."""
+    return residency.roles_for_models(_footprint_of(row, generation_bytes).models)
+
+
+def _role_counts(
+    live: List[Dict[str, Any]], generation_bytes: Optional[int]
+) -> Dict[str, int]:
+    """How many in-flight jobs each class currently has."""
+    counts: Dict[str, int] = {}
+    for row in live:
+        for role in _roles_of(row, generation_bytes):
+            counts[role] = counts.get(role, 0) + 1
+    return counts
+
+
+def _order_held(
+    held: List[Dict[str, Any]],
+    policy: Optional[Dict[str, residency.RolePolicy]],
+    generation_bytes: Optional[int],
+) -> List[Dict[str, Any]]:
+    """Order the held queue so interactive work goes first.
+
+    Strict oldest-first is the right default and is exactly what this returns
+    when residency control is off - unchanged, because a deployment with no
+    supervisor must not have its queue order altered by a feature it cannot
+    see.
+
+    With policy available the order becomes: work needing no model (cheap
+    plumbing, 64 MB, completes fastest and unblocks the most), then model work
+    by class priority ascending - chat at 10, embedding at 50 - then
+    oldest-first within a class.
+
+    This deliberately breaks an invariant the loop below relies on: that a
+    refused job means nothing behind it has a better claim. That reasoning is
+    only sound under a single total order. Once classes are ordered by priority
+    a later chat job legitimately outranks an earlier embedding job - which is
+    the entire point of the feature - so the per-row `continue` below now skips
+    one job rather than abandoning the queue behind it.
+    """
+    if not policy:
+        return held
+
+    def sort_key(row: Dict[str, Any]) -> tuple[int, int, str]:
+        roles = _roles_of(row, generation_bytes)
+        known = [policy[role].priority for role in roles if role in policy]
+        if not roles or not known:
+            return (0, 0, str(row.get("created") or ""))
+        return (1, min(known), str(row.get("created") or ""))
+
+    return sorted(held, key=sort_key)
+
+
 async def dispatch_once(
     *,
     generation_bytes: Optional[int] = None,
@@ -318,7 +378,63 @@ async def dispatch_once(
         generation_bytes = await generation_model_bytes()
 
     in_flight = len(live_rows)
+
+    # Per-class policy and ordering, both from the supervisor. Both are absent
+    # when residency control is off or the supervisor cannot be reached, and
+    # absent means "behave exactly as before" rather than "fall back to a local
+    # copy of the numbers" - a stale copy would hold work for limits that no
+    # longer exist, with no way to tell why.
+    policy = await residency.policies()
+    counts = _role_counts(live_rows, generation_bytes) if policy else {}
+    outcome.role_counts = dict(counts)
+    if policy:
+        held_rows = _order_held(held_rows, policy, generation_bytes)
+
     for row in held_rows:
+        roles = _roles_of(row, generation_bytes)
+
+        # A class at its concurrency limit is held, never queued behind
+        # itself. This is the "deprioritise, never kill" policy: the job in
+        # flight is left to finish, no process is signalled, and the newcomer
+        # waits for a slot rather than displacing it.
+        if policy:
+            saturated = next(
+                (
+                    role
+                    for role in roles
+                    if role in policy
+                    and counts.get(role, 0) >= policy[role].max_concurrent_jobs
+                ),
+                None,
+            )
+            if saturated is not None:
+                reason = f"class-limit:{saturated}"
+                outcome.held_reasons[reason] = outcome.held_reasons.get(reason, 0) + 1
+                await _record_hold(str(row.get("id")), reason)
+                continue
+
+        # Load on demand. The model server lives outside proot and this process
+        # cannot start it, so it asks. A refusal is a hold: the job is not
+        # promoted to run against a model that is not there.
+        if residency.enabled():
+            refused: Optional[str] = None
+            for role in roles:
+                result = await residency.ensure_resident(role)
+                outcome.residency[role] = {
+                    "ok": result.ok,
+                    "loaded": result.loaded,
+                    "pid": result.pid,
+                    "model": result.model,
+                    "error": result.error,
+                }
+                if not result.ok:
+                    refused = result.hold_reason()
+                    break
+            if refused is not None:
+                outcome.held_reasons[refused] = outcome.held_reasons.get(refused, 0) + 1
+                await _record_hold(str(row.get("id")), refused)
+                continue
+
         decision = evaluate(
             window=target_window,
             in_flight=in_flight,
@@ -352,6 +468,10 @@ async def dispatch_once(
 
         outcome.promoted.append(str(row.get("id")))
         in_flight += 1
+        # Class counts move with the queue, or a second job of the same class
+        # would be admitted in the same pass past a limit just reached.
+        for role in roles:
+            counts[role] = counts.get(role, 0) + 1
         # Recompute after every promotion. Reusing a snapshot taken once per
         # pass is how a pass admits three jobs that only fit one at a time.
         committed = committed.merge(

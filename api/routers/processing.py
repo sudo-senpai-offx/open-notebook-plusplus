@@ -221,6 +221,22 @@ async def processing_status() -> Dict[str, Any]:
     window = read_window()
     in_flight = int(queue.get("new", 0) or 0) + int(queue.get("running", 0) or 0)
 
+    # Residency: which models are actually loaded, and what that costs. Null
+    # when the feature is off or the supervisor cannot be reached - never a
+    # fabricated all-unloaded, which would read as "nothing is loaded" when the
+    # truth is "we could not look". The phone's own numbers are the reason this
+    # is worth surfacing: a 1.2 GB model that has been paged out to zram still
+    # answers /health, so "up" on its own never meant "resident".
+    residency_state: Optional[Dict[str, Any]] = None
+    residency_enabled = False
+    try:
+        from open_notebook.residency import client as residency
+
+        residency_enabled = residency.enabled()
+        residency_state = await residency.state()
+    except Exception as exc:  # noqa: BLE001 - best effort enrichment
+        logger.debug(f"residency state unavailable: {exc}")
+
     return {
         # The promotion window, read live. `full_throttle` is derived from it
         # rather than from a separate flag so the two can never disagree.
@@ -243,6 +259,15 @@ async def processing_status() -> Dict[str, Any]:
             "available": memory.available,
             "swapped": memory.swapped,
             "reserve": default_reserve(memory.total) if memory.readable else 0,
+        },
+        # Per-class limits and what is resident. `enabled` is reported
+        # separately from `roles` so the UI can distinguish "residency is off on
+        # this device" from "residency is on and everything is unloaded".
+        "residency": {
+            "enabled": residency_enabled,
+            "roles": (residency_state or {}).get("roles"),
+            "resident_total_bytes": (residency_state or {}).get("resident_total_bytes"),
+            "available": residency_state is not None,
         },
     }
 

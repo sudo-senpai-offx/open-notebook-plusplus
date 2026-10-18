@@ -1,0 +1,245 @@
+"""Guest-side client for the Termux residency supervisor.
+
+Why the guest has to ask
+------------------------
+The model servers live in Termux, outside proot, and proot cannot signal a
+Termux process (`Operation not permitted`) or read its `/proc`. The API process
+therefore *cannot* start a model, only decide whether one should be started and
+ask for it. That is the whole reason this module exists, and it is why the
+transport is loopback rather than anything cleverer: proot does not create a
+network namespace, so the guest's 127.0.0.1 is the same loopback Termux sees.
+
+Failure is a hold, never a shrug
+-------------------------------
+If the supervisor is unreachable, times out, or refuses a load, the caller gets
+`ok=False` and holds the job. It must not fall back to "assume it is loaded" -
+that is precisely the state the supervisor was added to prevent, and the
+symptom of getting it wrong is a job that runs against nothing and reports
+success.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+from loguru import logger
+
+DEFAULT_URL = "http://127.0.0.1:8099"
+DEFAULT_TIMEOUT = 60.0
+#: Probing a role is one shell call; loading is a model read off disk. The
+#: supervisor's own load timeout is 45 s, so the client must outlast it or a
+#: slow-but-successful load would be reported as a failure and the job held.
+DEFAULT_LOAD_TIMEOUT = 90.0
+
+
+def enabled() -> bool:
+    """Is residency control switched on for this device?
+
+    Off by default, matching how every other new capability in this codebase is
+    gated (`USE_ROUTER`, `HIBERNATE_ENABLE`, the training flags). A deployment
+    that has no supervisor must behave exactly as it did before, and a flag
+    defaulting to on would make "no supervisor running" a silent behaviour
+    change on the PC.
+    """
+    raw = os.getenv("OPEN_NOTEBOOK_RESIDENCY_ENABLED", "false")
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def base_url() -> str:
+    return (
+        os.getenv("OPEN_NOTEBOOK_RESIDENCY_URL", DEFAULT_URL) or DEFAULT_URL
+    ).rstrip("/")
+
+
+def timeout() -> float:
+    raw = os.getenv("OPEN_NOTEBOOK_RESIDENCY_TIMEOUT")
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return DEFAULT_LOAD_TIMEOUT
+
+
+#: Which residency role serves a given footprint key.
+#:
+#: These are the keys `scheduler.footprint.job_footprint` produces: a category
+#: key when the job's model is resolved by the caller, or one of the two
+#: sentinels. Mapping here rather than in the dispatcher keeps the knowledge of
+#: "which server does this work need" in one place next to the client's other
+#: role-shaped concerns.
+#:
+#: `__no_model__` and `__unknown__` deliberately map to nothing. The first is
+#: plumbing and needs no model; the second is an unresolved job whose class is
+#: not knowable, and guessing one would make an uncertain job look schedulable.
+MODEL_ROLE: Dict[str, str] = {
+    "generation": "chat",
+    "embedding": "embed",
+}
+
+
+def role_for_model(key: str) -> Optional[str]:
+    return MODEL_ROLE.get(key)
+
+
+def roles_for_models(keys: Any) -> List[str]:
+    """Every role a set of footprint keys needs, de-duplicated."""
+    found: List[str] = []
+    for key in keys:
+        role = role_for_model(str(key))
+        if role and role not in found:
+            found.append(role)
+    return found
+
+
+@dataclass(frozen=True)
+class ResidencyResult:
+    ok: bool
+    role: str
+    loaded: bool = False
+    pid: str = "-"
+    model: str = "-"
+    error: Optional[str] = None
+
+    def hold_reason(self) -> str:
+        """A short, stable string for `held_reason`.
+
+        Kept short and prefix-tagged because this value is shown verbatim in the
+        status panel, and a full shell error there is unreadable next to every
+        other reason.
+        """
+        if self.ok:
+            return ""
+        detail = (self.error or "unknown failure").splitlines()[0][:120]
+        return f"residency:{self.role}:{detail}"
+
+
+async def ensure_resident(role: str) -> ResidencyResult:
+    """Ask the supervisor to make `role` loaded.
+
+    Never raises. Every failure mode - supervisor down, load refused for
+    memory, load timed out - is an `ok=False` the caller holds on.
+    """
+    if not enabled():
+        return ResidencyResult(ok=True, role=role)
+
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=timeout()) as client:
+            response = await client.post(f"{base_url()}/resident", json={"role": role})
+    except Exception as exc:  # noqa: BLE001 - unreachable supervisor is a hold
+        logger.debug(f"residency supervisor unreachable for {role}: {exc}")
+        return ResidencyResult(
+            ok=False,
+            role=role,
+            error=f"supervisor unreachable: {type(exc).__name__}",
+        )
+
+    if response.status_code == 409:
+        try:
+            payload: Dict[str, Any] = response.json()
+        except ValueError:
+            payload = {}
+        return ResidencyResult(
+            ok=False,
+            role=role,
+            error=str(payload.get("error") or "supervisor refused the load"),
+        )
+    if response.status_code != 200:
+        return ResidencyResult(
+            ok=False, role=role, error=f"supervisor returned {response.status_code}"
+        )
+    try:
+        payload = response.json()
+    except ValueError:
+        return ResidencyResult(ok=False, role=role, error="supervisor sent non-JSON")
+    return ResidencyResult(
+        ok=bool(payload.get("ok")),
+        role=str(payload.get("role") or role),
+        loaded=bool(payload.get("loaded")),
+        pid=str(payload.get("pid") or "-"),
+        model=str(payload.get("model") or "-"),
+        error=None if payload.get("ok") else str(payload.get("error") or "load failed"),
+    )
+
+
+@dataclass(frozen=True)
+class RolePolicy:
+    """Per-class admission limits, owned by the supervisor.
+
+    Fetched rather than duplicated. The same numbers appear in
+    `termux-supervisor.py`, and a second copy in the guest would drift the
+    moment one side changed - and the drift would be silent, because each side
+    would still be self-consistent.
+    """
+
+    role: str
+    priority: int = 50
+    max_concurrent_jobs: int = 1
+
+
+async def policies() -> Optional[Dict[str, RolePolicy]]:
+    """Current per-class policy, or None when it cannot be had.
+
+    None means "do not enforce per-class limits", which is the right response
+    to an unreachable supervisor: enforcing limits from a stale copy would hold
+    work for reasons that no longer exist.
+    """
+    if not enabled():
+        return None
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{base_url()}/models")
+    except Exception as exc:  # noqa: BLE001 - no policy is no per-class limit
+        logger.debug(f"residency catalogue unavailable: {exc}")
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    roles = payload.get("roles")
+    if not isinstance(roles, dict):
+        return None
+    found: Dict[str, RolePolicy] = {}
+    for name, entry in roles.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            found[str(name)] = RolePolicy(
+                role=str(name),
+                priority=int(entry.get("priority", 50)),
+                max_concurrent_jobs=int(entry.get("max_concurrent_jobs", 1)),
+            )
+        except (TypeError, ValueError):
+            continue
+    return found or None
+
+
+async def state() -> Optional[Dict[str, Any]]:
+    """Residency + memory, for the status endpoint. None when unavailable."""
+    if not enabled():
+        return None
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{base_url()}/state")
+    except Exception as exc:  # noqa: BLE001 - the panel shows absence honestly
+        logger.debug(f"residency state unavailable: {exc}")
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None

@@ -45,7 +45,51 @@ function statusWith(overrides: Record<string, unknown> = {}) {
       swapped: 0,
       reserve: 2 * GIB,
     },
+    residency: {
+      enabled: false,
+      available: false,
+      roles: null,
+      resident_total_bytes: null,
+    },
     ...overrides,
+  }
+}
+
+/** A residency block for a device where the supervisor answered. */
+function residencyWith(roles: Record<string, unknown>) {
+  return {
+    enabled: true,
+    available: true,
+    roles: {
+      chat: {
+        role: 'chat',
+        resident: false,
+        pid: '-',
+        model: '-',
+        disk_bytes: 1000 * 1024 * 1024,
+        resident_bytes: 1100 * 1024 * 1024,
+        port: 8080,
+        priority: 10,
+        max_concurrent_jobs: 1,
+        idle_seconds: 300,
+        last_used_age: 400,
+      },
+      embed: {
+        role: 'embed',
+        resident: true,
+        pid: '19094',
+        model: 'bge-small-en-v1.5-q8_0.gguf',
+        disk_bytes: 35 * 1024 * 1024,
+        resident_bytes: 38 * 1024 * 1024,
+        port: 8081,
+        priority: 50,
+        max_concurrent_jobs: 2,
+        idle_seconds: 300,
+        last_used_age: 2,
+      },
+      ...roles,
+    },
+    resident_total_bytes: 38 * 1024 * 1024,
   }
 }
 
@@ -238,5 +282,93 @@ describe('ProcessingQueue', () => {
     })
     expect(screen.queryByText('processing.memoryLine')).not.toBeInTheDocument()
     expect(screen.queryByText('processing.held')).not.toBeInTheDocument()
+  })
+})
+describe('residency', () => {
+  it('shows nothing at all when the feature is off', async () => {
+    mocked.status.mockResolvedValue(statusWith())
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText('processing.idle')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('processing.residency_chat')).not.toBeInTheDocument()
+    expect(screen.queryByText('processing.residencyUnreachable')).not.toBeInTheDocument()
+  })
+
+  it('shows a loaded role with its model and what it costs', async () => {
+    mocked.status.mockResolvedValue(
+      statusWith({ residency: residencyWith({}) })
+    )
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText('bge-small-en-v1.5-q8_0.gguf · 38 MB')).toBeInTheDocument()
+    })
+  })
+
+  it('distinguishes an unloaded model from a loaded one', async () => {
+    // The whole reason this section exists. On the phone llama-server read
+    // 1222380 kB at launch and 3288 kB ten minutes later - "up" both times, and
+    // the second reading was a model paged out to zram. A single up/down row
+    // would have shown the same thing for both.
+    mocked.status.mockResolvedValue(
+      statusWith({ residency: residencyWith({}) })
+    )
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText('processing.residency_unloaded')).toBeInTheDocument()
+    })
+    expect(screen.getByText('processing.residency_chat')).toBeInTheDocument()
+    expect(screen.getByText('processing.residency_embed')).toBeInTheDocument()
+  })
+
+  it('says the supervisor did not answer, rather than claiming nothing is loaded', async () => {
+    // Both look identical in the UI if you collapse them, and they are
+    // opposites: one is a healthy idle phone, the other is a phone whose
+    // residency state nobody can see.
+    mocked.status.mockResolvedValue(
+      statusWith({
+        residency: { enabled: true, available: false, roles: null, resident_total_bytes: null },
+      })
+    )
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText('processing.residencyUnreachable')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('processing.residency_chat')).not.toBeInTheDocument()
+  })
+
+  it('renders a hold reason it has no translation for', async () => {
+    // `residency:chat:<detail>` carries the supervisor's own words, so this
+    // case is the normal one rather than an edge case - and showing it beats
+    // showing a blank row.
+    mocked.status.mockResolvedValue(
+      statusWith({
+        queue: { held: 1 },
+        held_reasons: { 'residency:chat:needs 1258 MB, 900 MB available': 1 },
+      })
+    )
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText(/needs 1258 MB/)).toBeInTheDocument()
+    })
+  })
+
+  it('translates the two class-limit reasons it does know', async () => {
+    mocked.status.mockResolvedValue(
+      statusWith({
+        queue: { held: 1 },
+        held_reasons: { 'class-limit:chat': 1 },
+      })
+    )
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText('processing.reason_class_limit_chat')).toBeInTheDocument()
+    })
   })
 })

@@ -539,6 +539,13 @@ export const enUS = {
     held: "{{count}} waiting",
     memoryLine: "{{available}} free of {{total}}, {{reserve}} reserved",
     memoryUnknown: "Memory could not be read; jobs run one at a time",
+    residency_chat: "chat model",
+    residency_embed: "embedding model",
+    residency_unloaded: "not loaded (unloads after {{idle}}s idle)",
+    residencyUnreachable:
+      "Residency control is on but the supervisor did not answer; models are left alone",
+    reason_class_limit_chat: "{{count}} waiting: chat is already running",
+    reason_class_limit_embed: "{{count}} waiting: embedding is at its concurrency",
     throttleApplied: "Window {{count}}",
     throttleCapped: "Limited to {{count}} on this device",
     reason_memory: "{{count}} waiting on memory",

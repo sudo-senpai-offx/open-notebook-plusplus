@@ -201,6 +201,33 @@ wait_for_llama() {
   return 1
 }
 
+# Machine-readable residency answer, one line of key=value.
+#
+# The residency supervisor needs to know whether chat is loaded, which pid is
+# serving it, and which model that pid is actually serving. Every one of those
+# three facts is only knowable by this script's own /proc matching and
+# /v1/models parse - `pids_on_port` already discriminates :8080 from the
+# embedder on :8081, and that discrimination is the bug this session spent the
+# most time on. Re-deriving it in the supervisor would be a second
+# implementation that can disagree with this one.
+#
+# So the supervisor asks, rather than looks. `resident=` is 1 only when a pid
+# exists *and* /health answers, for the same reason `start_llama` requires
+# both: a process that exists is not a server serving, and a stale one must
+# never be reported as a loaded model.
+probe_chat() {
+  _pids=$(pids_on_port 8080 2>/dev/null || true)
+  if [ -n "$_pids" ] && llama_healthy; then
+    _model=$(curl -s -m 5 http://127.0.0.1:8080/v1/models 2>/dev/null \
+      | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      | head -1)
+    printf 'role=chat resident=1 pid=%s model=%s\n' \
+      "$(printf '%s\n' "$_pids" | head -1)" "${_model##*/}"
+  else
+    printf 'role=chat resident=0 pid=- model=-\n'
+  fi
+}
+
 # Refuse a second launcher while one is already up.
 #
 # Two `~/bin/onb` processes each start a chat server and each run onb-embed up,
@@ -261,6 +288,34 @@ already_running() {
 }
 
 case "${1:-up}" in
+  # Residency verbs. The supervisor drives chat's lifecycle directly instead of
+  # going through `up`, because `up` also owns the proot session, the guest
+  # stack and the terminal - none of which a load-on-demand decision may touch.
+  # Each verb delegates to the function above it, so "start the chat server"
+  # still has exactly one implementation and the two paths cannot drift.
+  chat-up)
+    start_llama || exit 1
+    wait_for_llama || exit 1
+    ;;
+  chat-down)
+    stop_llama
+    ;;
+  chat-status)
+    probe_chat
+    ;;
+  # Which model would `chat-up` load, and how big it is on disk.
+  #
+  # The candidate search above is the only place that knows the phone's model
+  # inventory, so the supervisor asks rather than re-globbing `$HOME/gguf`. It
+  # needs the size *before* loading: a load that cannot fit is refused, never
+  # attempted and then OOM-killed halfway (ADR-014).
+  model-path)
+    if [ -f "$MODEL" ]; then
+      printf 'model=%s bytes=%s\n' "$MODEL" "$(wc -c <"$MODEL" | tr -d ' ')"
+    else
+      printf 'model=- bytes=0\n'
+    fi
+    ;;
   stop)
     stop_all
     ;;
@@ -394,7 +449,7 @@ case "${1:-up}" in
     sh "$HOME/bin/onb-embed" down >/dev/null 2>&1 || true
     ;;
   *)
-    echo "usage: $0 [up|stop]"
+    echo "usage: $0 [up|stop|chat-up|chat-down|chat-status|model-path]"
     exit 1
     ;;
 esac

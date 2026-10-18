@@ -24,6 +24,18 @@ const HOLD_REASON_KEYS: Record<string, string> = {
   'unknown-footprint': 'processing.reason_unknown-footprint',
   'memory-unreadable': 'processing.reason_memory-unreadable',
   'not-yet-considered': 'processing.reason_not-yet-considered',
+  'class-limit:chat': 'processing.reason_class_limit_chat',
+  'class-limit:embed': 'processing.reason_class_limit_embed',
+}
+
+/** Role name -> i18n key. An explicit map for the reason given on
+ * HOLD_REASON_KEYS above: the i18n tooling scans source for literal keys and
+ * cannot see `processing.residency_${role.role}`, which would silently register
+ * two keys as unused and fail the locale test. A role this build has never
+ * heard of falls through to the raw name, which is still readable. */
+const RESIDENCY_ROLE_KEYS: Record<string, string> = {
+  chat: 'processing.residency_chat',
+  embed: 'processing.residency_embed',
 }
 
 /** Bytes as a short human string, for memory figures only.
@@ -213,6 +225,45 @@ export function ProcessingQueue() {
             {!status?.memory.readable && status !== null && (
               <p className="text-xs text-muted-foreground">
                 {t('processing.memoryUnknown')}
+              </p>
+            )}
+
+            {/* Residency: which models are actually loaded.
+                The distinction this exists to draw is that a server answering
+                /health is not a resident model. On the phone llama-server read
+                1222380 kB at launch and 3288 kB ten minutes later - both times
+                "up", and the second time it was paged out to zram. Showing
+                "loaded" next to a memory figure is what makes that visible. */}
+            {status?.residency?.enabled && status.residency.available && (
+              <ul className="space-y-1 text-xs text-muted-foreground">
+                {Object.values(status.residency.roles ?? {})
+                  .sort((a, b) => a.priority - b.priority)
+                  .map((role) => (
+                    <li key={role.role} className="flex items-center gap-2">
+                      <span
+                        className={
+                          role.resident ? 'text-foreground' : 'text-muted-foreground/60'
+                        }
+                      >
+                        {role.role}
+                      </span>
+                      <span>
+                        {t(RESIDENCY_ROLE_KEYS[role.role] ?? role.role)}
+                      </span>
+                      <span className="font-mono">
+                        {role.resident
+                          ? `${role.model} · ${formatBytes(role.resident_bytes)}`
+                          : t('processing.residency_unloaded', {
+                              idle: role.idle_seconds,
+                            })}
+                      </span>
+                    </li>
+                  ))}
+              </ul>
+            )}
+            {status?.residency?.enabled && !status.residency.available && (
+              <p className="text-xs text-muted-foreground">
+                {t('processing.residencyUnreachable')}
               </p>
             )}
 

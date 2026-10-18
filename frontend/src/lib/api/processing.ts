@@ -12,6 +12,36 @@ export interface ProcessingMemory {
   reserve: number
 }
 
+/** One workload class the scheduler can make resident. */
+export interface ResidencyRole {
+  role: string
+  /** A model server answering /health is *not* the same as a resident model -
+   * a swapped-out one still answers. This flag is the load-bearing one. */
+  resident: boolean
+  pid: string
+  model: string
+  disk_bytes: number
+  /** Weight bytes with runtime overhead, i.e. what it costs to keep loaded. */
+  resident_bytes: number
+  port: number
+  /** Lower runs first. Chat is interactive, embedding is bulk. */
+  priority: number
+  max_concurrent_jobs: number
+  /** Seconds this role may sit unused before it is unloaded. */
+  idle_seconds: number
+  last_used_age: number
+}
+
+export interface ResidencyState {
+  /** Whether residency control is on for this device at all. */
+  enabled: boolean
+  /** False when the supervisor could not be reached - distinct from every
+   * role being unloaded, which is a real and different state. */
+  available: boolean
+  roles: Record<string, ResidencyRole> | null
+  resident_total_bytes: number | null
+}
+
 export interface ProcessingStatus {
   /** The promotion window, read fresh by the dispatcher every pass. */
   window: number
@@ -25,6 +55,7 @@ export interface ProcessingStatus {
   held_reasons: Record<string, number>
   needs_retry: string[]
   memory: ProcessingMemory
+  residency: ResidencyState
 }
 
 export interface EnsureInsightsResult {
