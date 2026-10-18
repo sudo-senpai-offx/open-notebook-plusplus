@@ -94,8 +94,10 @@ class TestBothPathsAreChecked:
         but whether a process existed.
         """
         text = _read()
-        i = text.index("already up")
-        window = text[i : i + 400]
+        # Anchor on the echo. Comments here quote "already up" when explaining
+        # why it matters, and matching those fails on the explanation.
+        i = text.index('echo "[embed] already up')
+        window = text[i - 400 : i + 400]
         assert "require_expected_model" in window, (
             "reporting 'already up' without verifying the model is how a "
             "stale embedder survives a model change"
@@ -257,3 +259,56 @@ class TestDownActuallyDowns:
         assert "kill -9" not in body, (
             "SIGKILL belongs in wait_gone, after the grace period"
         )
+
+
+class TestStopActuallyStopsTheEmbedder:
+    """`onb stop` left the embedder running.
+
+    Making `stop_llama` port-scoped was right - it stopped the chat server
+    killing the embedder on every start - but it left :8081 with no owner on
+    the stop path, because only the `up` teardown ever called
+    `onb-embed down`. Ctrl+C followed by `onb stop` left the process
+    running, reparented to init (PPID=1) and still holding the port, so the
+    next launch reported `already up` against a server nothing supervised.
+    """
+
+    def _launcher(self) -> str:
+        return (REPO / "scripts" / "termux-launch.sh").read_text()
+
+    def _embed(self) -> str:
+        return _read()
+
+    def test_stop_path_stops_the_embedder(self):
+        text = self._launcher()
+        start = text.index("stop_all() {")
+        body = text[start : text.index("\n}\n", start)]
+        assert "onb-embed" in body, (
+            "stop_all must stop the embedder; stop_llama deliberately does "
+            "not touch :8081, so nothing else covers it"
+        )
+
+    def test_stop_llama_still_ignores_8081(self):
+        """The port scoping was correct and must not be undone."""
+        text = self._launcher()
+        start = text.index("stop_llama() {")
+        body = text[start : text.index("\n}\n", start)]
+        assert "pids_on_port 8080" in body
+        assert "onb-embed" not in body
+
+    def test_kill_embed_escalates(self):
+        """llama-server defers SIGTERM until its request finishes - 25-46s with
+        the bge-m3 embedder, well past the 15s wait. `down` reported success
+        and the process lived."""
+        text = self._embed()
+        start = text.index("kill_embed() {")
+        body = text[start : text.index("\n  }\n", start)]
+        assert "kill -9" in body, (
+            "SIGTERM alone cannot stop llama-server mid-request; down has to "
+            "escalate or it leaves an orphan holding :8081"
+        )
+
+    def test_kill_embed_still_sends_sigterm_first(self):
+        text = self._embed()
+        start = text.index("kill_embed() {")
+        body = text[start : text.index("\n  }\n", start)]
+        assert 'kill "$pid"' in body

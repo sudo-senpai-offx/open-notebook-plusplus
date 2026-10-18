@@ -57,6 +57,17 @@ kill_embed() {
   kill "$pid" 2>/dev/null
   i=0
   while [ "$i" -lt 15 ] && pid_of >/dev/null 2>&1; do i=$((i + 1)); sleep 1; done
+  # Escalate. llama-server defers SIGTERM until its current request finishes,
+  # which with the 25-46s bge-m3 embedder was long past this loop - so `down`
+  # reported success and left the process running, reparented to init and
+  # still holding :8081. The next `up` then matched it and reported
+  # "already up" against a server nothing was supervising.
+  if pid=$(pid_of); then
+    echo "[embed] ignoring SIGTERM; SIGKILL to $pid"
+    kill -9 "$pid" 2>/dev/null
+    j=0
+    while [ "$j" -lt 10 ] && pid_of >/dev/null 2>&1; do j=$((j + 1)); sleep 1; done
+  fi
   echo "[embed] stopped (pid $pid)"
 }
 

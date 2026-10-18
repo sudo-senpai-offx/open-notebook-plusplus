@@ -142,6 +142,15 @@ stop_llama() {
 
 stop_all() {
   stop_llama
+  # The embedder, which `stop_llama` deliberately does not touch.
+  #
+  # Making the chat lifecycle port-scoped was right - it stopped the chat
+  # server from killing the embedder - but it left :8081 with no owner on the
+  # stop path, because only the `up` teardown ever called onb-embed down.
+  # Ctrl+C followed by `onb stop` therefore left the embedder running,
+  # reparented to init and still holding :8081, so the next launch reported
+  # `already up` against a server nothing was supervising.
+  sh "$HOME/bin/onb-embed" down >/dev/null 2>&1 || true
   # Any live login session on the container; --kill-on-exit takes the rest.
   if command -v proot-distro >/dev/null && proot-distro ps 2>/dev/null | grep -q ubuntu; then
     proot-distro kill ubuntu 2>/dev/null && echo "[onb] stopped proot session(s)"
