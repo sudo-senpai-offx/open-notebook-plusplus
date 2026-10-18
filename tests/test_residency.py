@@ -566,6 +566,97 @@ class TestLauncherCanActuallyBeStopped:
         assert "survived SIGKILL" in body and "kill -9" in body
 
 
+class TestGuestTeardown:
+    """`onb stop` never stopped the guest, because proot-distro cannot.
+
+    `stop_all` guarded its teardown with
+
+        if proot-distro ps 2>/dev/null | grep -q ubuntu; then
+            proot-distro kill ubuntu
+        fi
+
+    proot-distro 5.3.0 has neither command. Its full list is install, list,
+    login, run, remove, rename, reset, backup, restore, clear-cache, copy,
+    sync, build, push. `proot-distro ps` printed `unknown command 'ps'` to
+    stderr - discarded by `2>/dev/null` - leaving stdout empty, so grep failed,
+    so the kill was never attempted once.
+
+    The guard could not report failure because it never ran, which is worse
+    than having no guard: it read as protection that was in place.
+    """
+
+    @staticmethod
+    def _launcher() -> str:
+        return (
+            Path(__file__).resolve().parents[1] / "scripts" / "termux-launch.sh"
+        ).read_text(encoding="utf-8")
+
+    @classmethod
+    def _code(cls) -> str:
+        """`stop_all`'s body with comments stripped.
+
+        The old call is named in the comment explaining why it was replaced, so
+        an assertion over raw text fails against its own explanation - which is
+        what happened the first time this was written.
+        """
+        text = cls._launcher()
+        start = text.index("stop_all() {")
+        # The body's last statement is the straggler sweep, indented two spaces
+        # and closing on the next line.
+        body = text[start : text.index("\n  kill_stragglers\n}", start)]
+        return "\n".join(
+            line for line in body.splitlines() if not line.strip().startswith("#")
+        )
+
+    def test_does_not_call_commands_that_do_not_exist(self):
+        code = self._code()
+        assert "proot-distro kill" not in code, (
+            "proot-distro 5.3.0 has no `kill` command"
+        )
+        assert "proot-distro ps" not in code, (
+            "proot-distro 5.3.0 has no `ps` command either, so the guard that "
+            "wrapped the kill could never succeed"
+        )
+
+    def test_asks_the_guest_script_to_tear_itself_down(self):
+        """One list of service names, owned by the script that starts them."""
+        code = self._code()
+        assert "termux-stack.sh down" in code, (
+            "the guest services are killed by name and termux-stack.sh owns "
+            "those names; copying the list here is a second thing to drift"
+        )
+        assert "proot-distro login ubuntu" in code
+
+    def test_kills_orphaned_proot_sessions(self):
+        """A SIGKILLed launcher orphans its proot and the guest keeps running.
+
+        Observed: two proot processes for one container after a manual
+        recovery, with the new session reporting `already running` four times
+        against the old one's services. There is no `proot-distro ps` to ask,
+        so the command line is the only available answer.
+        """
+        code = self._launcher()
+        assert "kill_proot_sessions" in code
+        start = code.index("proot_pids() {")
+        body = code[start : code.index("\n}\n", start)]
+        assert "/containers/ubuntu/rootfs" in body, (
+            "the rootfs path is what identifies a container's proot processes"
+        )
+        assert "ROOTFS_UBUNTU" in code
+
+    def test_proot_sweep_escalates_and_reports(self):
+        code = self._launcher()
+        start = code.index("kill_proot_sessions() {")
+        body = code[start : code.index("\n}\n", start)]
+        assert "kill -9" in body and "survived SIGKILL" in body
+
+    def test_rootfs_is_derived_not_hardcoded(self):
+        """A non-default Termux prefix must still be found."""
+        code = self._launcher()
+        assert 'PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"' in code
+        assert 'ROOTFS_UBUNTU="$PREFIX/var/lib/proot-distro' in code
+
+
 class TestPagedOutIsNotAFailure:
     """A model in zram is slow, not broken.
 

@@ -694,7 +694,12 @@ class TestDetachedLauncherIsNotAnOrphan:
         always false and the check would never arm."""
         text = self._code()
         tty = text.index("[ -t 0 ]")
-        guest = text.index("proot-distro login ubuntu")
+        # Anchored to the guest *session* launch, not to the first
+        # `proot-distro login ubuntu` in the file. stop_all now opens a short
+        # login of its own to run termux-stack.sh down, and it is defined
+        # earlier, so a bare search finds that one and this ordering check
+        # would then be measuring the wrong pair of positions.
+        guest = text.index("proot-distro login ubuntu -- bash -c")
         assert tty < guest, (
             "test -t 0 has to be evaluated in the launcher shell, before the "
             "guest session substitutes stdin with a pipe"

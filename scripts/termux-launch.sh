@@ -57,6 +57,15 @@ fi
 
 LLAMA="$HOME/llama.cpp/build/bin/llama-server"
 LOG="$HOME/llama-server.log"
+
+# Where the ubuntu container lives, for identifying its proot processes.
+#
+# Derived rather than hardcoded so it follows a non-default Termux prefix, and
+# matching on `/containers/ubuntu/rootfs` as well means the sweep still finds
+# the sessions if this path is ever wrong - over-matching is harmless here,
+# under-matching leaves an orphan holding the database.
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+ROOTFS_UBUNTU="$PREFIX/var/lib/proot-distro/containers/ubuntu/rootfs"
 # Always pin these. llama-server defaults allocate 4x32768 = 131072 tokens of
 # KV cache, which is ~1.6 GB for a 390 MB model and more for the 1.5B. On
 # SD680 the 0.5B sits at 492 MB RSS with these values.
@@ -151,10 +160,35 @@ stop_all() {
   # reparented to init and still holding :8081, so the next launch reported
   # `already up` against a server nothing was supervising.
   sh "$HOME/bin/onb-embed" down >/dev/null 2>&1 || true
-  # Any live login session on the container; --kill-on-exit takes the rest.
-  if command -v proot-distro >/dev/null && proot-distro ps 2>/dev/null | grep -q ubuntu; then
-    proot-distro kill ubuntu 2>/dev/null && echo "[onb] stopped proot session(s)"
+  # The guest stack, torn down by the script that starts it.
+  #
+  # This used to be `proot-distro kill ubuntu`, guarded by `proot-distro ps |
+  # grep -q ubuntu`. proot-distro 5.3.0 has **neither command** - its list is
+  # install/list/login/run/remove/rename/reset/backup/restore/clear-cache/
+  # copy/sync/build/push. So `proot-distro ps` printed "unknown command" to
+  # stderr (discarded), stdout was empty, grep failed, and the kill was never
+  # attempted once. The guard could not report failure because it never ran.
+  #
+  # The guest services are visible in Termux's own /proc, and `termux-stack.sh
+  # down` is what knows their names and their order. So it is asked to do the
+  # teardown rather than having its list copied here - a second list is a
+  # second thing to drift, and this repo has already paid for that twice.
+  if command -v proot-distro >/dev/null; then
+    proot-distro login ubuntu -- \
+      sh /root/app/open-notebook-plusplus/scripts/termux-stack.sh down \
+      >/dev/null 2>&1 || true
   fi
+  # Then the proot sessions themselves, orphans included.
+  #
+  # A launcher killed with SIGKILL orphans its proot: `--kill-on-exit` never
+  # fires, and the guest keeps running. Observed on the device as two proot
+  # processes for one container after a manual recovery - 19129 orphaned, 5754
+  # fresh - with the new session reporting `already running` four times against
+  # the old session's services.
+  #
+  # The rootfs path is what identifies them. There is no `proot-distro ps` to
+  # ask, so the command line is the only available answer.
+  kill_proot_sessions
   # Finally, the launcher itself - which SIGTERM cannot reach.
   #
   # `onb stop` runs in its own shell, so it can signal the launcher that is
@@ -179,6 +213,46 @@ launcher_pids() {
       *"$HOME/bin/onb "*) echo "${p#/proc/}" ;;
     esac
   done
+}
+
+# proot processes serving the ubuntu container, orphans included.
+#
+# Identified by `--rootfs=`, which is the only handle available: proot-distro
+# 5.3.0 offers no way to list sessions. SIGTERM first so proot can honour
+# `--kill-on-exit` and take the guest with it; SIGKILL only if it will not go,
+# and then the guest services have already been torn down by name, so nothing
+# is left holding the database.
+proot_pids() {
+  for p in /proc/[0-9]*; do
+    _cl=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
+    case "$_cl" in
+      *"--rootfs=$ROOTFS_UBUNTU"*|*"/containers/ubuntu/rootfs"*)
+        echo "${p#/proc/}" ;;
+    esac
+  done
+}
+
+kill_proot_sessions() {
+  pids=$(proot_pids | grep -v "^$$\$" || true)
+  [ -n "$pids" ] || return 0
+  echo "[onb] stopping proot session(s) (pid $(echo "$pids" | tr '\n' ' '))"
+  for p in $pids; do kill "$p" 2>/dev/null; done
+  i=0
+  while [ "$i" -lt 8 ]; do
+    left=$(proot_pids | grep -v "^$$\$" || true)
+    [ -n "$left" ] || return 0
+    sleep 1
+    i=$((i + 1))
+  done
+  for p in $pids; do kill -9 "$p" 2>/dev/null; done
+  sleep 1
+  left=$(proot_pids | grep -v "^$$\$" || true)
+  if [ -n "$left" ]; then
+    echo "[onb] WARNING: proot survived SIGKILL (pid $(echo "$left" | tr '\n' ' '))"
+    echo "         reboot, or: kill -9 $(echo "$left" | tr '\n' ' ')"
+    return 1
+  fi
+  return 0
 }
 
 kill_stragglers() {
