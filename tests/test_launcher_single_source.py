@@ -662,3 +662,35 @@ class TestDetachedLauncherIsNotAnOrphan:
             "test -t 0 has to be evaluated in the launcher shell, before the "
             "guest session substitutes stdin with a pipe"
         )
+
+
+class TestDetachedStartIsNotSilent:
+    """`onb-update --restart` discarded everything.
+
+    `nohup sh "$HOME/bin/onb" >/dev/null 2>&1 &` made every failure of a
+    detached start invisible: the updater reported success, nothing came up,
+    and the only evidence was a status table showing everything DOWN with no
+    reason attached. The user could not tell a broken launcher from a stack
+    that had not started.
+    """
+
+    def _update(self) -> str:
+        return (REPO / "scripts" / "termux-update.sh").read_text()
+
+    def test_does_not_discard_output(self):
+        text = self._update()
+        start = text.index('nohup sh "$HOME/bin/onb"')
+        line_end = text.index("\n", start)
+        assert "/dev/null" not in text[start:line_end], (
+            "a detached start whose output is discarded cannot be diagnosed"
+        )
+
+    def test_names_the_log(self):
+        """An operator needs to be told where to look."""
+        assert "onb-start.log" in self._update()
+        assert "log: $_startlog" in self._update()
+
+    def test_truncates_per_run(self):
+        """Otherwise it grows without bound across every update."""
+        text = self._update()
+        assert ': > "$_startlog"' in text, "the log has to start fresh each run"

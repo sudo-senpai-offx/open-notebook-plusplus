@@ -324,7 +324,16 @@ do_apply || exit 1
 if [ "$RESTART" -eq 1 ]; then
   say "  starting the stack again"
   if [ -f "$HOME/bin/onb" ]; then
-    nohup sh "$HOME/bin/onb" >/dev/null 2>&1 &
+    # To a log, not to /dev/null.
+    #
+    # Discarding the output made every failure of a detached start silent:
+    # the updater reported success, nothing came up, and the only evidence was
+    # `onb-stack status` showing everything DOWN with no reason attached.
+    # Truncated per run so it cannot grow without bound.
+    _startlog="$HOME/onb-start.log"
+    : > "$_startlog"
+    nohup sh "$HOME/bin/onb" >>"$_startlog" 2>&1 &
+    say "  log: $_startlog"
   else
     say "  WARNING: ~/bin/onb not found; start the stack yourself"
   fi
