@@ -45,6 +45,7 @@ import math
 import mimetypes
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,50 @@ STT_PORT = os.environ.get("STT_PORT", "8090")
 TTS_PORT = os.environ.get("TTS_PORT", "8091")
 STT_URL = f"http://127.0.0.1:{STT_PORT}"
 TTS_URL = f"http://127.0.0.1:{TTS_PORT}"
+
+# Where the STT loop is in progress, so the signal handler can save it.
+_CHECKPOINT: Path | None = None
+_RESULTS: dict[str, dict] = {}
+
+
+def install_signal_handlers() -> None:
+    """Make Ctrl+C and `kill` work, unconditionally.
+
+    Two things swallow an interrupt in this script, and both were observed:
+
+    - `with ThreadPoolExecutor(...)` runs `shutdown(wait=True)` on the way out,
+      which blocks until in-flight workers finish. Each worker can be inside a
+      transcription with a 600-second deadline, so Ctrl+C appeared to do nothing
+      for up to ten minutes.
+    - Even outside the executor, `SystemExit` has to unwind past whatever the
+      main thread is blocked in. A long socket read is exactly that.
+
+    So the handler saves the checkpoint and calls `os._exit`, which cannot be
+    deferred by a pending shutdown or a pending read. Nothing is lost: every
+    completed clip is already on disk, and the next run resumes from it.
+    """
+
+    def bail(signum: int, _frame: object) -> None:
+        name = "SIGINT (Ctrl+C)" if signum == signal.SIGINT else f"signal {signum}"
+        print(f"\n  {YELLOW}{name} - saving and exiting{RESET}", flush=True)
+        try:
+            if _CHECKPOINT is not None:
+                save_checkpoint(_CHECKPOINT, _RESULTS)
+                done = len(_RESULTS)
+                print(
+                    f"  {DIM}{done} clip(s) scored and saved; re-run to resume{RESET}",
+                    flush=True,
+                )
+        except Exception:  # noqa: BLE001 - we are already exiting
+            pass
+        os._exit(130)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, bail)
+        except (OSError, ValueError):
+            pass
+
 
 # Character error rate ceilings, per language. Tuned for a multilingual
 # large-v3-tier model on clean read speech, not for lecture audio — a phone
@@ -378,8 +423,12 @@ def run_stt(
     total = len(manifest["clips"])
     done = 0
 
+    global _CHECKPOINT, _RESULTS
     checkpoint = fixtures / "stt-results.json"
     seen: dict[str, dict] = {} if fresh else load_checkpoint(checkpoint)
+    # Published so the SIGINT handler can save on Ctrl+C. Both names, because
+    # the handler reads the module global while the loop rebinds its local.
+    _CHECKPOINT, _RESULTS = checkpoint, seen
     if seen:
         print(
             f"  {DIM}resuming: {len(seen)} clip(s) already scored in "
@@ -428,6 +477,9 @@ def run_stt(
                 "http": status,
             }
             save_checkpoint(checkpoint, seen)
+            # `seen` is the same object throughout, but rebind the global anyway:
+            # the handler must never depend on the loop having got this far.
+            _RESULTS = seen
             origin = ""
 
         done += 1
@@ -627,8 +679,17 @@ def run_robustness(fixtures: Path) -> tuple[bool, dict]:
             status, text = transcribe(path)
             return path.name, status, time.monotonic() - begin
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        # Not `with ThreadPoolExecutor(...)`: its __exit__ calls
+        # shutdown(wait=True), which blocks until in-flight workers finish. Each
+        # is inside a transcription with a 600s deadline, so a Ctrl+C during this
+        # block raised KeyboardInterrupt and then hung on the way out — which is
+        # indistinguishable from Ctrl+C being ignored. wait=False plus
+        # cancel_futures means the interpreter can leave immediately.
+        pool = ThreadPoolExecutor(max_workers=2)
+        try:
             results = list(pool.map(one, clips))
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         wall = time.monotonic() - started
         slowest = max(r[2] for r in results)
         for name, status, took in results:
@@ -665,6 +726,7 @@ def main() -> int:
     parser.add_argument("--no-stt", action="store_true")
     parser.add_argument("--no-tts", action="store_true")
     args = parser.parse_args()
+    install_signal_handlers()
 
     fixtures = Path(os.path.expanduser(args.fixtures))
     print(f"fixtures: {fixtures}")

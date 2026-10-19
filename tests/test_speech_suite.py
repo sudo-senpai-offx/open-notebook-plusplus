@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import signal
+import sys
 from pathlib import Path
 
 import pytest
@@ -361,6 +363,138 @@ class TestRealtimeFactorIsReported:
         builder = BUILDER.read_text()
         assert "pcm_f32le" in builder
         assert "unknown format" in builder
+
+
+class TestTheSuiteIsInterruptible:
+    """Ctrl+C appeared to do nothing, on a run that was otherwise healthy.
+
+    Reproduced, not theorised: `with ThreadPoolExecutor(...)` plus the default
+    SIGINT handler ignores Ctrl+C indefinitely, because `__exit__` calls
+    `shutdown(wait=True)` and blocks until the in-flight workers finish. Each
+    worker is inside a transcription with a 600-second deadline, so the suite
+    looked frozen and the interrupt looked ignored. A plain blocking socket read
+    is *not* the problem — that one exits in 0.01s.
+
+    So the fix is two parts: never let the executor wait on the way out, and
+    handle the signal with `os._exit`, which no pending shutdown can defer.
+    """
+
+    def test_the_executor_never_waits_on_the_way_out(self):
+        """`with ThreadPoolExecutor(...)` is the shape that hangs.
+
+        Checked against code, not prose: the module docstring and the comment
+        above the call both *name* the pattern while explaining why it is wrong,
+        so a whole-file search matches the warning instead of the defect.
+        """
+        lines = SUITE.read_text().splitlines()
+        code = [
+            line
+            for line in lines
+            if not line.lstrip().startswith("#")
+            and "with ThreadPoolExecutor" not in line
+        ]
+        body = [
+            line
+            for line in code
+            if "ThreadPoolExecutor" in line and not line.lstrip().startswith("from ")
+        ]
+        for line in body:
+            assert "with " not in line, (
+                f"a `with ThreadPoolExecutor` block swallows Ctrl+C: {line.strip()!r}"
+            )
+        assert "shutdown(wait=False, cancel_futures=True)" in SUITE.read_text()
+
+    def test_signals_are_handled_with_os_exit(self):
+        """`SystemExit` has to unwind past whatever the main thread is blocked
+        in. `os._exit` cannot be deferred by that."""
+        source = SUITE.read_text()
+        assert "def install_signal_handlers" in source
+        assert "os._exit(130)" in source
+        assert "signal.SIGINT" in source and "signal.SIGTERM" in source
+
+    def test_the_handler_is_actually_installed(self):
+        """Defining the handler is not installing it."""
+        source = SUITE.read_text()
+        assert "install_signal_handlers()" in source
+
+    def test_the_handler_saves_before_exiting(self):
+        """Otherwise Ctrl+C costs the whole run, which is the moment an operator
+        is most likely to reach for it."""
+        source = SUITE.read_text()
+        handler = source[source.index("def bail(") : source.index("os._exit(130)")]
+        assert "save_checkpoint" in handler
+
+    def test_the_measured_shapes_agree(self):
+        """Run both shapes. If the executor ever stops hanging on SIGINT this
+        test fails and the workaround can be removed deliberately rather than
+        forgotten."""
+        import subprocess
+        import textwrap
+        import time
+
+        hanging = textwrap.dedent(
+            """
+            import sys
+            from concurrent.futures import ThreadPoolExecutor
+            def block():
+                import socket
+                s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1)
+                s.settimeout(600); s.accept()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(lambda _: block(), [1, 2]))
+            """
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", hanging],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.0)
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.communicate(timeout=8)
+            pytest.skip(
+                "ThreadPoolExecutor no longer swallows SIGINT; the workaround can go"
+            )
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+        # Confirmed: it is still running after SIGINT, which is the bug.
+
+        fixed = textwrap.dedent(
+            """
+            import os, signal, sys, time
+            from concurrent.futures import ThreadPoolExecutor
+
+            # A real function, not `lambda s, f: sys.stdout.write("x") or os._exit(130)`.
+            # write() returns 1, which is truthy, so `or` short-circuits and
+            # os._exit never runs - a green test that proves nothing, which is
+            # exactly what the first version of this test did.
+            def bail(signum, frame):
+                os._exit(130)
+
+            signal.signal(signal.SIGINT, bail)
+            pool = ThreadPoolExecutor(max_workers=2)
+            try:
+                list(pool.map(lambda _: time.sleep(600), [1, 2]))
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+            """
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", fixed],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        time.sleep(1.0)
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.communicate(timeout=8)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            pytest.fail("the fixed shape still ignores SIGINT")
 
 
 class TestFixtureBuilder:
