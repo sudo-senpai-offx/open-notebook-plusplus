@@ -95,16 +95,22 @@ wait_healthy() {
 }
 
 kill_tts() {
-  pid=$(pid_of) || return 0
+  # `|| return 0` rather than falling through to a "stopped" message: if pid_of
+  # finds nothing there is nothing to stop, and saying "stopped" would report an
+  # action that was never taken.
+  pid=$(pid_of) || { echo "[tts] not running"; return 0; }
   kill "$pid" 2>/dev/null
   i=0
   while [ "$i" -lt 15 ] && pid_of >/dev/null 2>&1; do i=$((i + 1)); sleep 1; done
-  if pid=$(pid_of); then
-    echo "[tts] ignoring SIGTERM; SIGKILL to $pid"
-    kill -9 "$pid" 2>/dev/null
+  if _still=$(pid_of); then
+    echo "[tts] ignoring SIGTERM; SIGKILL to $_still"
+    kill -9 "$_still" 2>/dev/null
     j=0
     while [ "$j" -lt 10 ] && pid_of >/dev/null 2>&1; do j=$((j + 1)); sleep 1; done
   fi
+  # The pid that was actually signalled, not whatever `pid` holds by now. Reusing
+  # `pid` for the SIGKILL check made a server that was never running report
+  # `stopped (pid )` — claiming an action it did not take, against an empty pid.
   echo "[tts] stopped (pid $pid)"
 }
 

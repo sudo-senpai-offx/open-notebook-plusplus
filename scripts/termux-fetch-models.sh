@@ -76,11 +76,33 @@ fail() {
   exit 1
 }
 
+# Size of a file, or 0 when it does not exist.
+#
+# Written as an explicit existence test rather than `wc -c < "$f" 2>/dev/null`.
+# Two bugs in that one-liner, both seen on the device:
+#
+#   - POSIX applies redirections left to right, so `< "$f"` is attempted before
+#     `2>/dev/null` takes effect. On a missing file the *shell's* redirection
+#     error leaks to the terminal - the same class already fixed in the /proc
+#     scans, reintroduced here.
+#   - `_have=$(wc -c < "$f" 2>/dev/null | tr -d ' ' || echo 0)`: the `||` guards
+#     the *pipeline*, and `tr` always succeeds, so `echo 0` never runs and _have
+#     comes back empty. Empty is not "0", so `[ "$_have" != "0" ]` was true and a
+#     file that had never been downloaded reported "WRONG SIZE, discarding".
+file_bytes() {
+  [ -f "$1" ] || { echo 0; return 0; }
+  # Braced even though the `-f` above already guarantees the file exists, so the
+  # helper stays correct if that guard is ever removed. A scan-based test pins
+  # the ordering across the whole file, and this line was the last offender.
+  _b=$({ wc -c < "$1"; } 2>/dev/null | tr -d ' ')
+  echo "${_b:-0}"
+}
+
 # fetch_exact url dest want_bytes label
 # Downloads to dest.part and promotes only on an exact byte match. Never resumes.
 fetch_exact() {
   _u="$1"; _d="$2"; _want="$3"; _lbl="$4"
-  _have=$(wc -c < "$_d" 2>/dev/null | tr -d ' ' || echo 0)
+  _have=$(file_bytes "$_d")
 
   if [ "$_have" = "$_want" ]; then
     printf '  %-32s %10s bytes  complete\n' "$_lbl" "$_have"
@@ -101,7 +123,7 @@ fetch_exact() {
     rm -f "$_d.part"
     curl -L --retry 3 --retry-all-errors --speed-time 60 --speed-limit 1024 \
       -o "$_d.part" "$_u" >/dev/null 2>&1 || true
-    _got=$(wc -c < "$_d.part" 2>/dev/null | tr -d ' ' || echo 0)
+    _got=$(file_bytes "$_d.part")
     if [ "$_got" = "$_want" ]; then
       mv "$_d.part" "$_d"
       printf '  %-32s %10s bytes  complete\n' "$_lbl" "$_got"
@@ -127,7 +149,7 @@ check_models() {
   _bad=0
   for name in $(echo "$MODELS" | cut -d: -f1); do
     want=$(echo "$MODELS" | grep "^$name:" | cut -d: -f2)
-    have=$(wc -c < "$MODEL_DIR/$name" 2>/dev/null | tr -d ' ' || echo 0)
+    have=$(file_bytes "$MODEL_DIR/$name")
     [ "$have" = "$want" ] || _bad=$((_bad + 1))
   done
   echo "$_bad"
@@ -139,8 +161,8 @@ check_voices() {
     name=$(echo "$entry" | cut -d: -f1)
     want_onnx=$(echo "$entry" | cut -d: -f2)
     want_json=$(echo "$entry" | cut -d: -f3)
-    have_onnx=$(wc -c < "$VOICE_DIR/$name.onnx" 2>/dev/null | tr -d ' ' || echo 0)
-    have_json=$(wc -c < "$VOICE_DIR/$name.onnx.json" 2>/dev/null | tr -d ' ' || echo 0)
+    have_onnx=$(file_bytes "$VOICE_DIR/$name.onnx")
+    have_json=$(file_bytes "$VOICE_DIR/$name.onnx.json")
     [ "$have_onnx" = "$want_onnx" ] || _bad=$((_bad + 1))
     [ "$have_json" = "$want_json" ] || _bad=$((_bad + 1))
   done

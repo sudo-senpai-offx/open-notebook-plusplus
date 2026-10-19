@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -1176,6 +1178,133 @@ class TestTtsLauncherLibraryPath:
         # Derived from the binary's own location, not hardcoded, so a relocated
         # prefix keeps working.
         assert 'PIPER_LIB_DIR=$(dirname "$PIPER_BIN")' in text
+
+
+class TestSizeReadsSurviveMissingFiles:
+    """Every size read must survive a file that does not exist.
+
+    Two bugs in `wc -c < "$f" 2>/dev/null | tr -d ' ' || echo 0`, both observed
+    on the device during the first real model fetch:
+
+      - POSIX applies redirections left to right, so `< "$f"` is attempted
+        *before* `2>/dev/null` takes effect. The shell's redirection error leaks
+        to the terminal — the same class just fixed in the /proc scans, and
+        reintroduced here in new code written immediately afterwards.
+      - the `||` guards the *pipeline*, and `tr` always succeeds, so `echo 0`
+        never runs and the variable comes back **empty**. Empty is not "0", so
+        `[ "$_have" != "0" ]` was true and a file that had never been downloaded
+        reported `WRONG SIZE, discarding`.
+
+    The second is the worse one: it misreports a missing file as a corrupt one,
+    which points the reader at the wrong cause entirely.
+    """
+
+    SCRIPT = "termux-fetch-models.sh"
+
+    def _run_fetch_against(self, present: bool) -> str:
+        """Run fetch_exact's size logic with the file absent / present."""
+        script = _read_script(self.SCRIPT)
+        fn = script[script.index("file_bytes()") : script.index("fetch_exact()")]
+        harness = fn + '\nfile_bytes "$TARGET"\n'
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
+            handle.write(harness)
+            path = handle.name
+        target = _stt_fixture_file("x") if present else "/nonexistent/onb-test-file"
+        try:
+            done = subprocess.run(
+                ["/bin/sh", path],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "TARGET": target},
+                timeout=30,
+            )
+            return done.stdout.strip()
+        finally:
+            os.unlink(path)
+
+    def test_a_missing_file_reads_as_zero_and_says_nothing(self):
+        out = self._run_fetch_against(present=False)
+        assert out == "0", f"a missing file must read as 0, got {out!r}"
+
+    def test_a_present_file_reads_its_real_size(self):
+        out = self._run_fetch_against(present=True)
+        assert out == "1", f"a one-byte file must read as 1, got {out!r}"
+
+    def test_no_size_read_leaks_a_shell_redirection_error(self):
+        """The class of bug, checked across the whole file rather than one line."""
+        text = _read_script(self.SCRIPT)
+        code = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        )
+        # Any `< "$..."` immediately followed later by `2>/dev/null` on the same
+        # line is the unsafe ordering. Safe forms use braces or put stderr first.
+        offenders = [
+            line.strip()
+            for line in code.splitlines()
+            if "<" in line
+            and "2>/dev/null" in line
+            and "{" not in line
+            and line.index("<") < line.index("2>/dev/null")
+        ]
+        assert not offenders, (
+            "redirection attempted before stderr is redirected:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_a_missing_file_is_not_reported_as_a_corrupt_one(self):
+        """The misleading-message half, asserted where the message is written."""
+        text = _read_script(self.SCRIPT)
+        assert '[ "$_have" != "0" ]' in text, (
+            "the wrong-size branch must key off a real 0"
+        )
+        assert "file_bytes" in text
+        # Every size read goes through the helper. The helper itself is sliced
+        # out by function boundary rather than by string replacement, which
+        # silently stopped matching the moment the helper was braced.
+        code = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        )
+        start = code.index("file_bytes()")
+        # Anchored on the next function, not on the comment above it: `code` has
+        # comment lines stripped, so a comment anchor raises ValueError.
+        end = code.index("fetch_exact()")
+        outside = code[:start] + code[end:]
+        assert "wc -c" not in outside, (
+            "a raw `wc -c` outside file_bytes reintroduces the missing-file bug"
+        )
+
+
+class TestStopReportsWhatItActuallyDid:
+    """`stopped (pid )` claims an action that was never taken.
+
+    `kill_stt` reassigned `pid` for the SIGKILL check, so by the time the final
+    echo ran, `pid` held whatever the second lookup produced — empty when nothing
+    was running. The message then read `stopped (pid )` on a server that had
+    never started, which is worse than silence: it tells an operator the stop
+    worked when there was nothing to stop.
+    """
+
+    @pytest.mark.parametrize("script", ["termux-stt.sh", "termux-tts.sh"])
+    def test_the_kill_check_does_not_clobber_the_reported_pid(self, script):
+        text = _read_script(script)
+        code = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        )
+        # The SIGKILL branch must use its own variable...
+        assert "if _still=$(pid_of); then" in code, (
+            f"{script}: SIGKILL check still reuses pid"
+        )
+        # ...and the reported pid must be the one that was signalled.
+        assert re.search(r'echo "\[\w+\] stopped \(pid \$pid\)"', code), (
+            f"{script}: the final message must report $pid, not the SIGKILL lookup"
+        )
+
+    @pytest.mark.parametrize("script", ["termux-stt.sh", "termux-tts.sh"])
+    def test_it_reports_nothing_running_distinctly(self, script):
+        text = _read_script(script)
+        assert (
+            'echo "[stt] not running"' in text or 'echo "[tts] not running"' in text
+        ), f"{script}: stopping something that is not running must say so"
 
 
 class TestSttModelSelection:
