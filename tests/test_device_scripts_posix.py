@@ -148,9 +148,9 @@ class TestUpdateSurvivesTheOperator:
         body = text[text.index("in_guest()") :]
         body = body[: body.index("\n  }")]
         timeout_lines = [
-            l
-            for l in body.splitlines()
-            if "timeout" in l and "ONB_GUEST_TIMEOUT:-0" not in l
+            line
+            for line in body.splitlines()
+            if "timeout" in line and "ONB_GUEST_TIMEOUT:-0" not in line
         ]
         assert timeout_lines, "no timeout in in_guest"
         for line in timeout_lines:
@@ -172,8 +172,16 @@ class TestUpdateSurvivesTheOperator:
         """
         text = (SCRIPTS / "termux-update.sh").read_text()
         lines = text.split("\n")
-        start = next(n for n, l in enumerate(lines) if l.startswith('case "$rc" in'))
-        end = next(n for n in range(start, len(lines)) if lines[n].strip() == "esac")
+        start = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith('case "$rc" in')
+        )
+        end = next(
+            index
+            for index in range(start, len(lines))
+            if lines[index].strip() == "esac"
+        )
         arm = "\n".join(lines[start : end + 1])
         assert '[ "$RESTART" -eq 1 ] || exit 0' in arm, (
             "the up-to-date arm must honour --restart rather than always exiting"
