@@ -345,15 +345,29 @@ def _order_held(
 ) -> List[Dict[str, Any]]:
     """Order the held queue so interactive work goes first.
 
-    Strict oldest-first is the right default and is exactly what this returns
-    when residency control is off - unchanged, because a deployment with no
-    supervisor must not have its queue order altered by a feature it cannot
-    see.
+    Three tiers, and only the middle one depends on the supervisor:
 
-    With policy available the order becomes: work needing no model (cheap
-    plumbing, 64 MB, completes fastest and unblocks the most), then model work
-    by class priority ascending - chat at 10, embedding at 50 - then
-    oldest-first within a class.
+    0. **Work needing no model** - 64 MB, finishes in seconds, and unblocks
+       whatever queued it.
+    1. **Model work, by class priority** ascending - chat at 10, embedding at 50.
+    2. **Oldest-first within a tier**, unchanged, because a queue that reorders
+       equal work is a queue that can livelock.
+
+    Tier 0 is *not* gated on residency, and that is the fix. Gating it meant a
+    deployment with residency off - which is every PC, and the phone before the
+    guest enables it - fell back to strict creation order, so the insight write
+    a transformation had just finished sat behind every older transformation.
+    Measured on a 45-job regeneration: three completed transformations whose
+    text was ready to write were queued 40th, 41st and 42nd of 42, about three
+    and a half hours behind work that could not have been unblocked by them at
+    all. Nothing about tier 0 needs a supervisor - it reads the command name
+    off the row - so gating it bought nothing and cost the whole dependency
+    chain.
+
+    Tier 1 still requires the supervisor, because class priorities are the
+    supervisor's to publish. With no policy every model job lands in tier 1 with
+    the same priority, which is exactly strict oldest-first among them - the
+    behaviour that test has always pinned.
 
     This deliberately breaks an invariant the loop below relies on: that a
     refused job means nothing behind it has a better claim. That reasoning is
@@ -362,15 +376,18 @@ def _order_held(
     the entire point of the feature - so the per-row `continue` below now skips
     one job rather than abandoning the queue behind it.
     """
-    if not policy:
-        return held
 
     def sort_key(row: Dict[str, Any]) -> tuple[int, int, str]:
+        created = str(row.get("created") or "")
         roles = _roles_of(row, generation_bytes)
+        if not roles:
+            return (0, 0, created)
+        if not policy:
+            # Equal priority for every model job, so this is oldest-first
+            # among them - but still behind the no-model tier.
+            return (1, 0, created)
         known = [policy[role].priority for role in roles if role in policy]
-        if not roles or not known:
-            return (0, 0, str(row.get("created") or ""))
-        return (1, min(known), str(row.get("created") or ""))
+        return (1, min(known) if known else 0, created)
 
     return sorted(held, key=sort_key)
 

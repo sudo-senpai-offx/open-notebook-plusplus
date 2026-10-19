@@ -219,6 +219,60 @@ class TestOrdering:
             "run_transformation",
         ]
 
+    def test_no_model_work_leads_even_with_no_policy(self):
+        """The regression this tier's ungating fixes, stated as a rule.
+
+        Gating the no-model tier on the supervisor meant a PC - residency off,
+        which is the default everywhere - fell back to strict creation order. A
+        `create_insight` submitted by a transformation that had just finished
+        then queued behind every older transformation, so generated text sat
+        finished and unwritable. Measured: positions 40, 41 and 42 of 42.
+
+        The tier reads the command name off the row. It never needed a
+        supervisor, and gating it bought nothing.
+        """
+        held = [_job("run_transformation", i) for i in range(1, 6)]
+        held.append(_job("create_insight", 7))
+        ordered = _order_held(held, None, GENERATION_BYTES)
+        assert ordered[0]["name"] == "create_insight"
+        assert [row["name"] for row in ordered[1:]] == ["run_transformation"] * 5
+
+    def test_no_policy_still_orders_model_work_oldest_first(self):
+        """Ungating tier 0 must not disturb tier 1.
+
+        With no policy there are no class priorities to publish, so every model
+        job shares one and oldest-first decides - the behaviour the
+        `unchanged_when_no_policy` test has always pinned, now stated on its own
+        so a future change to tier 0 cannot quietly reorder this.
+        """
+        held = [
+            _job("run_transformation", 3),
+            _job("run_transformation", 1),
+            _job("run_transformation", 2),
+        ]
+        ordered = _order_held(held, None, GENERATION_BYTES)
+        assert [row["id"] for row in ordered] == [
+            "command:run_transformation1",
+            "command:run_transformation2",
+            "command:run_transformation3",
+        ]
+
+    def test_a_chain_drains_rather_than_serialising_behind_itself(self):
+        """The whole point: transformation -> create_insight, in that order.
+
+        Modelling the queue as it actually stood - N generations queued, then
+        the insight writes their predecessors produced - the writes must be
+        admitted first. Otherwise every job in a regeneration waits for the
+        entire backlog ahead of it, and the pipeline advances one link per
+        full drain rather than one link per free slot.
+        """
+        held = [_job("run_transformation", i) for i in range(1, 10)]
+        held += [_job("create_insight", i) for i in range(10, 13)]
+        ordered = _order_held(held, None, GENERATION_BYTES)
+        names = [row["name"] for row in ordered]
+        assert names[:3] == ["create_insight"] * 3
+        assert set(names[3:]) == {"run_transformation"}
+
     def test_oldest_first_within_a_class(self):
         held = [
             _job("run_transformation", 3),
