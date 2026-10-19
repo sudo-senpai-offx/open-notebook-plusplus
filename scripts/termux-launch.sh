@@ -145,7 +145,7 @@ llama_healthy() {
       argv0=$(tr '\0' '\n' 2>/dev/null < "$p/cmdline" | head -1) || continue
       [ -n "$argv0" ] || continue
       [ "${argv0##*/}" = "llama-server" ] || continue
-      case "$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)" in
+      case "$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null)" in
         *"--port $1"*) echo "${p#/proc/}" ;;
       esac
     done
@@ -235,7 +235,7 @@ stop_all() {
 # Any `~/bin/onb` launcher other than this one.
 launcher_pids() {
   for p in /proc/[0-9]*; do
-    _cl=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
+    _cl=$({ tr '\0' ' ' <"$p/cmdline"; } 2>/dev/null) || continue
     case "$_cl" in
       *"$HOME/bin/onb "*) echo "${p#/proc/}" ;;
     esac
@@ -251,7 +251,7 @@ launcher_pids() {
 # is left holding the database.
 proot_pids() {
   for p in /proc/[0-9]*; do
-    _cl=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
+    _cl=$({ tr '\0' ' ' <"$p/cmdline"; } 2>/dev/null) || continue
     case "$_cl" in
       *"--rootfs=$ROOTFS_UBUNTU"*|*"/containers/ubuntu/rootfs"*)
         echo "${p#/proc/}" ;;
@@ -467,7 +467,7 @@ already_running() {
 
   for p in /proc/[0-9]*; do
     _pid=${p#/proc/}
-    cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    cmd=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
     case "$cmd" in
       *"$HOME/bin/onb"*) ;;
       *) continue ;;

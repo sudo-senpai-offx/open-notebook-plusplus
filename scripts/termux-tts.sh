@@ -64,7 +64,13 @@ fi
 
 pid_of() {
   for p in /proc/[0-9]*; do
-    cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    # `{ ...; } 2>/dev/null` rather than `tr ... < file 2>/dev/null`: redirections
+    # apply left to right, so a `<` on a pid that exited between the glob and the
+    # read fails before the stderr redirect is in place, and the *shell's*
+    # redirection error lands on the terminal. That is a `cannot open
+    # /proc/<pid>/cmdline` on every probe that races a server restart. The braces
+    # put the failed redirection inside the redirected command.
+    cl=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
     # Match the server script, not a port. The port is passed in the
     # *environment* (`TTS_PORT=8091 python3 .../onb-tts-server`), so it never
     # appears on the command line at all — an earlier version matched on
@@ -110,9 +116,13 @@ served_model() {
   # demonstrably serving one. Same UID in Termux, so /proc/<pid>/environ is
   # readable.
   for p in /proc/[0-9]*; do
-    cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    # Braces, for the same reason as in pid_of: a pid can exit between the glob
+    # and the read, and an un-braced `2>/dev/null` does not cover the shell's own
+    # redirection error. This is the line that printed
+    # `cannot open /proc/<pid>/cmdline: No such file` on a probe.
+    cl=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
     case "$cl" in *onb-tts-server*)
-      tr '\0' '\n' < "$p/environ" 2>/dev/null \
+      { tr '\0' '\n' < "$p/environ"; } 2>/dev/null \
         | sed -n 's/^TTS_MODEL=//p' | head -1 | sed 's|.*/||;s|\.onnx$||'
       return 0
       ;;

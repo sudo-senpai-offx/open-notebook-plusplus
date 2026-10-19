@@ -46,7 +46,7 @@ fi
 
 pid_of() {
   for p in /proc/[0-9]*; do
-    cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    cl=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
     # --port 8081 is what distinguishes this from the chat server on 8080
     case "$cl" in *llama-server*--port\ 8081*) echo "${p#/proc/}"; return 0 ;; esac
   done

@@ -54,7 +54,7 @@ fi
 
 pid_of() {
   for p in /proc/[0-9]*; do
-    cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    cl=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
     # --port 8090 distinguishes STT from chat (8080), embed (8081), TTS (8091)
     case "$cl" in *whisper-server*--port\ 8090*) echo "${p#/proc/}"; return 0 ;; esac
   done
@@ -91,7 +91,7 @@ kill_stt() {
 # is the source of truth — no /v1/models endpoint exists on whisper-server.
 served_model() {
   for p in /proc/[0-9]*; do
-    cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    cl=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
     case "$cl" in *whisper-server*--port\ 8090*)
       # The value after the model flag. `up` starts the server with `-m`, and
       # grepping for `--model` found nothing — so the probe reported an empty

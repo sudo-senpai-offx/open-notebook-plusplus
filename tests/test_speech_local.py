@@ -984,26 +984,6 @@ class TestPiperBuildRoute:
         assert 'ldd "$BIN"' in text
         assert 'fail "shared libraries"' in text
 
-
-class TestTtsLauncherLibraryPath:
-    """piper cannot load its own libraries without this.
-
-    The RPATH is baked at install time and names the flat prefix. Once the binary
-    is moved to `bin/`, that path is stale, and the `.so` files sit beside the
-    binary — which the loader does not search. So the launcher exports
-    LD_LIBRARY_PATH, and the server hands piper to `subprocess.run`, which
-    inherits it. Without it, synthesis fails at run time with a loader error that
-    names a shared object rather than the relocation that caused it.
-    """
-
-    def test_the_launcher_exports_a_library_path_for_piper(self):
-        text = _read_script("termux-tts.sh")
-        assert "LD_LIBRARY_PATH=" in text
-        assert "export LD_LIBRARY_PATH" in text
-        # Derived from the binary's own location, not hardcoded, so a relocated
-        # prefix keeps working.
-        assert 'PIPER_LIB_DIR=$(dirname "$PIPER_BIN")' in text
-
     def test_onnxruntime_dir_goes_in_the_environment_not_on_the_command_line(self):
         """The nested ExternalProject only inherits the environment.
 
@@ -1175,6 +1155,97 @@ class TestTtsLauncherLibraryPath:
         text = _read_script("termux-build-piper.sh")
         assert "static-libstdc++" in text
         assert "sed -i" in text
+
+
+class TestTtsLauncherLibraryPath:
+    """piper cannot load its own libraries without this.
+
+    The RPATH is baked at install time and names the flat prefix. Once the binary
+    is moved to `bin/`, that path is stale, and the `.so` files sit beside the
+    binary — which the loader does not search. So the launcher exports
+    LD_LIBRARY_PATH, and the server hands piper to `subprocess.run`, which
+    inherits it. Without it, synthesis fails at run time with a loader error that
+    names a shared object rather than the relocation that caused it.
+    """
+
+    def test_the_launcher_exports_a_library_path_for_piper(self):
+        text = _read_script("termux-tts.sh")
+        assert "LD_LIBRARY_PATH=" in text
+        assert "export LD_LIBRARY_PATH" in text
+        # Derived from the binary's own location, not hardcoded, so a relocated
+        # prefix keeps working.
+        assert 'PIPER_LIB_DIR=$(dirname "$PIPER_BIN")' in text
+
+
+class TestProcScanningIsRaceSafe:
+    """Every launcher scans /proc, and every scan races process exit.
+
+    `for p in /proc/[0-9]*` globs a snapshot; by the time the loop body reads
+    `$p/cmdline`, that pid may already be gone. The obvious guard does not work:
+
+        cl=$(tr '\\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+
+    POSIX applies redirections left to right, so `< "$p/cmdline"` is attempted
+    *before* `2>/dev/null` takes effect. When the input redirection fails, the
+    shell writes its own error and it lands on the terminal — `2>/dev/null` only
+    ever covered `tr`, which never ran. Seen on the device as
+
+        ~/bin/onb-tts: 113: cannot open /proc/25104/cmdline: No such file
+
+    on an otherwise perfectly healthy `probe`, which is the worst place for it:
+    the output an operator reads to decide whether TTS is up. And the line right
+    after it still reported `role=tts resident=1`, so it reads as noise that
+    could equally read as a failure.
+
+    The fix is braces — `{ tr ... < "$p/cmdline"; } 2>/dev/null` — which put the
+    failing redirection inside the redirected command. Six sites across six
+    launchers had the unsafe ordering, so this scans the whole family.
+    """
+
+    LAUNCHERS = [
+        "termux-stt.sh",
+        "termux-tts.sh",
+        "termux-embed.sh",
+        "termux-launch.sh",
+        "termux-model.sh",
+        "termux-stack.sh",
+    ]
+
+    def _proc_scans(self, script: str) -> List[str]:
+        return [
+            line
+            for line in _read_script(script).splitlines()
+            if ("/cmdline" in line or "/environ" in line)
+            and "<" in line
+            and not line.lstrip().startswith("#")
+        ]
+
+    def test_the_pattern_is_actually_present_to_catch(self):
+        """A test that passes because its scan found nothing is worse than none.
+
+        These files really do scan /proc, so the scan must find sites. Without
+        this, deleting every /proc scan would turn the safety tests green.
+        """
+        found = {s: len(self._proc_scans(s)) for s in self.LAUNCHERS}
+        assert any(found.values()), f"no launcher scans /proc any more: {found}"
+        assert sum(found.values()) >= 8, f"expected the scans to be present: {found}"
+
+    def test_no_launcher_redirects_a_proc_path_before_stderr(self):
+        """The invariant itself, reported per file so a failure names the site."""
+        for script in self.LAUNCHERS:
+            bad = []
+            for line in self._proc_scans(script):
+                # Safe forms: braces around the command, or 2>/dev/null written
+                # before the `<`, which puts stderr in place first.
+                has_braces = "$({ " in line or "{ tr" in line
+                stderr_first = "2>/dev/null" in line and line.index(
+                    "2>/dev/null"
+                ) < line.index("<")
+                if not (has_braces or stderr_first):
+                    bad.append(line.strip())
+            assert not bad, f"{script}: unsafe /proc redirection:\n  " + "\n  ".join(
+                bad
+            )
 
 
 class TestProcessIdentification:

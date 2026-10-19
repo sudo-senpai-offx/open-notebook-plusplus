@@ -24,7 +24,7 @@ LOG="$HOME/llama-server.log"
 
 pid_of() {
   for p in /proc/[0-9]*; do
-    cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    cl=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
     case "$cl" in *llama-server*) echo "${p#/proc/}"; return 0 ;; esac
   done
   return 1
