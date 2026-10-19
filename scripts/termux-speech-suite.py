@@ -592,8 +592,18 @@ def run_tts(max_cer: float) -> tuple[bool, dict]:
         )
         elapsed = time.monotonic() - started
         if status != 200:
-            failures.append(f"{voice}: HTTP {status} {payload[:80]!r}")
-            print(f"  {lang:4} {voice:28} {RED}HTTP {status}{RESET}")
+            failures.append(f"{voice}: HTTP {status} {payload[:200]!r}")
+            # The body, always. A bare "HTTP 500" is the least useful line in
+            # the report: it names no cause and sends the reader to the log
+            # instead of answering what went wrong. The first Japanese-voice
+            # run printed `HTTP 500` and nothing else, which is exactly the
+            # "says nothing while failing" shape this suite exists to catch.
+            detail = payload.decode("utf-8", "replace").strip()[:160]
+            print(
+                f"  {lang:4} {voice:28} {RED}HTTP {status}{RESET}"
+                f" {DIM}{detail or '(empty body)'}{RESET}",
+                flush=True,
+            )
             continue
         if not payload.startswith(b"RIFF"):
             failures.append(f"{voice}: HTTP 200 with {len(payload)} bytes, not RIFF")
