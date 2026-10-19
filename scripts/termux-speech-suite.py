@@ -75,6 +75,21 @@ MAX_CER = {
 }
 DEFAULT_MAX_CER = 0.40
 
+# How much slower than realtime a clip may be before it is called a timeout.
+#
+# Measured, not guessed: large-v3-turbo-q5_0 on two A73 threads ran at RTF 8-16
+# on this device — the first full run went 21 minutes over 150 seconds of audio
+# and produced nothing to show for it. A budget of 20 leaves room for that while
+# still bounding the run, and is generous enough that ordinary slowness is not
+# mistaken for a hang.
+DEFAULT_RTF_BUDGET = 20.0
+
+# Floor and ceiling on a per-clip timeout. The floor stops a 4-second clip from
+# getting a 1-second budget it cannot possibly meet; the ceiling stops a long
+# clip from occupying the run indefinitely.
+MIN_CLIP_TIMEOUT = 90
+MAX_CLIP_TIMEOUT = 600
+
 # Languages written without spaces between words. Whisper emits them without
 # spaces and FLEURS references do too, but stripping makes the comparison robust
 # to a model that does insert them.
@@ -211,12 +226,14 @@ def post_json(url: str, payload: dict, timeout: int = 300) -> tuple[int, bytes]:
         return 0, str(exc).encode()
 
 
-def transcribe(path: Path, model: str = "") -> tuple[int, str]:
+def transcribe(path: Path, model: str = "", timeout: int = 300) -> tuple[int, str]:
+    """Returns (status, text). A status of 0 means the transport itself failed."""
     status, body = post_multipart(
         f"{STT_URL}/v1/audio/transcriptions",
         "file",
         path,
         {"model": model} if model else None,
+        timeout=timeout,
     )
     if status != 200:
         return status, body
@@ -224,6 +241,48 @@ def transcribe(path: Path, model: str = "") -> tuple[int, str]:
         return 200, json.loads(body).get("text", "")
     except (ValueError, AttributeError):
         return 200, ""
+
+
+def clip_timeout(duration_s: float, rtf_budget: float) -> int:
+    """Per-clip deadline, scaled to the audio.
+
+    An absolute timeout is wrong in both directions and you cannot tell which
+    until a clip is genuinely slow: it either truncates long clips or spends most
+    of its budget waiting for short ones. Scaling by the measured audio length,
+    with a floor and a ceiling, is the only version that bounds the run without
+    pretending to know in advance how fast the model is.
+    """
+    return int(min(MAX_CLIP_TIMEOUT, max(MIN_CLIP_TIMEOUT, duration_s * rtf_budget)))
+
+
+def load_checkpoint(path: Path) -> dict[str, dict]:
+    """Previously scored clips, so an interrupted run resumes.
+
+    The run is long and the device is unreliable. Losing twenty minutes of
+    transcription to a dropped connection is the worst possible behaviour for a
+    tool whose whole job is to tell you where the weak spot is.
+    """
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (ValueError, OSError):
+        print(f"  {DIM}checkpoint {path.name} unreadable; starting fresh{RESET}")
+        return {}
+
+
+def save_checkpoint(path: Path, results: dict[str, dict]) -> None:
+    """Written atomically. A half-written checkpoint is worse than none, because
+    the next run would silently resume from a truncated set of results."""
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(
+            json.dumps(results, indent=1, ensure_ascii=False), encoding="utf-8"
+        )
+        tmp.replace(path)
+    except OSError as exc:
+        print(f"  {DIM}could not write checkpoint: {exc}{RESET}")
 
 
 def wav_seconds(payload: bytes) -> float:
@@ -289,16 +348,43 @@ def model_tier() -> str:
     return "[stt] model=unknown"
 
 
-def run_stt(manifest: dict, fixtures: Path, max_cer: float) -> tuple[bool, dict]:
+def run_stt(
+    manifest: dict,
+    fixtures: Path,
+    max_cer: float,
+    rtf_budget: float,
+    fresh: bool,
+) -> tuple[bool, dict]:
+    """Score every clip, bounded and resumable.
+
+    Three properties this has and needs:
+
+    * **Bounded.** Every request has a deadline scaled to the clip's audio
+      length. The first run had no deadline at all and went 21 minutes over
+      150 seconds of audio.
+    * **Resumable.** Results are checkpointed after each clip. The device drops
+      connections; losing twenty minutes of transcription to that is the worst
+      possible behaviour for the tool whose job is to find the weak spot.
+    * **Diagnostic.** RTF is printed per clip, because how many times faster
+      than realtime the model runs is a fact about this device and determines
+      whether the tier is usable on it at all.
+    """
     print("\n== STT: transcription accuracy")
     print(f"  {DIM}{model_tier()}{RESET}")
-    # file, CER, transcript, seconds — the timing is carried through so the
-    # per-language summary can report seconds/clip, which is what decides whether
-    # the multilingual tier is usable on this device at all.
-    by_lang: dict[str, list[tuple[str, float | None, str, float]]] = {}
+
+    by_lang: dict[str, list[tuple[str, float | None, str, float, float]]] = {}
     failures: list[str] = []
+    timed_out: list[str] = []
     total = len(manifest["clips"])
     done = 0
+
+    checkpoint = fixtures / "stt-results.json"
+    seen: dict[str, dict] = {} if fresh else load_checkpoint(checkpoint)
+    if seen:
+        print(
+            f"  {DIM}resuming: {len(seen)} clip(s) already scored in "
+            f"{checkpoint.name}{RESET}"
+        )
 
     for clip in manifest["clips"]:
         lang = manifest["locales"][clip["locale"]]["lang"]
@@ -306,47 +392,81 @@ def run_stt(manifest: dict, fixtures: Path, max_cer: float) -> tuple[bool, dict]
         if not path.exists():
             failures.append(f"{clip['file']}: missing from the fixture dir")
             continue
-        started = time.monotonic()
-        status, text = transcribe(path)
-        elapsed = time.monotonic() - started
-        score = cer(clip["reference"], text, lang) if status == 200 else None
-        by_lang.setdefault(lang, []).append((clip["file"], score, text, elapsed))
-        done += 1
 
-        # Per clip, as it lands, flushed.
-        #
-        # This loop is the longest phase in the suite — 150 seconds of audio
-        # through a multilingual model on a phone — and printing nothing until it
-        # finishes is indistinguishable from a hang. The first run gave two
-        # silent minutes on a device that was in fact at 89% CPU. Each line
-        # carries the CER so a weak language is visible while it is still
-        # running, rather than only in a summary nobody is watching arrive.
-        if score is None:
-            mark = RED + f"HTTP {status}" + RESET
-            score_text = f"CER n/a  ({status})"
+        duration = float(clip.get("duration_s") or 0.0)
+        budget = clip_timeout(duration, rtf_budget)
+        prior = seen.get(clip["file"])
+        if prior is not None and prior.get("status") not in ("scored", "timeout"):
+            prior = None
+        cached = prior is not None
+
+        if cached and prior is not None:
+            was_scored = prior.get("status") == "scored"
+            status = int(prior.get("http", 200)) if was_scored else 0
+            text = str(prior.get("text", ""))
+            score = prior.get("cer")
+            elapsed = float(prior.get("seconds", 0.0))
+            origin = DIM + " cached" + RESET
         else:
+            began = time.monotonic()
+            try:
+                status, text = transcribe(path, timeout=budget)
+            except (TimeoutError, OSError, ValueError) as exc:
+                # A read timeout surfaces as a transport failure while the server
+                # is still chewing on the clip. Both facts are recorded: the
+                # elapsed time is the RTF evidence.
+                status, text = 0, str(exc)
+            elapsed = time.monotonic() - began
+            score = cer(clip["reference"], text, lang) if status == 200 else None
+            outcome = "scored" if status == 200 else "timeout"
+            seen[clip["file"]] = {
+                "status": outcome,
+                "cer": score,
+                "text": text[:400],
+                "seconds": round(elapsed, 2),
+                "duration_s": duration,
+                "http": status,
+            }
+            save_checkpoint(checkpoint, seen)
+            origin = ""
+
+        done += 1
+        if status == 200 and score is not None:
+            by_lang.setdefault(lang, []).append(
+                (clip["file"], score, text, elapsed, duration)
+            )
+            rtf = elapsed / duration if duration else 0.0
+            detail = f"CER {score:.3f}  RTF {rtf:5.1f}"
             mark = GREEN + "ok" + RESET if score <= max_cer else RED + "FAIL" + RESET
-            score_text = f"CER {score:.3f}"
+            if score > max_cer:
+                failures.append(
+                    f"{clip['file']}: CER {score:.2f} over {max_cer:.2f} | {text[:60]!r}"
+                )
+        else:
+            by_lang.setdefault(lang, []).append(
+                (clip["file"], None, "", elapsed, duration)
+            )
+            timed_out.append(clip["file"])
+            detail = (
+                f"{'TIMEOUT' if status == 0 else f'HTTP {status}'} budget {budget}s"
+            )
+            mark = RED + "TIMEOUT" + RESET if status == 0 else RED + "ERR" + RESET
+            failures.append(
+                f"{clip['file']}: {detail} for {duration:.1f}s of audio "
+                f"(elapsed {elapsed:.1f}s)"
+            )
+
+        # Flushed: this loop is the long pole and silence here is a hang.
         print(
-            f"  [{done:2}/{total}] {lang:3} {clip['file'][:26]:28} "
-            f"{score_text:20} {elapsed:6.2f}s  {mark}",
+            f"  [{done:2}/{total}] {lang:3} {clip['file'][:26]:28} {detail:32}"
+            f" {elapsed:7.2f}s {mark}{origin}",
             flush=True,
         )
 
-        if status != 200:
-            failures.append(f"{clip['file']}: HTTP {status} {text[:80]}")
-        elif score is None:
-            failures.append(f"{clip['file']}: empty transcript")
-        elif score > max_cer:
-            failures.append(
-                f"{clip['file']}: CER {score:.2f} over {max_cer:.2f} "
-                f"| got {text[:60]!r}"
-            )
-
     for lang in sorted(by_lang):
         ceiling = min(MAX_CER.get(lang, DEFAULT_MAX_CER), max_cer)
-        scores = [s for _f, s, _t, _e in by_lang[lang] if s is not None]
-        times = [e for _f, s, _t, e in by_lang[lang] if s is not None]
+        scores = [s for _f, s, _t, _e, _d in by_lang[lang] if s is not None]
+        times = [e for _f, s, _t, e, _d in by_lang[lang] if s is not None]
         label = (
             manifest["locales"]
             .get(
@@ -360,21 +480,41 @@ def run_stt(manifest: dict, fixtures: Path, max_cer: float) -> tuple[bool, dict]
             .get("label", lang)
         )
         if not scores:
-            print(f"  {lang:4} {label:24} {RED}no transcripts{RESET}")
+            print(
+                f"  {lang:4} {label:24} {RED}no transcripts"
+                f" ({len(by_lang[lang])} clip(s) timed out){RESET}"
+            )
             continue
         mean = sum(scores) / len(scores)
         verdict = GREEN + "pass" + RESET if mean <= ceiling else RED + "FAIL" + RESET
+        # RTF alongside CER, because the two answer different questions: CER says
+        # whether the model understood, RTF says whether it is fast enough to be
+        # usable on this device. A language can pass the first and fail the
+        # second badly, and only one of those is fixable by a better model.
+        durations = [d for _f, _s, _t, _e, d in by_lang[lang] if d]
+        audio = sum(durations)
+        rtf = (
+            (sum(e for _f, s, _t, e, _d in by_lang[lang] if s is not None) / audio)
+            if audio
+            else 0.0
+        )
         print(
             f"  {lang:4} {label:24} CER {mean:.3f} "
             f"{DIM}(worst {max(scores):.3f}, {len(scores)} clips, ceiling {ceiling:.2f}){RESET}"
-            f"  {verdict}"
-            f"  {DIM}mean {sum(times) / len(times):.2f}s/clip{RESET}"
+            f"  {verdict}  {DIM}RTF {rtf:.1f}, {sum(times) / len(times):.1f}s/clip{RESET}"
+        )
+
+    if timed_out:
+        print(
+            f"  {RED}{len(timed_out)} clip(s) exceeded their time budget{RESET}"
+            f" {DIM}(budget {DEFAULT_RTF_BUDGET:g}x realtime, "
+            f"{MIN_CLIP_TIMEOUT}-{MAX_CLIP_TIMEOUT}s){RESET}"
         )
 
     # One transcript shown per language: a number says the model was close, the
     # text says what "close" actually looks like for that script.
     for lang in sorted(by_lang):
-        sample = next((t for _f, _s, t, _e in by_lang[lang] if t.strip()), "")
+        sample = next((t for _f, _s, t, _e, _d in by_lang[lang] if t.strip()), "")
         if sample:
             print(f"  {DIM}{lang:4} {sample[:96]}{RESET}")
 
@@ -512,6 +652,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="multilingual speech suite")
     parser.add_argument("fixtures", nargs="?", default="~/speech-fixtures")
     parser.add_argument("--max-cer", type=float, default=DEFAULT_MAX_CER)
+    parser.add_argument(
+        "--rtf-budget",
+        type=float,
+        default=DEFAULT_RTF_BUDGET,
+        help="per-clip deadline as a multiple of the clip's audio length",
+    )
+    parser.add_argument(
+        "--fresh", action="store_true", help="ignore any checkpoint and rescore"
+    )
     parser.add_argument("--no-robustness", action="store_true")
     parser.add_argument("--no-stt", action="store_true")
     parser.add_argument("--no-tts", action="store_true")
@@ -527,7 +676,7 @@ def main() -> int:
     results: dict[str, bool] = {}
 
     if not args.no_stt:
-        ok, _ = run_stt(manifest, fixtures, args.max_cer)
+        ok, _ = run_stt(manifest, fixtures, args.max_cer, args.rtf_budget, args.fresh)
         results["stt"] = ok
     if not args.no_tts:
         ok, _ = run_tts(args.max_cer)

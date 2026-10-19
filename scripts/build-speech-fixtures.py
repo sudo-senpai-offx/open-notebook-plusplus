@@ -43,6 +43,7 @@ import argparse
 import csv
 import io
 import json
+import struct
 import sys
 import tarfile
 import urllib.error
@@ -154,6 +155,39 @@ def parse_transcripts(text: str) -> dict[str, tuple[str, str]]:
     return out
 
 
+def wav_duration(path: Path) -> float:
+    """Duration in seconds, read from the WAV header.
+
+    `wave` cannot: FLEURS ships pcm_f32le, which the stdlib reader rejects as an
+    unknown format. The header alone is enough, and parsing it by hand avoids
+    depending on a decoder for what is only arithmetic.
+
+    The duration goes into the manifest because the suite's per-clip timeout is
+    expressed as a multiple of audio length — an absolute timeout either wastes
+    time on short clips or truncates long ones, and which one it does is not
+    knowable until a clip is genuinely slow.
+    """
+    with path.open("rb") as handle:
+        riff, _size, wave_tag = struct.unpack("<4sI4s", handle.read(12))
+        if riff != b"RIFF" or wave_tag != b"WAVE":
+            raise ValueError(f"{path.name}: not a RIFF/WAVE file")
+        while True:
+            head = handle.read(8)
+            if len(head) < 8:
+                raise ValueError(f"{path.name}: no data chunk")
+            chunk_id, chunk_size = struct.unpack("<4sI", head)
+            if chunk_id == b"fmt ":
+                body = handle.read(chunk_size)
+                channels = struct.unpack("<H", body[2:4])[0]
+                rate = struct.unpack("<I", body[4:8])[0]
+                bits = struct.unpack("<H", body[14:16])[0]
+                handle.seek(chunk_size % 2, 1)
+            elif chunk_id == b"data":
+                return chunk_size / (channels * rate * bits // 8)
+            else:
+                handle.seek(chunk_size + (chunk_size % 2), 1)
+
+
 def extract_clips(
     archive: Path,
     wanted: set[str],
@@ -180,6 +214,11 @@ def extract_clips(
             suffix = Path(member.name).suffix or ".wav"
             target = out_dir / f"{locale}_{stem}{suffix}"
             target.write_bytes(payload)
+            try:
+                duration = round(wav_duration(target), 3)
+            except (ValueError, OSError, struct.error) as exc:
+                log(f"{target.name}: cannot read duration ({exc})")
+                duration = 0.0
             written.append(
                 {
                     "id": clip_id,
@@ -187,6 +226,7 @@ def extract_clips(
                     "locale": locale,
                     "file": target.name,
                     "bytes": len(payload),
+                    "duration_s": duration,
                     "reference": reference,
                 }
             )

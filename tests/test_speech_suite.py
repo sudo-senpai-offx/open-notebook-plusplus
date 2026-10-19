@@ -20,6 +20,11 @@ SUITE = REPO / "scripts" / "termux-speech-suite.py"
 BUILDER = REPO / "scripts" / "build-speech-fixtures.py"
 
 
+def suite_module():
+    """The suite module, for the few assertions that read module constants."""
+    return _load_suite()
+
+
 def _load_suite():
     """Import the suite as a module; it lives in scripts/ so it is not importable."""
     spec = importlib.util.spec_from_file_location("onb_speech_suite", SUITE)
@@ -241,8 +246,121 @@ class TestTheSuiteIsInstallable:
         source = SUITE.read_text()
         stt_body = source[source.index("def run_stt(") : source.index("def run_tts(")]
         assert "CER" in stt_body
-        assert "score_text" in stt_body
+        assert "detail" in stt_body
         assert "elapsed" in stt_body
+        assert "flush=True" in stt_body
+
+
+class TestTheRunIsBounded:
+    """The first run went 21 minutes over 150 seconds of audio and produced
+    nothing. That is the failure these tests exist to prevent: not a wrong
+    answer, but no answer, with no way to tell it apart from a hang."""
+
+    def test_every_clip_gets_a_deadline(self):
+        """No clip may run unbounded. A socket read timeout is the only thing
+        that actually aborts the request, so it has to be passed through."""
+        source = SUITE.read_text()
+        stt_body = source[source.index("def run_stt(") : source.index("def run_tts(")]
+        assert "transcribe(path, timeout=budget)" in stt_body
+        assert "clip_timeout(" in stt_body
+
+    def test_the_deadline_scales_with_audio_length(self, suite):
+        """An absolute timeout is wrong in both directions.
+
+        It either truncates long clips or spends most of its budget waiting for
+        short ones, and which of those it is doing is not knowable until a clip
+        is genuinely slow — which is exactly when it matters.
+        """
+        assert suite.clip_timeout(4.0, 20.0) < suite.clip_timeout(16.0, 20.0)
+
+    def test_the_deadline_has_a_floor_and_a_ceiling(self, suite):
+        """A short clip must not get a deadline it cannot meet, and a long one
+        must not be handed an unbounded budget by the multiplication."""
+        assert suite.clip_timeout(1.0, 20.0) == suite.MIN_CLIP_TIMEOUT
+        assert suite.clip_timeout(10_000.0, 20.0) == suite.MAX_CLIP_TIMEOUT
+
+    def test_the_budget_is_configurable(self):
+        """A model slower than the default budget is still measurable; the
+        operator raises it rather than the suite being rewritten."""
+        source = SUITE.read_text()
+        assert "--rtf-budget" in source
+        assert "args.rtf_budget" in source
+
+    def test_the_budget_default_is_set_by_measurement_not_hope(self):
+        """large-v3-turbo-q5_0 measured RTF 8-16 on two A73 threads. The default
+        has to clear that or every clip times out and the run says nothing."""
+        assert suite_module().DEFAULT_RTF_BUDGET >= 16.0
+
+
+class TestTheRunResumes:
+    """The device drops connections. Twenty minutes of transcription is too much
+    to lose to that, and losing it makes the suite least useful exactly when the
+    device is least reliable."""
+
+    def test_results_are_written_after_every_clip(self):
+        source = SUITE.read_text()
+        stt_body = source[source.index("def run_stt(") : source.index("def run_tts(")]
+        assert "save_checkpoint(checkpoint, seen)" in stt_body
+
+    def test_the_checkpoint_is_written_atomically(self, suite):
+        """A half-written checkpoint is worse than none: the next run would
+        resume from a truncated set and report it as complete."""
+        assert ".tmp" in SUITE.read_text()
+        assert "tmp.replace(path)" in SUITE.read_text()
+
+    def test_a_corrupt_checkpoint_does_not_abort_the_run(self, suite):
+        import tempfile
+
+        bad = Path(tempfile.mkdtemp()) / "stt-results.json"
+        bad.write_text("{ not json at all")
+        assert suite.load_checkpoint(bad) == {}
+
+    def test_results_round_trip(self, suite):
+        import tempfile
+
+        cp = Path(tempfile.mkdtemp()) / "stt-results.json"
+        suite.save_checkpoint(
+            cp, {"x.wav": {"status": "scored", "cer": 0.25, "seconds": 12.0}}
+        )
+        assert suite.load_checkpoint(cp)["x.wav"]["cer"] == 0.25
+        assert not list(cp.parent.glob("*.tmp")), "atomic replace left a .tmp"
+
+    def test_a_timeout_is_recorded_not_retried_forever(self):
+        """A clip that times out is a *result* — it says the model is too slow
+        for this material. Re-queuing it on every run would hide that."""
+        source = SUITE.read_text()
+        assert '"status": outcome' in source
+        assert 'outcome = "scored" if status == 200 else "timeout"' in source
+
+    def test_fresh_is_available_to_override_the_checkpoint(self):
+        source = SUITE.read_text()
+        assert '"--fresh"' in source
+        assert "args.fresh" in source
+
+
+class TestRealtimeFactorIsReported:
+    def test_rtf_is_printed_per_clip(self):
+        """CER says whether the model understood; RTF says whether it is fast
+        enough to use on this device. Only one is fixable with a better model,
+        and the first run's real finding was entirely about the other."""
+        source = SUITE.read_text()
+        stt_body = source[source.index("def run_stt(") : source.index("def run_tts(")]
+        assert "RTF" in stt_body
+
+    def test_it_is_computed_from_measured_duration(self):
+        """Guessing the audio length would make RTF fiction."""
+        assert 'clip.get("duration_s")' in SUITE.read_text()
+
+    def test_the_manifest_carries_durations(self):
+        """Which is why the fixture builder parses the wav header."""
+        assert "wav_duration" in BUILDER.read_text()
+        assert '"duration_s": duration' in BUILDER.read_text()
+
+    def test_the_builder_reads_a_header_wave_cannot(self):
+        """FLEURS is pcm_f32le, which the stdlib reader rejects outright."""
+        builder = BUILDER.read_text()
+        assert "pcm_f32le" in builder
+        assert "unknown format" in builder
 
 
 class TestFixtureBuilder:
