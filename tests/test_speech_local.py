@@ -817,19 +817,80 @@ class TestTtsServerContract:
 
 
 class TestPiperBuildRoute:
-    """The build, pinned on the one decision that decides whether it works.
+    """The build, pinned on the decisions that decide whether it works.
 
     piper-phonemize's CMake downloads a prebuilt
     `onnxruntime-linux-aarch64-1.14.1.tgz` — a glibc binary. Android's loader
     rejects it, and does so at run time, after a build that otherwise
     succeeded. `ONNXRUNTIME_DIR` skips the download and uses `<dir>/include` and
-    `<dir>/lib`, which is exactly where Termux's packaged onnxruntime puts
-    them. Getting that wrong means an afternoon.
+    `<dir>/lib`.
+
+    The trap is that Termux's onnxruntime does not have that shape. It installs
+    the C++ headers one level down, in `$PREFIX/include/onnxruntime/`, so
+    pointing `ONNXRUNTIME_DIR` at `$PREFIX` satisfies nothing: the variable
+    arrives, the glibc download is correctly skipped, and the build then dies on
+    a header that a careless `ls` had already "confirmed". That is a real
+    afternoon, so it is pinned below.
     """
 
     def test_it_points_piper_phonemize_at_the_termux_onnxruntime(self):
         text = _read_script("termux-build-piper.sh")
         assert "ONNXRUNTIME_DIR" in text
+
+    def test_it_does_not_point_onnxruntime_dir_at_prefix_directly(self):
+        """The layout mismatch that broke three builds, pinned.
+
+        Termux ships `include/onnxruntime/onnxruntime_cxx_api.h`, but
+        piper-phonemize reads `${ONNXRUNTIME_DIR}/include` and expects the header
+        *in* it. So `ONNXRUNTIME_DIR=$PREFIX` yields a defined-but-useless
+        variable: the glibc download is skipped (good) and the compile cannot
+        find the header (fatal). The header must be located, not assumed.
+        """
+        text = _read_script("termux-build-piper.sh")
+        # The header is discovered rather than assumed to be in $PREFIX/include.
+        assert "onnxruntime_cxx_api.h" in text
+        assert "find " in text and "$ORT/include" in text
+        # ...and ONNXRUNTIME_DIR ends up at the shim, never at the raw prefix.
+        assert 'ORT="$SHIM"' in text
+        assert 'ONNXRUNTIME_DIR="$ORT" \\' in text
+
+    def test_the_shim_populates_both_paths_piper_phonomize_reads(self):
+        """`target_include_directories(... ${ONNXRUNTIME_DIR}/include)` and
+        `target_link_directories(... ${ONNXRUNTIME_DIR}/lib)`. Both must resolve,
+        or the build fails at compile time or at link time — the second only
+        after everything expensive has already succeeded.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert 'mkdir -p "$SHIM/include" "$SHIM/lib"' in text
+        assert "$SHIM/include/$(basename" in text
+        assert "$SHIM/lib/$(basename" in text
+
+    def test_it_verifies_the_prefix_by_compiling_not_by_testing_a_file(self):
+        """`test -f` is what produced the false confirmation.
+
+        The failure mode here was a diagnostic that ran
+        `ls -1 $PREFIX/include/onnxruntime*`. That glob matches a *directory*
+        and lists its contents, so the output read as "the headers are in
+        include/" — which was false. What piper needs is for the *compiler* to
+        resolve the header through the include directory the prefix provides,
+        and that is precisely what a `test -f` does not check. So the check must
+        be a compile.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert "ort-check.cpp" in text
+        assert 'c++ -I"$SHIM/include" -c' in text
+
+    def test_it_writes_nothing_to_slash_tmp(self):
+        """Termux has no `/tmp`.
+
+        A probe that wrote its throwaway source to `/tmp` failed with
+        "Directory nonexistent" and printed a result about the include path that
+        had nothing to do with the question. Anything temporary goes under
+        $HOME.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert '"/tmp/' not in text
+        assert "=/tmp/" not in text
 
     def test_onnxruntime_dir_goes_in_the_environment_not_on_the_command_line(self):
         """The nested ExternalProject only inherits the environment.

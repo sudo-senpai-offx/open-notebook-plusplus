@@ -28,14 +28,26 @@
 # -----------
 # piper-phonemize honours `ONNXRUNTIME_DIR`, and when it is defined the whole
 # download block is skipped and it uses `<dir>/include` and `<dir>/lib`
-# directly. Termux packages onnxruntime 1.31.0, built for bionic, installing
-# `lib/libonnxruntime.so` and the C API headers under `$PREFIX`. So
-# `ONNXRUNTIME_DIR=$PREFIX` points a glibc download at a bionic build.
+# directly. Termux packages onnxruntime 1.31.0, built for bionic, which is what
+# Android needs — but it installs the C++ headers one level down, into
+# `$PREFIX/include/onnxruntime/`, where piper-phonemize does not look. So this
+# script lays out a shim prefix of symlinks whose `include/` and `lib/` put the
+# header and the library exactly where those two lines expect them, and points
+# ONNXRUNTIME_DIR at that instead.
 #
 # Version skew — 1.14.1 against 1.31.0 — is the risk in this. piper-phonemize
 # uses only the ONNX C API, which Microsoft has kept stable across those
 # releases, so it should link. If it does not, the linker will name the missing
 # symbol, and that symbol is the answer.
+#
+# On verifying the prefix
+# -----------------------
+# The layout is checked by compiling, not by `test -f`. Earlier, a diagnostic
+# ran `ls -1 $PREFIX/include/onnxruntime*`, which globs a *directory* and lists
+# its contents; the output was read as "the headers are in include/", which was
+# wrong, and the build then failed on a header that had been "confirmed". Every
+# check here is against the compiler or against the resolved path. Note also that
+# `/tmp` does not exist in Termux — use a path under $HOME.
 #
 # Why you should paste the output rather than summarise it
 # --------------------------------------------------------
@@ -74,23 +86,79 @@ done
 }
 
 # onnxruntime is the one that matters, so it is checked for the file piper will
-# actually link against rather than for the command being on PATH.
-if [ ! -f "$PREFIX/lib/libonnxruntime.so" ] && [ ! -f /data/data/com.termux/files/usr/lib/libonnxruntime.so ]; then
-  echo "onnxruntime not found."
-  echo "  pkg install onnxruntime"
+# actually compile against rather than for the command being on PATH.
+#
+# The header is NOT at $PREFIX/include. Termux installs it into
+# $PREFIX/include/onnxruntime/, and piper-phonemize wants the contents of
+# ${ONNXRUNTIME_DIR}/include to *include* the header:
+#
+#   target_include_directories(piper_phonemize PUBLIC ${ONNXRUNTIME_DIR}/include)
+#   target_link_directories(piper_phonemize PUBLIC ${ONNXRUNTIME_DIR}/lib)
+#
+# An earlier version of this script pointed ONNXRUNTIME_DIR at $PREFIX because a
+# diagnostic had run `ls -1 $PREFIX/include/onnxruntime*` — which globs a
+# directory and lists its *contents*, so it looked like the headers sat directly
+# in include/. They do not. The build then died on a header that the diagnostic
+# had "confirmed". Nothing here is assumed: the header is found, not expected.
+#
+# Because the layout does not match, a shim prefix is laid out so that both of
+# the paths above resolve. Symlinks, not copies — the library is ~19 MB and there
+# is no reason to duplicate it for the sake of a build step.
+ORT=$(pkg-config --variable=prefix onnxruntime 2>/dev/null || echo /data/data/com.termux/files/usr)
+ORT_HEADER=$(find "$ORT/include" -name 'onnxruntime_cxx_api.h' 2>/dev/null | head -1)
+ORT_LIB=$(find "$ORT/lib" -name 'libonnxruntime.so*' 2>/dev/null | head -1)
+
+if [ -z "$ORT_HEADER" ] || [ -z "$ORT_LIB" ]; then
+  echo "onnxruntime not usable."
+  echo "  header:  ${ORT_HEADER:-not found under $ORT/include}"
+  echo "  library: ${ORT_LIB:-not found under $ORT/lib}"
+  echo "  install with:  pkg install onnxruntime"
   echo "  (NOT python-onnxruntime — piper needs the C library and headers,"
   echo "   not the Python bindings)"
   fail "onnxruntime"
 fi
-ORT=$(pkg-config --variable=prefix onnxruntime 2>/dev/null || echo /data/data/com.termux/files/usr)
-[ -f "$ORT/lib/libonnxruntime.so" ] || ORT="${PREFIX%%/piper-build*}/../.."
+
+SHIM="$SRC/onnxruntime"
+rm -rf "$SHIM"
+mkdir -p "$SHIM/include" "$SHIM/lib"
+ORT_INC=$(dirname "$ORT_HEADER")
+for _h in "$ORT_INC"/*.h; do
+  [ -f "$_h" ] && ln -sf "$_h" "$SHIM/include/$(basename "$_h")"
+done
+# `core/` and any other header subdirectory the C++ API includes by relative
+# path, symlinked whole so their internal layout survives.
+for _d in "$ORT_INC"/*/; do
+  [ -d "$_d" ] && ln -sfn "$_d" "$SHIM/include/$(basename "$_d")"
+done
+for _l in "$ORT"/lib/libonnxruntime*.so*; do
+  [ -e "$_l" ] && ln -sf "$_l" "$SHIM/lib/$(basename "$_l")"
+done
+
 echo "cmake, git, pkg-config present"
-echo "onnxruntime prefix: $ORT"
-[ -f "$ORT/lib/libonnxruntime.so" ] || {
-  echo "libonnxruntime.so still not found under $ORT"
-  ls -la "$ORT/lib" 2>/dev/null | head -20 || true
-  fail "onnxruntime library lookup"
-}
+echo "onnxruntime headers from: $ORT_INC"
+echo "onnxruntime shim prefix:  $SHIM"
+
+# Prove the layout with the compiler, not with `test -f`. What piper needs is
+# for the *compiler* to resolve the header through the include directory this
+# prefix provides, and that is exactly the thing a test -f does not check. This
+# costs two seconds and replaces an hour of build time spent finding out.
+if ! printf '#include <onnxruntime_cxx_api.h>\nint main(){return 0;}\n' \
+     > "$SRC/ort-check.cpp"; then
+  fail "cannot write the shim compile check"
+fi
+if ! c++ -I"$SHIM/include" -c "$SRC/ort-check.cpp" -o "$SRC/ort-check.o" \
+     2>"$SRC/ort-check.err"; then
+  echo "the compiler cannot see onnxruntime_cxx_api.h through the shim:"
+  sed 's/^/    /' "$SRC/ort-check.err" | head -5
+  echo "  shim include: $SHIM/include"
+  # Listing for the operator to read; every entry here is a symlink to a .h or
+  # a header directory, so there is nothing for `find`'s quoting to protect.
+  # shellcheck disable=SC2012
+  ls -la "$SHIM/include" 2>/dev/null | head -10 || true
+  fail "onnxruntime shim"
+fi
+echo "  compiler resolves onnxruntime_cxx_api.h through the shim"
+ORT="$SHIM"
 
 mkdir -p "$PREFIX"
 
