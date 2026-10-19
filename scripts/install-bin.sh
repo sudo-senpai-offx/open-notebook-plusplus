@@ -154,6 +154,10 @@ install_one termux-build-piper.sh onb-build-piper || rc=1
   # measured — and it ships with the other wrappers so the phone can run it
   # against the two model servers residency manages.
   install_one termux-speech-suite.py onb-speech-suite || rc=1
+  # onb-stt-benchmark: measures STT throughput across model tiers and thread
+  # counts, so the shipped default is chosen from RTF on this device rather than
+  # from arithmetic about it.
+  install_one termux-stt-benchmark.sh onb-stt-benchmark || rc=1
 refresh_guest_launcher || true
 
 echo

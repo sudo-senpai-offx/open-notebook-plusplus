@@ -131,6 +131,20 @@ else
   CPU_AFFINITY=""
 fi
 
+  # An explicit thread count overrides the derived budget.
+  #
+  # The derived budget gives STT two threads on an eight-core phone, which is
+  # right when a transcription competes with a podcast render and wrong when it
+  # is the only inference running - and transcription is a *queued* job, so
+  # nobody is waiting on it. The first measurement of the multilingual tier put
+  # a 4.7-second clip at 228 seconds, RTF 48, on two of eight cores.
+  #
+  # So the budget is a default, not a constraint. An override also makes the
+  # tier and thread count measurable rather than assumed: the benchmark varies
+  # them and reports RTF, and the winner becomes the shipped default.
+  if [ -n "${STT_THREADS_OVERRIDE:-}" ]; then
+    STT_THREADS="$STT_THREADS_OVERRIDE"
+  fi
 pid_of() {
   for p in /proc/[0-9]*; do
     cl=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
