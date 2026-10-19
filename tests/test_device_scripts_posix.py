@@ -18,6 +18,7 @@ POSIX. Dev-box scripts are excluded - they run under bash, where `local`
 and `[[ ]]` are perfectly fine.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -79,6 +80,81 @@ class TestEveryDeviceScriptReachesThePhone:
         for name, reason in self.NOT_ON_DEVICE.items():
             assert (SCRIPTS / name).exists(), f"{name} is excepted but no longer exists"
             assert len(reason) > 20, f"{name} needs a real reason, not a placeholder"
+
+
+class TestUpdateSurvivesTheOperator:
+    """`onb-update --restart` used to leave the device with nothing running.
+
+    Two separate defects, both reported as "it freezes" and "the update rarely
+    takes, I have to force-close Termux".
+
+    **The detached start was not detached.** `nohup ... &` ignores SIGHUP and
+    nothing else. In a non-interactive shell job control is off, so the launcher
+    stayed in the caller's process group — the same group as the operator's
+    terminal, where Ctrl+C reaches it. `onb` then spends its life blocked on a
+    foreground `proot-distro login`, and proot runs with `--kill-on-exit`, so
+    killing the launcher reaped every process inside the guest. Observed live
+    while building this: signalling the child's group also killed the harness,
+    which is the same property with the signaller on the receiving end.
+
+    **The guest commands were unbounded.** `proot-distro login` hangs when the
+    session it wants to attach to is wedged — the updater's own teardown says so
+    — and an unbounded hang presents as a frozen script with no indication of
+    where it is stuck.
+    """
+
+    def test_the_restarted_launcher_is_put_in_its_own_session(self):
+        text = (SCRIPTS / "termux-update.sh").read_text()
+        assert "setsid" in text, "nohup alone leaves the launcher in the caller's group"
+        # The start must go through setsid, not merely mention it.
+        assert re.search(r"setsid\s+nohup\s+sh\s+\"\$HOME/bin/onb\"", text), (
+            "the restarted launcher must be started via `setsid nohup sh ~/bin/onb`"
+        )
+
+    def test_the_detached_start_does_not_hold_the_terminals_stdin(self):
+        """A background process holding stdin makes the next interactive command
+        read from the wrong place — which looks like the shell hanging."""
+        text = (SCRIPTS / "termux-update.sh").read_text()
+        for match in re.finditer(r"sh \"\$HOME/bin/onb\"[^\n]*", text):
+            assert "< /dev/null" in match.group(0), (
+                f"detached start does not redirect stdin: {match.group(0)!r}"
+            )
+
+    def test_it_warns_when_setsid_is_unavailable(self):
+        """Silently falling back to nohup would report a detach that did not
+        happen, which is the original bug wearing a different hat."""
+        text = (SCRIPTS / "termux-update.sh").read_text()
+        assert "setsid not found" in text
+
+    def test_every_guest_login_is_bounded(self):
+        text = (SCRIPTS / "termux-update.sh").read_text()
+        body = text[text.index("in_guest()") :]
+        body = body[: body.index("\n  }")]
+        assert "timeout" in body, "in_guest can hang on a wedged proot session"
+        assert "ONB_GUEST_TIMEOUT" in body, (
+            "the bound must be adjustable and documented"
+        )
+
+    def test_raw_proot_logins_outside_the_wrapper_are_named(self):
+        """`in_guest` is the wrapper; a bare login beside it is an unbounded one
+        that the wrapper cannot help with."""
+        text = (SCRIPTS / "termux-update.sh").read_text()
+        body = text[text.index("in_guest()") + 10 :]
+        stray = [
+            line.strip()
+            for line in body.splitlines()
+            if "proot-distro login" in line
+            and not line.strip().startswith("#")
+            # `say "Inspect with: proot-distro login ..."` is an instruction
+            # printed for the operator to run by hand, not a command this script
+            # executes, so it is not an unbounded call.
+            and not line.strip().startswith("say ")
+            and 'proot-distro login ubuntu -- "$@"' not in line
+        ]
+        for line in stray:
+            assert "timeout" in line or "nohup" in line or "setsid" in line, (
+                f"unbounded proot-distro login: {line}"
+            )
 
 
 class TestInstalledScriptsAreRunCorrectly:

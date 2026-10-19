@@ -720,11 +720,25 @@ class TestDetachedStartIsNotSilent:
         return (REPO / "scripts" / "termux-update.sh").read_text()
 
     def test_does_not_discard_output(self):
+        """Output goes to a named log, so a failed detached start is diagnosable.
+
+        Narrowed to `> /dev/null` — *output* discarded. The same path also
+        carries `< /dev/null`, which is *stdin*: a background process holding the
+        terminal's stdin makes the next interactive command read from the wrong
+        place, which reads as the shell hanging. The two are opposite problems
+        and this assertion used to conflate them, failing on the fix.
+        """
         text = self._update()
         start = text.index('nohup sh "$HOME/bin/onb"')
         line_end = text.index("\n", start)
-        assert "/dev/null" not in text[start:line_end], (
+        detached = text[start:line_end]
+        assert "> /dev/null" not in detached, (
             "a detached start whose output is discarded cannot be diagnosed"
+        )
+        # ...and stdin is released, so the detach does not break the terminal.
+        assert "< /dev/null" in detached, (
+            "a detached start must release stdin, or the next interactive "
+            "command reads from the wrong place"
         )
 
     def test_names_the_log(self):

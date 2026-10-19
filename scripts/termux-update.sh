@@ -284,8 +284,22 @@ resolve_remote() {
   fi
 }
 
+# Every guest command goes through here, and every one is bounded.
+#
+# `proot-distro login` hangs when the guest session it wants to attach to is
+# wedged or gone - this script's own teardown says exactly that. Unbounded, the
+# hang lands on the operator as "onb-update freezes", with nothing to say where:
+# a git fetch, a login, or a shell sitting there doing nothing. `timeout` turns
+# an unbounded wait into a named failure at a known cost. 120s is generous for a
+# fetch on a slow link and still bounded, which is the entire point.
+# ONB_GUEST_TIMEOUT=0 disables it, which is the first thing to try if a
+# legitimate operation is genuinely slower than that.
 in_guest() {
-  proot-distro login ubuntu -- "$@"
+  if [ "${ONB_GUEST_TIMEOUT:-120}" = "0" ]; then
+    proot-distro login ubuntu -- "$@"
+    return $?
+  fi
+  timeout "${ONB_GUEST_TIMEOUT:-120}" proot-distro login ubuntu -- "$@"
 }
 
 current_commit() {
@@ -496,7 +510,29 @@ if [ "$RESTART" -eq 1 ]; then
     # Truncated per run so it cannot grow without bound.
     _startlog="$HOME/onb-start.log"
     : > "$_startlog"
-    nohup sh "$HOME/bin/onb" >>"$_startlog" 2>&1 &
+# setsid, not just nohup. nohup ignores SIGHUP and nothing else; it does
+# not move the process out of the caller's process group. This shell is
+# non-interactive, so job control is off and `&` leaves the launcher in the
+# same group as the operator's terminal - where Ctrl+C reaches it.
+#
+# `onb` then spends its life blocked on a foreground `proot-distro login`, and
+# proot runs with --kill-on-exit: killing the launcher reaps every process
+# inside the guest. So Ctrl+C after an update did not merely interrupt the
+# updater, it took the whole stack down with it and left the device with nothing
+# running until Termux was reopened by hand. setsid puts the launcher in its
+# own session, where no terminal signal can reach it.
+#
+# </dev/null too: a background process holding the terminal's stdin makes the
+# next interactive command read from the wrong place.
+if command -v setsid >/dev/null 2>&1; then
+      setsid nohup sh "$HOME/bin/onb" >>"$_startlog" 2>&1 < /dev/null &
+    else
+      # No setsid: still redirect stdin, and say so rather than pretending the
+      # detach worked.
+      say "  WARNING: setsid not found; the launcher stays in this process group"
+      say "           so Ctrl+C now would take the whole stack down with it."
+      nohup sh "$HOME/bin/onb" >>"$_startlog" 2>&1 < /dev/null &
+    fi
     say "  log: $_startlog"
   else
     say "  WARNING: ~/bin/onb not found; start the stack yourself"
