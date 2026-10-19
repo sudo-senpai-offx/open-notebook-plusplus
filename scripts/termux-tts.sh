@@ -33,6 +33,21 @@ TTS_SERVER="$HOME/bin/onb-tts-server"
 PIPER_BIN="${PIPER_BIN:-$HOME/piper-build/prefix/bin/piper}"
 LOG="$HOME/piper-server.log"
 
+# piper's RPATH is baked at install time and points at the prefix piper was
+# *installed into*, which is not where it now lives: piper installs flat
+# (`DESTINATION ${CMAKE_INSTALL_PREFIX}`) and the build then moves the binary to
+# bin/, so the recorded path is stale from the moment it is relocated. The
+# libraries sit beside the binary instead, and the loader does not search an
+# executable's own directory, so it needs LD_LIBRARY_PATH to find them.
+#
+# Set here rather than in the server because the server hands piper to
+# `subprocess.run`, which inherits this environment — one place, and a caller
+# who invokes piper by hand gets the same answer.
+PIPER_LIB_DIR=$(dirname "$PIPER_BIN")
+PIPER_PREFIX_DIR=$(dirname "$PIPER_LIB_DIR")
+LD_LIBRARY_PATH="$PIPER_LIB_DIR:$PIPER_PREFIX_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH
+
 # The same derived budget the chat server uses, from the same library — chat,
 # embed, STT, and TTS share one inference allowance so they cannot collectively
 # starve the device. TTS gets the stt allocation (same class: media I/O).

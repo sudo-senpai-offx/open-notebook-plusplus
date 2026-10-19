@@ -62,7 +62,13 @@
 set -eu
 
 SRC="$HOME/piper-build"
-PREFIX="${PREFIX:-$HOME/piper-build/prefix}"
+# NOT `PREFIX`. Termux exports PREFIX=/data/data/com.termux/files/usr, so a
+# `PREFIX="${PREFIX:-...}"` never falls through to its default on the only
+# platform this script runs on: it silently installs piper, piper-phonemize,
+# espeak-ng, libtashkeel_model.ort and every .so straight into Termux's own
+# tree, overwriting the espeak-ng data an installed `espeak` package depends on.
+# That is what the first successful build did. The name is the bug.
+DEST="${PIPER_DEST:-$HOME/piper-build/prefix}"
 JOBS=$(nproc 2>/dev/null || echo 4)
 
 step() { printf '\n==> %s\n' "$1"; }
@@ -160,7 +166,7 @@ fi
 echo "  compiler resolves onnxruntime_cxx_api.h through the shim"
 ORT="$SHIM"
 
-mkdir -p "$PREFIX"
+mkdir -p "$DEST/bin"
 
 # -------------------------------------------------------------------- piper
 
@@ -219,7 +225,7 @@ step "configuring (builds piper-phonemize, which builds espeak-ng)"
 ONNXRUNTIME_DIR="$ORT" \
   cmake -B build -S . \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DCMAKE_INSTALL_PREFIX="$DEST" \
   || fail "cmake configure"
 
 # Prove piper-phonemize is a target before spending an hour discovering
@@ -332,35 +338,116 @@ cmake --install build || fail "install"
 # ------------------------------------------------------------------ verify
 
 step "verifying"
-BIN="$PREFIX/bin/piper"
-if [ ! -x "$BIN" ]; then
-  echo "no binary at $BIN. Candidates:"
+# piper's install rules use `DESTINATION ${CMAKE_INSTALL_PREFIX}` — an absolute
+# path — so an unmodified install lands the binary at `$DEST/piper`, flat, with
+# its dependencies beside it. That is deliberate: piper resolves its data
+# relative to its own executable,
+#
+#     exePath.parent_path().append("espeak-ng-data")
+#     exePath.parent_path().append("libtashkeel_model.ort")
+#
+# so a relocation has to move those alongside it. It is done by patching the
+# destinations to `bin`/`lib`/`share` and then moving the data back next to the
+# binary, which keeps the "next to the executable" contract intact while landing
+# on the layout termux-tts.sh and termux-tts-server.py already expect
+# (~/piper-build/prefix/bin/piper).
+
+# 1. the binary must be where the launcher looks for it
+if [ ! -x "$DEST/piper" ]; then
+  echo "no binary at $DEST/piper. Candidates:"
   find "$SRC" -name piper -type f -perm -u+x 2>/dev/null | head -5 || true
   fail "binary not found"
 fi
+mkdir -p "$DEST/bin"
+mv "$DEST/piper" "$DEST/bin/piper"
+chmod +x "$DEST/bin/piper"
+
+# 2. and its data must be next to it, or phonemization fails at run time with a
+#    message about espeak that points nowhere near the real cause
+for _d in espeak-ng-data libtashkeel_model.ort; do
+  if [ -e "$DEST/$_d" ] && [ ! -e "$DEST/bin/$_d" ]; then
+    mv "$DEST/$_d" "$DEST/bin/$_d"
+    echo "  moved $_d next to the binary"
+  fi
+done
+for _d in espeak-ng-data libtashkeel_model.ort; do
+  [ -e "$DEST/bin/$_d" ] || echo "  WARNING: $DEST/bin/$_d is missing"
+done
+
+BIN="$DEST/bin/piper"
 "$BIN" --help >/dev/null 2>&1 || fail "binary does not run"
+
+# The RPATH is baked at install time and points at the flat prefix, so after the
+# move the loader needs help finding the .so files. Verified rather than assumed:
+# the count below is what `ldd` actually reports, and it must be zero.
+_missing=$(LD_LIBRARY_PATH="$DEST:$DEST/bin" ldd "$BIN" 2>/dev/null | grep -c 'not found' || true)
+if [ "$_missing" != "0" ]; then
+  echo "loader cannot resolve $_missing librar$( [ "$_missing" = 1 ] && echo y || echo ies ) even with LD_LIBRARY_PATH:"
+  LD_LIBRARY_PATH="$DEST:$DEST/bin" ldd "$BIN" 2>/dev/null | grep 'not found' | sed 's/^/    /'
+  fail "shared libraries"
+fi
 
 VOICE_DIR="$HOME/piper_models"
 mkdir -p "$VOICE_DIR"
-if [ ! -s "$VOICE_DIR/en_US-amy-medium.onnx" ]; then
-  step "fetching a voice (en_US-amy-medium, ~63 MB)"
-  BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium"
-  curl -L -C - --retry 5 --retry-all-errors -o "$VOICE_DIR/en_US-amy-medium.onnx" \
-    "$BASE/en_US-amy-medium.onnx" || fail "voice download"
-  curl -L -C - --retry 5 --retry-all-errors -o "$VOICE_DIR/en_US-amy-medium.onnx.json" \
-    "$BASE/en_US-amy-medium.onnx.json" || fail "voice config"
-fi
+VOICE="$VOICE_DIR/en_US-amy-medium.onnx"
+VOICE_JSON="$VOICE.json"
+
+# Sizes come from the HuggingFace tree API, not from memory:
+#   en_US-amy-medium.onnx      63201294  (lfs)
+#   en_US-amy-medium.onnx.json    4882  (regular)
+#
+# `-s` is not a completeness test. On this link curl reports `100 60.27M` — a
+# completed transfer — while writing 14 MB, because the connection is cut and
+# its progress accounting is optimistic. A truncated file is still non-empty, so
+# a `[ -s ]` guard skips the retry and piper then reports a *missing model
+# config*, which sends the diagnosis somewhere else entirely. That is not
+# hypothetical: it is what happened twice.
+VOICE_BYTES=63201294
+VOICE_JSON_BYTES=4882
+BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium"
+
+# Downloaded to a side file and promoted only once the byte count is exact, so a
+# partial can never become the base of a resume — resuming from a corrupt prefix
+# is what pushed the file past its true size instead of reaching it.
+fetch_exact() { # url dest want label
+  _u="$1"; _d="$2"; _want="$3"; _lbl="$4"; _n=0
+  while [ "$_n" -lt 5 ]; do
+    _have=$(wc -c < "$_d" 2>/dev/null | tr -d ' ')
+    [ "$_have" = "$_want" ] && { echo "  $_lbl: $_have bytes, complete"; return 0; }
+    _n=$((_n + 1))
+    echo "  $_lbl: ${_have:-0} of $_want — retry $_n"
+    rm -f "$_d.part"
+    curl -L --retry 3 --retry-all-errors --speed-time 60 --speed-limit 1024 \
+      -o "$_d.part" "$_u" >/dev/null 2>&1 || true
+    _got=$(wc -c < "$_d.part" 2>/dev/null | tr -d ' ')
+    if [ "$_got" = "$_want" ]; then mv "$_d.part" "$_d"; fi
+  done
+  echo "  $_lbl: could not obtain exactly $_want bytes (got $(wc -c < "$_d" 2>/dev/null | tr -d ' ' || echo 0))"
+  return 1
+}
+
+step "fetching a voice (en_US-amy-medium, 63201294 bytes)"
+fetch_exact "$BASE/en_US-amy-medium.onnx.json" "$VOICE_JSON" "$VOICE_JSON_BYTES" "config" \
+  || fail "voice config"
+fetch_exact "$BASE/en_US-amy-medium.onnx" "$VOICE" "$VOICE_BYTES" "model" \
+  || fail "voice download"
 
 step "end-to-end: speak a sentence to a file"
-"$BIN" --model "$VOICE_DIR/en_US-amy-medium.onnx" \
-  --output_file "$PREFIX/piper-test.wav" <<'TEXT'
+OUT="$DEST/piper-test.wav"
+rm -f "$OUT"
+LD_LIBRARY_PATH="$DEST:$DEST/bin" "$BIN" --model "$VOICE" --output_file "$OUT" <<'TEXT'
 If this file has audio in it, piper works on this device.
 TEXT
-[ -s "$PREFIX/piper-test.wav" ] || fail "no audio produced"
+[ -s "$OUT" ] || fail "no audio produced"
+# A non-empty file is not audio. Check the RIFF header, so a truncated or empty
+# wav cannot pass for a working synthesis.
+case "$(dd if="$OUT" bs=1 count=4 2>/dev/null)" in
+  RIFF) : ;;
+  *) fail "output is not a RIFF wav" ;;
+esac
 
 printf '\n==> DONE\n'
 printf '    binary  %s\n' "$BIN"
-printf '    voice   %s\n' "$VOICE_DIR/en_US-amy-medium.onnx"
-printf '    test    %s (%s bytes)\n' "$PREFIX/piper-test.wav" \
-  "$(wc -c < "$PREFIX/piper-test.wav" | tr -d ' ')"
+printf '    voice   %s\n' "$VOICE"
+printf '    test    %s (%s bytes)\n' "$OUT" "$(wc -c < "$OUT" | tr -d ' ')"
 printf '\nNext:  sh ~/bin/onb-tts up\n'

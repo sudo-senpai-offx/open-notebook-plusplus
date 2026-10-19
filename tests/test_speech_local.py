@@ -892,6 +892,118 @@ class TestPiperBuildRoute:
         assert '"/tmp/' not in text
         assert "=/tmp/" not in text
 
+    def test_it_never_binds_a_variable_named_prefix(self):
+        """The bug that put piper inside Termux's own tree, pinned.
+
+        Termux exports `PREFIX=/data/data/com.termux/files/usr`. So
+
+            PREFIX="${PREFIX:-$HOME/piper-build/prefix}"
+
+        does not fall back to the default on the only platform this script runs
+        on — it takes Termux's value and installs piper, piper-phonemize,
+        espeak-ng, libtashkeel_model.ort and every .so straight into Termux's
+        tree, overwriting the espeak-ng data an installed `espeak` package reads.
+        The build succeeded, which is what made it easy to miss.
+        """
+        text = _read_script("termux-build-piper.sh")
+        # No assignment to a bare PREFIX anywhere.
+        assert not re.search(r"^\s*PREFIX=", text, re.MULTILINE)
+        # ...and the install prefix is the deliberately distinct name.
+        assert 'DEST="${PIPER_DEST:-$HOME/piper-build/prefix}"' in text
+        assert '-DCMAKE_INSTALL_PREFIX="$DEST"' in text
+
+    def test_the_install_layout_is_what_the_launcher_expects(self):
+        """piper installs flat; the launcher expects `bin/piper`.
+
+        piper's rules are `DESTINATION ${CMAKE_INSTALL_PREFIX}` — an absolute
+        path — so an unmodified install produces `$DEST/piper`, never
+        `$DEST/bin/piper`. The build therefore relocates the binary *and* the
+        data it resolves relative to its own executable:
+
+            exePath.parent_path().append("espeak-ng-data")
+            exePath.parent_path().append("libtashkeel_model.ort")
+
+        Move the binary and leave the data behind and phonemisation fails at run
+        time with an espeak error that names no file.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert 'mv "$DEST/piper" "$DEST/bin/piper"' in text
+        assert 'mv "$DEST/$_d" "$DEST/bin/$_d"' in text
+        # Both data items are moved, and their absence is called out.
+        assert "espeak-ng-data libtashkeel_model.ort" in text
+        # The launcher and server both point at this exact path.
+        assert "$HOME/piper-build/prefix/bin/piper" in _read_script("termux-tts.sh")
+
+    def test_it_verifies_the_downloaded_voice_by_byte_count(self):
+        """curl reported success four times while writing a fraction of the file.
+
+        On this link curl prints `100 60.27M` — a finished transfer — and leaves
+        14 MB on disk, because the connection is cut and its progress accounting
+        is optimistic. Two consequences, both observed:
+
+        - `[ -s file ]` is not a completeness test, so a truncated download is
+          skipped on the next run and piper then fails with "Model config
+          doesn't exist", which points at the config rather than the model.
+        - `curl -C -` cannot repair it. Resuming appends to a prefix that is
+          already wrong, and the file grew *past* its true size rather than
+          reaching it.
+
+        So the size is compared against the value the HuggingFace API reports, and
+        a partial is never promoted to the name a later resume would build on.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert "VOICE_BYTES=63201294" in text
+        assert "VOICE_JSON_BYTES=4882" in text
+        assert "fetch_exact" in text
+        # No bare resume of the real file, and no size-blind `-s` guard.
+        assert "-C -" not in text
+        assert 'if [ ! -s "$VOICE_DIR/en_US-amy-medium.onnx" ]; then' not in text
+        # Promotion only happens on an exact match.
+        assert 'if [ "$_got" = "$_want" ]; then mv "$_d.part" "$_d"; fi' in text
+
+    def test_it_checks_the_output_is_audio_not_just_a_non_empty_file(self):
+        """piper wrote 48 MB of model and produced no file at all once.
+
+        `[ -s out ]` accepts any non-empty file. The end-to-end check asserts the
+        RIFF header, so a truncated or empty wav cannot pass for a working
+        synthesis.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert 'case "$(dd if="$OUT" bs=1 count=4' in text
+        assert "RIFF" in text
+        assert 'fail "output is not a RIFF wav"' in text
+
+    def test_it_verifies_the_loader_can_resolve_piper_before_asserting_success(self):
+        """The RPATH points at the prefix piper was installed into, not where it
+        now lives. After the relocation to `bin/`, the recorded path is stale, and
+        the libraries sit beside the binary where the loader does not look. So
+        `ldd` is asked, and a non-zero count of unresolved libraries fails the
+        build rather than surfacing later as a server that will not start.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert 'ldd "$BIN"' in text
+        assert 'fail "shared libraries"' in text
+
+
+class TestTtsLauncherLibraryPath:
+    """piper cannot load its own libraries without this.
+
+    The RPATH is baked at install time and names the flat prefix. Once the binary
+    is moved to `bin/`, that path is stale, and the `.so` files sit beside the
+    binary — which the loader does not search. So the launcher exports
+    LD_LIBRARY_PATH, and the server hands piper to `subprocess.run`, which
+    inherits it. Without it, synthesis fails at run time with a loader error that
+    names a shared object rather than the relocation that caused it.
+    """
+
+    def test_the_launcher_exports_a_library_path_for_piper(self):
+        text = _read_script("termux-tts.sh")
+        assert "LD_LIBRARY_PATH=" in text
+        assert "export LD_LIBRARY_PATH" in text
+        # Derived from the binary's own location, not hardcoded, so a relocated
+        # prefix keeps working.
+        assert 'PIPER_LIB_DIR=$(dirname "$PIPER_BIN")' in text
+
     def test_onnxruntime_dir_goes_in_the_environment_not_on_the_command_line(self):
         """The nested ExternalProject only inherits the environment.
 
