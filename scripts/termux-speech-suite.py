@@ -28,7 +28,7 @@ TTS response looked successful and contained nothing.
 Coverage is reported honestly
 -----------------------------
 piper has no Taiwanese, Tamil or Malay voice among its 177 voices, so those
-three are listed as UNTECTED for TTS with the reason, not silently skipped and
+three are listed as UNTESTED for TTS with the reason, not silently skipped and
 not counted as passes. Taiwanese Mandarin is absent from FLEURS as well, so STT
 does not cover it either; Cantonese is in FLEURS but is a different language, not
 a Taiwanese accent, and is not substituted for it.
@@ -522,7 +522,7 @@ def main() -> int:
     untested = len(TTS_UNTESTABLE) + len(manifest.get("not_tested", {}).get("STT", []))
     if untested:
         print(
-            f"  {YELLOW}{untested} language/voice combination(s) UNTECTED{RESET} "
+            f"  {YELLOW}{untested} language/voice combination(s) UNTESTED{RESET} "
             "- see above for why"
         )
 

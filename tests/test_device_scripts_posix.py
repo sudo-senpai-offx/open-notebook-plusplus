@@ -81,6 +81,64 @@ class TestEveryDeviceScriptReachesThePhone:
             assert len(reason) > 20, f"{name} needs a real reason, not a placeholder"
 
 
+class TestInstalledScriptsAreRunCorrectly:
+    """A Python entry point must be invoked by its shebang, never through `sh`.
+
+    `sh ~/bin/onb-speech-suite` bypasses the shebang entirely: the shell parses
+    the module docstring as commands and emits `import: not found` once per line
+    of it. Observed on the device, and the failure is actively misleading —
+    the output looks like a broken script rather than a wrong invocation, and
+    the suite's own exit code is never reached.
+
+    Two guards: the shebang must point at a Termux python (so direct invocation
+    works at all), and the usage text must not tell anyone to use `sh`.
+    """
+
+    def _installed(self) -> list[tuple[str, str]]:
+        """(installed name, repo file) for every non-shell entry point."""
+        text = (SCRIPTS / "install-bin.sh").read_text()
+        found = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("install_one "):
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].endswith((".py", ".sh")):
+                found.append((parts[2], parts[1]))
+        return found
+
+    def test_the_installer_does_ship_a_python_suite(self):
+        """A guard that has nothing to guard is not a guard."""
+        names = {name for name, _ in self._installed()}
+        assert "onb-speech-suite" in names, "the suite is not installed at all"
+
+    def test_python_entry_points_have_a_termux_python_shebang(self):
+        for name, source in self._installed():
+            path = SCRIPTS / source
+            if not path.exists():
+                continue
+            first = path.read_text().splitlines()[0] if path.read_text() else ""
+            if first.startswith("#!") and "python" in first:
+                assert "/data/data/com.termux/files/usr/bin/python" in first, (
+                    f"{name}: shebang must point at Termux's python so the script "
+                    f"can be run directly; got {first!r}"
+                )
+                assert path.stat().st_size > 0
+
+    def test_the_suite_is_never_documented_as_a_shell_script(self):
+        """`sh script.py` is the mistake; the usage text must not teach it."""
+        suite = (SCRIPTS / "termux-speech-suite.py").read_text()
+        for line in suite.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("sh ~/bin/"):
+                assert ".py" not in stripped, (
+                    f"usage text teaches `sh` on a .py: {stripped!r}"
+                )
+        # And it must be executable by its shebang, which install_one guarantees
+        # by chmod, so direct invocation is the documented path.
+        assert suite.startswith("#!/data/data/com.termux/files/usr/bin/python")
+
+
 def _shellcheck() -> str | None:
     """Locate shellcheck: PATH first, then the project venv."""
     found = shutil.which("shellcheck")
