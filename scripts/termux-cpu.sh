@@ -137,7 +137,32 @@ cpu_threads() {
       [ "$_t" -ge 1 ] || _t=1
       [ "$_t" -le "$CPU_MAX_EMBED_THREADS" ] || _t="$CPU_MAX_EMBED_THREADS"
       ;;
-    stt | tts)
+    stt)
+      # The whole budget, not half of it.
+      #
+      # Measured on an 8-core phone (4x A73 @2.4GHz), 10.58s of English audio:
+      #
+      #     2 threads   39.4s   RTF 3.7
+      #     4 threads   20.2s   RTF 1.9     <- the shipped default
+      #     6 threads   22.3s   RTF 2.1
+      #
+      # Four threads is nearly twice as fast as two, and six is *slower* than
+      # four - oversubscription on a big.LITTLE phone, where the extra threads
+      # land on slower cores or contend for the same ones. So the answer is
+      # four, and more is not better.
+      #
+      # STT takes the whole budget rather than half because transcription is a
+      # queued job: nobody is waiting on it, and it is the one class where
+      # throughput decides whether a lecture is searchable in a minute or in an
+      # hour. TTS keeps the embedder's share - piper already runs faster than
+      # realtime.
+      _t=$_budget
+      [ "$_t" -ge 1 ] || _t=1
+      [ "$_t" -le "$CPU_MAX_EMBED_THREADS" ] || _t="$CPU_MAX_EMBED_THREADS"
+      ;;
+    tts)
+      # Piper already runs faster than realtime (RTF 0.43-0.55 on this phone),
+      # so it keeps the embedder's share rather than the whole budget.
       _t=$((_budget / 2))
       [ "$_t" -ge 1 ] || _t=1
       [ "$_t" -le "$CPU_MAX_EMBED_THREADS" ] || _t="$CPU_MAX_EMBED_THREADS"

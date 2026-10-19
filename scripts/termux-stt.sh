@@ -83,11 +83,24 @@ mem_available_mb() {
 pick_model() {
   _budget=$(($(mem_available_mb) - STT_RESERVE_MB))
   _picked=""; _picked_mb=0; _picked_name=""
-  # name:path, largest first. The `-gt` guard makes the order load-bearing rather
-  # than incidental, so reordering this list cannot silently downgrade the choice.
+  # Preference order, smallest-and-fastest first.
+  #
+  # This used to be "largest that fits in RAM", on the reasoning that a bigger
+  # model is a better model. Measured on an 8-core phone, 10.58s of English
+  # audio, four threads:
+  #
+  #     small-q5_1     181 MB   20.2s   RTF 1.9
+  #     large-v3-turbo 574 MB  104.8s   RTF 9.9
+  #
+  # The bigger model is five times slower, and on this hardware that is the
+  # difference between a lecture being searchable in a minute and in an hour.
+  # Memory was never the binding constraint; time is. So the default is the
+  # fastest tier that fits, and the big one is opt-in for when its accuracy is
+  # wanted and the wait is acceptable - `STT_MODEL=...`.
   for tier in \
-      "large:$HOME/gguf/ggml-large-v3-turbo-q5_0.bin" \
       "small:$HOME/gguf/ggml-small-q5_1.bin" \
+      "base:$HOME/gguf/ggml-base-q5_1.bin" \
+      "large:$HOME/gguf/ggml-large-v3-turbo-q5_0.bin" \
       "base_en:$HOME/gguf/ggml-base.en-q5_1.bin"; do
     _name=${tier%%:*}
     _path=${tier#*:}

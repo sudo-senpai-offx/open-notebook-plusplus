@@ -92,8 +92,13 @@ time_clip() {
   if [ "$_start" = "0" ] || [ "$_end" = "0" ] || [ "$_end" -le "$_start" ]; then
     echo "TIMEOUT"
   else
-    # milliseconds -> tenths of a second
-    echo "$(( (_end - _start) / 100000000 ))/10"
+    # Nanoseconds -> seconds, with one decimal. The previous version emitted
+    # tenths as "394/10" and then divided by ten again when computing RTF, so
+    # every RTF was ten times too small and the WALL column was unreadable.
+    # A benchmark whose headline number is wrong by a factor of ten is worse
+    # than no benchmark.
+    echo "scale=1; ($_end - $_start) / 1000000000" | bc 2>/dev/null \
+      || echo "$(( (_end - _start) / 100000000 ))"
   fi
 }
 
@@ -123,7 +128,7 @@ for mp in $MODEL_PATHS; do
         wtxt="TIMEOUT"
       else
         # wall is tenths; duration is seconds -> RTF = (wall/10) / dur
-        rtf=$(python3 -c "print(f'{($wall/10)/$dur:.1f}')" 2>/dev/null || echo "?")
+        rtf=$(python3 -c "print(f'{$wall/$dur:.1f}')" 2>/dev/null || echo "?")
         wtxt="$wall"
       fi
       printf '%-10s %-8s %-34s %8s %8s %8s\n' "$_mname" "$t" "$name" "$dur" "$wtxt" "$rtf"

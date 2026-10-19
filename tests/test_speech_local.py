@@ -1307,6 +1307,79 @@ class TestStopReportsWhatItActuallyDid:
         ), f"{script}: stopping something that is not running must say so"
 
 
+class TestThreadCountIsMeasured:
+    """Six threads is slower than four, so "more is better" is wrong here.
+
+    Measured on an 8-core phone (4x A73 @2.4GHz), 10.58 seconds of English
+    audio:
+
+        2 threads   39.4s   RTF 3.7
+        4 threads   20.2s   RTF 1.9
+        6 threads   22.3s   RTF 2.1
+
+    Four threads is nearly twice as fast as two, and six is *slower* than four.
+    On a big.LITTLE phone the extra threads land on slower cores or contend for
+    the same ones, so the naive "give it everything" answer is measurably wrong.
+    """
+
+    def test_stt_takes_the_whole_inference_budget(self):
+        """Transcription is a queued job - nobody is waiting on it - so it gets
+        the whole budget rather than half of it."""
+        text = _read_script("termux-cpu.sh")
+        body = text[text.index("cpu_threads()") :]
+        stt = body[
+            body.index("    stt)") : body.index("    tts)")
+            if "    tts)" in body
+            else body
+        ]
+        assert "_t=$_budget" in stt, (
+            "STT should take the whole inference budget; it is the queued job "
+            "whose throughput decides whether a lecture is searchable in a "
+            "minute or an hour"
+        )
+
+    def test_tts_keeps_the_smaller_share(self):
+        """piper already runs faster than realtime, so it needs less."""
+        text = _read_script("termux-cpu.sh")
+        body = text[text.index("cpu_threads()") :]
+        assert "    tts)" in body, "tts must be named, not folded into a catch-all"
+        tts = body[body.index("    tts)") :]
+        assert "_budget / 2" in tts
+
+    def test_the_measurement_is_recorded_next_to_the_policy(self):
+        """A number in a comment is how the next reader knows the policy was
+        measured rather than guessed."""
+        cpu = _read_script("termux-cpu.sh")
+        assert "RTF 1.9" in cpu, (
+            "the thread measurement belongs beside the thread policy"
+        )
+        stt = _read_script("termux-stt.sh")
+        assert "RTF 9.9" in stt, "the model measurement belongs beside the model policy"
+
+
+class TestBenchmarkArithmetic:
+    """The first benchmark printed every RTF ten times too small.
+
+    `time_clip` emitted tenths of a second as the string "394/10", and the RTF
+    calculation then divided by ten *again* — so 39.4s of wall time against
+    10.58s of audio printed as 0.4 instead of 3.7. The WALL column was
+    unreadable too. A benchmark whose headline number is wrong by a factor of
+    ten is worse than none: it would have sent us to a "winner" that was five
+    times too slow.
+    """
+
+    def test_wall_time_is_emitted_in_seconds(self):
+        text = _read_script("termux-stt-benchmark.sh")
+        # No "N/10" tenths encoding.
+        assert '")/10"' not in text
+        assert "1000000000" in text, "nanoseconds must be divided by 1e9, not 1e8"
+
+    def test_rtf_is_wall_over_audio_without_a_second_division(self):
+        text = _read_script("termux-stt-benchmark.sh")
+        assert "$wall/$dur" in text
+        assert "$wall/10" not in text, "the wall time is already in seconds"
+
+
 class TestSttModelSelection:
     """The STT model is chosen from free RAM, because it cannot be a constant.
 
@@ -1338,7 +1411,22 @@ class TestSttModelSelection:
         large_at = tiers.index("ggml-large-v3-turbo-q5_0.bin")
         small_at = tiers.index("ggml-small-q5_1.bin")
         base_en_at = tiers.index("ggml-base.en-q5_1.bin")
-        assert large_at < small_at < base_en_at, "tiers must be ordered largest first"
+        # Fastest first, on the measurement: small RTF 1.9 against large RTF
+        # 9.9 on the same phone, same clip, same thread count. Memory was never
+        # the binding constraint - time is.
+        assert small_at < large_at, (
+            "the smaller model is five times faster on this device, so it must "
+            "come first; the large one is opt-in"
+        )
+        # The English-only model stays the last resort, never a default.
+        assert large_at < base_en_at, "the English-only tier must remain last"
+
+    def test_the_large_tier_is_opt_in_rather_than_default(self):
+        """`STT_MODEL` overrides everything, which is how the big model is
+        reached when its accuracy is wanted and the wait is acceptable."""
+        text = _read_script("termux-stt.sh")
+        assert 'MODEL="${STT_MODEL:-}"' in text
+        assert "ggml-large-v3-turbo-q5_0.bin" in text
 
     def test_it_reads_memavailable_not_memfree(self):
         """MemFree ignores reclaimable page cache, which on Android is most of it.
@@ -1717,7 +1805,12 @@ class TestProcessIdentification:
         budget it never used.
         """
         code = self._code(_read_script("termux-cpu.sh"))
-        assert "stt | tts)" in code
+        # stt and tts are separate arms now: STT takes the whole inference
+        # budget (it is the queued job whose throughput decides how long a
+        # lecture takes to become searchable), while TTS keeps the embedder's
+        # share because piper already runs faster than realtime.
+        assert "    stt)" in code
+        assert "    tts)" in code
 
     def test_the_summary_reports_both_new_roles(self):
         code = self._code(_read_script("termux-cpu.sh"))
