@@ -40,6 +40,47 @@ DEVICE_SCRIPTS = [
 ]
 
 
+class TestEveryDeviceScriptReachesThePhone:
+    """A script that lives only in the repo is a script the phone cannot run.
+
+    `install-bin.sh` copies `scripts/termux-*` into `~/bin` under a shorter
+    `onb-*` name. A new script that nobody adds to that list fails at the moment
+    an operator reaches for it, on a phone, with a "No such file or directory"
+    that says nothing about the real cause — which is exactly what happened with
+    `termux-fetch-models.sh`: it was written, tested, committed and bundled, and
+    then not runnable because the install list was never updated.
+
+    So the list is checked against the directory rather than remembered.
+    """
+
+    # Scripts that legitimately do not belong in ~/bin, each with its reason.
+    NOT_ON_DEVICE = {
+        "termux-chat-setup.sh": (
+            "runs INSIDE the proot guest as /root/chat-setup.sh, not from Termux"
+        ),
+    }
+
+    def test_no_script_is_missing_from_the_installer(self) -> None:
+        installer = (SCRIPTS / "install-bin.sh").read_text()
+        missing = []
+        for path in sorted(SCRIPTS.glob("termux-*.sh")):
+            name = path.name
+            if name in self.NOT_ON_DEVICE:
+                continue
+            if name not in installer:
+                missing.append(name)
+        assert not missing, (
+            "these scripts exist but install-bin.sh never installs them, so they "
+            "cannot be run on the phone: " + ", ".join(missing)
+        )
+
+    def test_the_exceptions_are_still_reasons_and_not_a_scrap_heap(self) -> None:
+        """An allowlist with no stated reason becomes a place things go to die."""
+        for name, reason in self.NOT_ON_DEVICE.items():
+            assert (SCRIPTS / name).exists(), f"{name} is excepted but no longer exists"
+            assert len(reason) > 20, f"{name} needs a real reason, not a placeholder"
+
+
 def _shellcheck() -> str | None:
     """Locate shellcheck: PATH first, then the project venv."""
     found = shutil.which("shellcheck")

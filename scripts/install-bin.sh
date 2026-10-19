@@ -118,6 +118,14 @@ install_one termux-tts-server.py onb-tts-server || rc=1
 # runs - it is here so the file the operator needs is in ~/bin with the rest,
 # rather than in a repository they have to go and find.
 install_one termux-build-piper.sh onb-build-piper || rc=1
+  # onb-fetch-models: the multilingual whisper tiers and the zh/ja piper voices,
+  # fetched by exact byte count rather than by `curl -C -`. Installed here for
+  # the same reason as every other entry — a script that lives only in the repo
+  # is a script the phone cannot run, which is the drift this file exists to
+  # prevent. The first attempt at this ran the file straight out of the repo path
+  # and failed with "No such file or directory" purely because nobody had
+  # remembered to add it here.
+  install_one termux-fetch-models.sh onb-fetch-models || rc=1
 refresh_guest_launcher || true
 
 echo
