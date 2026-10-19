@@ -362,10 +362,21 @@ stage_source() {
       # manual procedure (`git fetch /tmp/plusplus.bundle main`), and
       # forgetting it is what made an earlier draft report "could not
       # resolve a commit" for a perfectly good bundle.
-      if ! in_guest git -C "$REPO_IN_GUEST" fetch "$BUNDLE_IN_GUEST" main >/dev/null 2>&1; then
-        STAGE_ERROR="git fetch rejected $src. Is it a bundle of this repo?"
-        return 1
-      fi
+        # git's own message is kept. It was thrown away with `2>&1` and
+        # replaced by a guess, which is how "git fetch rejected ... Is it a
+        # bundle of this repo?" became the entire diagnosis of a failure whose
+        # real cause - a truncated bundle, a missing prerequisite, a ref that is
+        # not called main - was never shown. The guess is also actively
+        # misleading: the bundle almost always *is* of this repo, so the
+        # message invites the reader to check the wrong thing.
+        _fetch_err="$ROOTFS/tmp/onb-fetch-err.$$"
+        if ! in_guest git -C "$REPO_IN_GUEST" fetch "$BUNDLE_IN_GUEST" main 2>"$_fetch_err"; then
+          _why=$(tail -3 "$_fetch_err" 2>/dev/null | tr '\n' ' ')
+          rm -f "$_fetch_err" 2>/dev/null
+          STAGE_ERROR="git fetch rejected $src: ${_why:-no detail}"
+          return 1
+        fi
+        rm -f "$_fetch_err" 2>/dev/null
       STAGED="FETCH_HEAD"
       return 0 ;;
   esac
