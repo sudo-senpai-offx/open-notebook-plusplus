@@ -126,6 +126,11 @@ install_one termux-build-piper.sh onb-build-piper || rc=1
   # and failed with "No such file or directory" purely because nobody had
   # remembered to add it here.
   install_one termux-fetch-models.sh onb-fetch-models || rc=1
+  # onb-speech-suite: the multilingual robustness suite. Stdlib Python only — a
+  # device being measured must not acquire a dependency as part of being
+  # measured — and it ships with the other wrappers so the phone can run it
+  # against the two model servers residency manages.
+  install_one termux-speech-suite.py onb-speech-suite || rc=1
 refresh_guest_launcher || true
 
 echo
