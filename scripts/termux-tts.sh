@@ -29,7 +29,8 @@ set -u
 
 MODEL="${TTS_MODEL:-$HOME/piper_models/en_US-amy-medium.onnx}"
 PORT="${TTS_PORT:-8091}"
-TTS_SERVER="$HOME/piper-server.py"
+TTS_SERVER="$HOME/bin/onb-tts-server"
+PIPER_BIN="${PIPER_BIN:-$HOME/piper-build/prefix/bin/piper}"
 LOG="$HOME/piper-server.log"
 
 # The same derived budget the chat server uses, from the same library — chat,
@@ -150,21 +151,37 @@ case "${1:-up}" in
     fi
     if [ ! -f "$MODEL" ]; then
       echo "[tts] FATAL: voice model missing at $MODEL"
-      echo "        copy an .onnx voice model to ~/piper_models/ first"
+      echo "        onb-build-piper fetches one; or drop any .onnx voice into"
+      echo "        ~/piper_models/ and set TTS_MODEL to its name"
       exit 1
     fi
     if [ ! -f "$TTS_SERVER" ]; then
-      echo "[tts] FATAL: piper server missing at $TTS_SERVER"
-      echo "        copy piper/server.py to ~/piper-server.py and set TTS_PORT=8091"
+      echo "[tts] FATAL: server missing at $TTS_SERVER"
+      echo "        it ships as scripts/termux-tts-server.py; install it with"
+      echo "          sh install-bin.sh"
+      echo "        or copy it to $TTS_SERVER by hand"
+      exit 1
+    fi
+    if [ ! -x "$PIPER_BIN" ]; then
+      echo "[tts] FATAL: piper binary missing at $PIPER_BIN"
+      echo "        Termux has no piper package, so it has to be built:"
+      echo "          sh ~/bin/onb-build-piper"
       exit 1
     fi
     if ! command -v python3 >/dev/null 2>&1; then
       echo "[tts] FATAL: python3 not found"
+      echo "        pkg install python"
       exit 1
     fi
     echo "[tts] starting $(basename "$MODEL") on :${PORT} (${TTS_THREADS} threads, piper)"
     # shellcheck disable=SC2086
-    TTS_PORT="$PORT" TTS_MODEL="$MODEL" nohup $CPU_AFFINITY python3 "$TTS_SERVER" \
+    TTS_PORT="$PORT" \
+      TTS_MODELS_DIR="$(dirname "$MODEL")" \
+      TTS_MODEL="$(basename "$MODEL" .onnx)" \
+      TTS_THREADS="$TTS_THREADS" \
+      PIPER_BIN="$PIPER_BIN" \
+      TTS_HOST=127.0.0.1 \
+      nohup $CPU_AFFINITY python3 "$TTS_SERVER" \
       >>"$LOG" 2>&1 &
     if wait_healthy; then
       echo "[tts] healthy"

@@ -39,6 +39,14 @@ from open_notebook.residency import client as residency
 from open_notebook.scheduler import footprint as fp
 from open_notebook.speech import client as speech
 
+
+def _read_script(name: str) -> str:
+    """A file from scripts/, as text. Shared by the two contract classes below."""
+    return (Path(__file__).resolve().parents[1] / "scripts" / name).read_text(
+        encoding="utf-8"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Media detection, by content
 # ---------------------------------------------------------------------------
@@ -657,14 +665,200 @@ class TestSupervisorSpeechRoles:
                 )
 
 
-class TestShellContract:
-    """The verbs are a contract between a Python file and two shell files."""
+class TestTtsServerContract:
+    """The phone's TTS server, tested without piper.
+
+    piper's own `server.py` was rejected for three reasons — it binds
+    `0.0.0.0`, hardcodes `MODELS_DIR = "/app/models"` with the port fixed at
+    9600, and needs Flask — so `scripts/termux-tts-server.py` replaces it. That
+    makes it ours, and an untested replacement for a component that ships on
+    every phone is exactly the sort of thing that is fine until it is not.
+
+    piper itself is stubbed. Everything asserted here is the half we own: the
+    argument vector, the voice resolution, and the failure answers.
+    """
 
     @staticmethod
-    def _script(name: str) -> str:
-        return (Path(__file__).resolve().parents[1] / "scripts" / name).read_text(
-            encoding="utf-8"
+    def _server(tmp_path, monkeypatch, **env):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "termux_tts_server",
+            Path(__file__).resolve().parents[1] / "scripts" / "termux-tts-server.py",
         )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for key, value in env.items():
+            monkeypatch.setattr(module, key, value)
+        return module
+
+    @staticmethod
+    def _stub_piper(tmp_path, log: Path) -> Path:
+        """A piper that records its arguments and writes a recognisable file."""
+        binary = tmp_path / "piper-stub"
+        binary.write_text(
+            "#!/bin/sh\n"
+            f'printf "ARGS:" >> {log}\n'
+            'for a in "$@"; do printf " [%s]" "$a" >> ' + str(log) + "; done\n"
+            f'printf "\\n" >> {log}\n'
+            'out=""\n'
+            "while [ $# -gt 0 ]; do\n"
+            '  case "$1" in --output_file) out="$2"; shift 2 ;; *) shift ;; esac\n'
+            "done\n"
+            "text=$(cat)\n"
+            f'printf "STDIN:%s\\n" "${{#text}}" >> {log}\n'
+            '[ -n "$out" ] || exit 3\n'
+            "printf 'RIFFWAVEfmt ' > \"$out\"\n"
+            "exit 0\n"
+        )
+        binary.chmod(0o755)
+        return binary
+
+    def _voices(self, tmp_path: Path) -> Path:
+        models = tmp_path / "models"
+        models.mkdir(exist_ok=True)
+        for name in ("en_US-amy-medium", "en_GB-alan-medium"):
+            (models / f"{name}.onnx").write_bytes(b"stub")
+        return models
+
+    def test_it_binds_loopback_by_default(self, tmp_path, monkeypatch):
+        """Every other server here is loopback-only, and on a phone that means
+        the synthesis endpoint is otherwise reachable from the local network
+        with no credential at all."""
+        src = (
+            Path(__file__).resolve().parents[1] / "scripts" / "termux-tts-server.py"
+        ).read_text()
+        assert 'os.getenv("TTS_HOST", "127.0.0.1")' in src
+        # And saying so out loud when it is overridden, rather than silently
+        # widening the attack surface.
+        assert "not loopback" in src
+
+    def test_voice_names_resolve_including_the_piper_prefix(
+        self, tmp_path, monkeypatch
+    ):
+        module = self._server(
+            tmp_path, monkeypatch, MODELS_DIR=str(self._voices(tmp_path))
+        )
+        resolved = module.resolve_voice("en_GB-alan-medium")
+        assert resolved is not None and resolved.endswith("en_GB-alan-medium.onnx")
+        # `piper-<stem>` is what piper's own server accepts, and a caller that
+        # learned that spelling must keep working.
+        assert module.resolve_voice("piper-en_GB-alan-medium") == resolved
+
+    def test_an_unknown_voice_resolves_to_none_not_a_guess(self, tmp_path, monkeypatch):
+        module = self._server(
+            tmp_path, monkeypatch, MODELS_DIR=str(self._voices(tmp_path))
+        )
+        assert module.resolve_voice("does-not-exist") is None
+
+    def test_it_passes_the_voice_path_to_piper(self, tmp_path, monkeypatch):
+        module = self._server(
+            tmp_path, monkeypatch, MODELS_DIR=str(self._voices(tmp_path))
+        )
+        log = tmp_path / "calls.log"
+        module.PIPER_BIN = str(self._stub_piper(tmp_path, log))
+        module.TIMEOUT = 30
+
+        audio = module.synthesize("hello", module.resolve_voice("en_US-amy-medium"))
+        assert audio.startswith(b"RIFF")
+
+        recorded = log.read_text()
+        assert "--model" in recorded
+        assert "en_US-amy-medium.onnx" in recorded
+        assert "--output_file" in recorded
+        assert "STDIN:5" in recorded, "the text goes to piper on stdin"
+
+    def test_an_unset_espeak_data_is_omitted_not_passed_empty(
+        self, tmp_path, monkeypatch
+    ):
+        """The bug this test exists for.
+
+        `--espeak_data ""` is not the same as omitting the flag. piper finds its
+        own espeak-ng-data relative to the binary; an explicit empty value
+        overrides that with the process's working directory, and synthesis fails
+        with a phonemisation error that names no file at all. Found by running
+        the server against a stub that logged its arguments, which is the only
+        way the difference is visible — the HTTP response is a 500 either way.
+        """
+        module = self._server(
+            tmp_path, monkeypatch, MODELS_DIR=str(self._voices(tmp_path))
+        )
+        log = tmp_path / "calls.log"
+        module.PIPER_BIN = str(self._stub_piper(tmp_path, log))
+        module.TIMEOUT = 30
+
+        monkeypatch.delenv("ESPEAK_DATA", raising=False)
+        module.synthesize("hello", module.resolve_voice("en_US-amy-medium"))
+        assert "--espeak_data" not in log.read_text()
+
+    def test_a_set_espeak_data_is_passed(self, tmp_path, monkeypatch):
+        module = self._server(
+            tmp_path, monkeypatch, MODELS_DIR=str(self._voices(tmp_path))
+        )
+        log = tmp_path / "calls.log"
+        module.PIPER_BIN = str(self._stub_piper(tmp_path, log))
+        module.TIMEOUT = 30
+
+        monkeypatch.setenv(
+            "ESPEAK_DATA", "/data/data/com.termux/files/usr/share/espeak-ng-data"
+        )
+        module.synthesize("hello", module.resolve_voice("en_US-amy-medium"))
+        recorded = log.read_text()
+        assert "--espeak_data" in recorded
+        assert "espeak-ng-data" in recorded
+
+    def test_it_refuses_to_start_without_piper(self, tmp_path, monkeypatch):
+        """Absent, not a server that answers 200 and synthesises silence."""
+        module = self._server(tmp_path, monkeypatch)
+        monkeypatch.setattr(module, "PIPER_BIN", str(tmp_path / "nope"))
+        assert module.main() == 1
+
+
+class TestPiperBuildRoute:
+    """The build, pinned on the one decision that decides whether it works.
+
+    piper-phonemize's CMake downloads a prebuilt
+    `onnxruntime-linux-aarch64-1.14.1.tgz` — a glibc binary. Android's loader
+    rejects it, and does so at run time, after a build that otherwise
+    succeeded. `ONNXRUNTIME_DIR` skips the download and uses `<dir>/include` and
+    `<dir>/lib`, which is exactly where Termux's packaged onnxruntime puts
+    them. Getting that wrong means an afternoon.
+    """
+
+    def test_it_points_piper_phonemize_at_the_termux_onnxruntime(self):
+        text = _read_script("termux-build-piper.sh")
+        assert "ONNXRUNTIME_DIR" in text
+
+    def test_onnxruntime_dir_goes_in_the_environment_not_on_the_command_line(self):
+        """The nested ExternalProject only inherits the environment.
+
+        piper builds piper-phonemize with ExternalProject_Add and forwards
+        CMAKE_INSTALL_PREFIX alone, so a `-DONNXRUNTIME_DIR` on piper's own
+        command line would silently never reach the build that needs it — and
+        the failure would be the glibc download it was meant to prevent.
+        """
+        text = _read_script("termux-build-piper.sh")
+        env_form = "ONNXRUNTIME_DIR=" in text
+        assert env_form
+        assert "-DONNXRUNTIME_DIR" not in text
+
+    def test_it_wants_the_c_library_not_the_python_bindings(self):
+        """`python-onnxruntime` ships the wheel; piper links `libonnxruntime.so`.
+
+        They are separate packages in Termux, and installing only the Python one
+        produces a build that cannot find the library it needs.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert "pkg install onnxruntime" in text
+        assert "NOT python-onnxruntime" in text
+
+    def test_it_strips_the_glibc_static_link_flags(self):
+        text = _read_script("termux-build-piper.sh")
+        assert "static-libstdc++" in text
+        assert "sed -i" in text
+
+    """The verbs are a contract between a Python file and two shell files."""
 
     def _code(self, text: str) -> str:
         lines = []
@@ -677,7 +871,7 @@ class TestShellContract:
 
     @pytest.mark.parametrize("script", ["termux-stt.sh", "termux-tts.sh"])
     def test_both_expose_the_four_residency_verbs(self, script):
-        code = self._code(self._script(script))
+        code = self._code(_read_script(script))
         for verb in ("up)", "down)", "probe)", "model-path)"):
             assert verb in code, f"{script} lost {verb}"
 
@@ -686,7 +880,7 @@ class TestShellContract:
         """Four servers, four ports. A collision would let one role's reaper
         unload the model another role is serving, and the symptom would be a
         model that reports itself unloaded with nothing in the logs."""
-        code = self._code(self._script(script))
+        code = self._code(_read_script(script))
         expected = "STT_PORT:-8090" if "stt" in script else "TTS_PORT:-8091"
         assert expected in code
         # And the pid matcher must distinguish it from the other three, which
@@ -701,13 +895,13 @@ class TestShellContract:
         hardcodes its own would drift from the supervisor's accounting and
         saturate the device while the gate believed it had headroom.
         """
-        code = self._code(self._script(script))
+        code = self._code(_read_script(script))
         assert "onb-cpu" in code
         assert "cpu_threads" in code
 
     def test_both_scripts_are_installed_as_wrappers(self):
         """A script that exists only in the repo is a script the phone cannot run."""
-        code = self._code(self._script("install-bin.sh"))
+        code = self._code(_read_script("install-bin.sh"))
         assert "install_one termux-stt.sh     onb-stt" in code
         assert "install_one termux-tts.sh     onb-tts" in code
 
@@ -718,11 +912,11 @@ class TestShellContract:
         transcription runs at a fifth of the device while the panel reports a
         budget it never used.
         """
-        code = self._code(self._script("termux-cpu.sh"))
+        code = self._code(_read_script("termux-cpu.sh"))
         assert "stt | tts)" in code
 
     def test_the_summary_reports_both_new_roles(self):
-        code = self._code(self._script("termux-cpu.sh"))
+        code = self._code(_read_script("termux-cpu.sh"))
         assert "$(cpu_threads stt)" in code
         assert "$(cpu_threads tts)" in code
 
@@ -739,7 +933,7 @@ class TestShellContract:
         Asserted here against the script because the failure is a flag name,
         and flag names are exactly what drifts between the two projects.
         """
-        code = self._code(self._script("termux-stt.sh"))
+        code = self._code(_read_script("termux-stt.sh"))
         for forbidden in ("-c 512", "-c512", " --c "):
             assert forbidden not in code, f"termux-stt.sh passes {forbidden!r}"
 
@@ -748,7 +942,7 @@ class TestShellContract:
         ["-m", "-t", "--host", "--port", "--inference-path", "--convert"],
     )
     def test_stt_only_passes_flags_the_server_defines(self, flag):
-        code = self._code(self._script("termux-stt.sh"))
+        code = self._code(_read_script("termux-stt.sh"))
         assert flag in code, f"termux-stt.sh should pass {flag}"
 
     def test_stt_enables_conversion_because_sources_are_not_wav(self):
@@ -759,7 +953,7 @@ class TestShellContract:
         with an empty transcript — which the source pipeline reports as
         "produced no transcript", blaming the file rather than the missing flag.
         """
-        code = self._code(self._script("termux-stt.sh"))
+        code = self._code(_read_script("termux-stt.sh"))
         assert "--convert" in code
 
     def test_stt_names_ffmpeg_in_its_own_failure_message(self):
@@ -771,7 +965,7 @@ class TestShellContract:
         and has never run — and it is only avoidable by saying so at the point
         where the command is being run.
         """
-        text = self._script("termux-stt.sh")
+        text = _read_script("termux-stt.sh")
         code = self._code(text)
         assert "ffmpeg" in code
         assert "pkg install ffmpeg" in text

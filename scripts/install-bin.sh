@@ -107,6 +107,17 @@ install_one termux-cpu.sh     onb-cpu      || rc=1
 # is the drift this whole file exists to prevent.
 install_one termux-stt.sh     onb-stt      || rc=1
 install_one termux-tts.sh     onb-tts      || rc=1
+# onb-tts-server is the HTTP layer piper does not provide on this device: its
+# own server.py binds 0.0.0.0 and hardcodes a Docker layout (/app/models,
+# port 9600, Flask). On a phone that is both an unauthenticated network
+# endpoint and a filesystem arrangement that does not exist, so the server is
+# ours and depends only on the standard library.
+install_one termux-tts-server.py onb-tts-server || rc=1
+# onb-build-piper: Termux packages no piper, no espeak-ng and no
+# piper-phonemize, so the only route is building it. Not a wrapper the stack
+# runs - it is here so the file the operator needs is in ~/bin with the rest,
+# rather than in a repository they have to go and find.
+install_one termux-build-piper.sh onb-build-piper || rc=1
 refresh_guest_launcher || true
 
 echo
