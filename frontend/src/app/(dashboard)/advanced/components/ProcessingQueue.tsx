@@ -24,8 +24,15 @@ const HOLD_REASON_KEYS: Record<string, string> = {
   'unknown-footprint': 'processing.reason_unknown-footprint',
   'memory-unreadable': 'processing.reason_memory-unreadable',
   'not-yet-considered': 'processing.reason_not-yet-considered',
+  // CPU saturation is a distinct reason from window-full: the window is not
+  // full, there is a free slot, and nothing would start until the running jobs
+  // finish. Reporting it as "waiting for a free slot" sends the operator to
+  // look at the concurrency cap when the cap is not what is holding them.
+  'cpu-budget': 'processing.reason_cpu-budget',
   'class-limit:chat': 'processing.reason_class_limit_chat',
   'class-limit:embed': 'processing.reason_class_limit_embed',
+  'class-limit:stt': 'processing.reason_class_limit_stt',
+  'class-limit:tts': 'processing.reason_class_limit_tts',
 }
 
 /** Role name -> i18n key. An explicit map for the reason given on
@@ -36,6 +43,8 @@ const HOLD_REASON_KEYS: Record<string, string> = {
 const RESIDENCY_ROLE_KEYS: Record<string, string> = {
   chat: 'processing.residency_chat',
   embed: 'processing.residency_embed',
+  stt: 'processing.residency_stt',
+  tts: 'processing.residency_tts',
 }
 
 /** Bytes as a short human string, for memory figures only.

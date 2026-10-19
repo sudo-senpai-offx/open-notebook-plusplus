@@ -100,6 +100,13 @@ install_one termux-supervisor.py onb-residency || rc=1
 # thread budgets from it, so it has to land in the same deploy as the scripts
 # that consume it - a missing one silently falls back to the floor's values.
 install_one termux-cpu.sh     onb-cpu      || rc=1
+# onb-stt / onb-tts: whisper.cpp and piper, started the same residency-managed
+# way as the chat and embed servers. Installed here so a device that has the
+# binaries can be brought up by the supervisor without hand-copying scripts -
+# a wrapper that lives only in the repo is a wrapper the phone cannot run, which
+# is the drift this whole file exists to prevent.
+install_one termux-stt.sh     onb-stt      || rc=1
+install_one termux-tts.sh     onb-tts      || rc=1
 refresh_guest_launcher || true
 
 echo

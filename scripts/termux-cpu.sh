@@ -109,11 +109,21 @@ cpu_inference_budget() {
 #
 #   chat   - decode threads
 #   embed  - embedding threads
+#   stt    - whisper transcription threads
+#   tts    - piper synthesis threads
 #
 # Split evenly from the shared budget, which is what makes "chat and embed
 # together" bounded rather than each class independently claiming whatever it
 # likes. On an 8-core device that is 2 and 2 - the same as the values that were
 # hardcoded for the SD680, arrived at rather than inherited.
+#
+# `stt` and `tts` take the embedder's allocation, not chat's. Both are short,
+# single-request media jobs rather than an interactive decode stream, so decode's
+# wider ceiling buys nothing here; what matters is that a transcription arriving
+# during a podcast render cannot take the whole machine. They are given names
+# rather than folded into `*)` so that a typo in a launcher's role argument
+# falls through to one thread and is visible, instead of silently inheriting the
+# embedder's budget.
 cpu_threads() {
   _budget=$(cpu_inference_budget)
   case "${1:-chat}" in
@@ -123,6 +133,11 @@ cpu_threads() {
       [ "$_t" -le "$CPU_MAX_DECODE_THREADS" ] || _t="$CPU_MAX_DECODE_THREADS"
       ;;
     embed)
+      _t=$((_budget / 2))
+      [ "$_t" -ge 1 ] || _t=1
+      [ "$_t" -le "$CPU_MAX_EMBED_THREADS" ] || _t="$CPU_MAX_EMBED_THREADS"
+      ;;
+    stt | tts)
       _t=$((_budget / 2))
       [ "$_t" -ge 1 ] || _t=1
       [ "$_t" -le "$CPU_MAX_EMBED_THREADS" ] || _t="$CPU_MAX_EMBED_THREADS"
@@ -169,9 +184,10 @@ cpu_summary() {
       "$CPU_CORES" "$CPU_BIG_CORES" "$CPU_FAST_MASK" \
       "$(cpu_inference_budget)" "$CPU_FAST_MASK"
   else
-    printf 'cores %s budget %s  chat %s/-b%s  embed %s' \
+    printf 'cores %s budget %s  chat %s/-b%s  embed %s  stt %s  tts %s' \
       "$CPU_CORES" "$(cpu_inference_budget)" \
-      "$(cpu_threads chat)" "$(cpu_batch_threads)" "$(cpu_threads embed)"
+      "$(cpu_threads chat)" "$(cpu_batch_threads)" "$(cpu_threads embed)" \
+      "$(cpu_threads stt)" "$(cpu_threads tts)"
   fi
 }
 

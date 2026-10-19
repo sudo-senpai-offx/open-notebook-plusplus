@@ -192,9 +192,19 @@ def _empty_file_message(file_path: str | None, content_state: dict) -> str:
     # nothing" as though the document were at fault.
     ok, detail = available()
     if not ok:
+        # Speech is checked first for media: an audio file never reaches OCR,
+        # so naming OCR here would name a fallback this file cannot take.
+        if _is_media(file_path):
+            return _media_failure_message(
+                file_path or "", attempted=bool(content_state.get("_stt_attempted"))
+            )
         return (
             "Could not extract any text content from this file, and OCR "
             f"is unavailable here: {detail}."
+        )
+    if _is_media(file_path):
+        return _media_failure_message(
+            file_path or "", attempted=bool(content_state.get("_stt_attempted"))
         )
     if content_state.get("_ocr_attempted"):
         return (
@@ -282,6 +292,144 @@ async def _augment_with_ocr(
     )
 
 
+#: Magic-byte prefixes for audio and video containers. Checked by content rather
+#: than by name for the reason `_is_pdf` documents: the blob store hands files
+#: back as `{sha}.bin`, so a lecture recording synced from a phone has no suffix
+#: at all and every `endswith(".mp3")` gate would skip it.
+_MEDIA_SIGNATURES: tuple[bytes, ...] = (
+    b"ID3",  # mp3 with an ID3 tag
+    b"RIFF",  # wav / avi - the WAVE/AVI form tag is checked below
+    b"OggS",  # ogg / opus / webm audio
+    b"fLaC",  # flac
+    b"\x1a\x45\xdf\xa3",  # matroska / webm
+    b"\x00\x00\x01\xba",  # mpeg program stream
+    b"\x00\x00\x01\xb3",  # mpeg video
+)
+
+
+def _is_media(file_path: str | None) -> bool:
+    """Whether the file at *file_path* is audio or video, by content.
+
+    The counterpart to `_is_pdf`, and needed for the same reason. A text
+    extractor has no answer for a media file except an empty string or an
+    "unsupported type" error, and both mean "ask the speech model" rather than
+    "this document is unreadable" - so the decision has to be made from the
+    bytes before the failure is reported.
+    """
+    if not file_path:
+        return False
+    try:
+        with open(file_path, "rb") as handle:
+            head = handle.read(12)
+    except OSError:
+        return False
+    if not head:
+        return False
+    if head[:4] == b"RIFF":
+        return head[8:12] == b"WAVE"
+    if head[4:8] == b"ftyp":
+        # mp4 / m4a / mov / 3gp all carry a brand here.
+        return True
+    if head[0] == 0xFF:
+        # MPEG audio/visual frame sync is eleven set bits: 0xFF followed by the
+        # top three bits of the next byte. This is also the branch that has to
+        # *not* match a JPEG, whose marker byte 0xD8 carries 0b110 in the top
+        # three bits - so a photo cannot be handed to whisper, which would
+        # answer with an empty transcript and an error naming a file that was
+        # never audio.
+        return (head[1] & 0xE0) == 0xE0
+    return any(head.startswith(sig) for sig in _MEDIA_SIGNATURES)
+
+
+async def _try_stt(file_path: str, cmd_id: str | None = None) -> str:
+    """Transcribe a media file with the local speech server.
+
+    Returns empty string rather than raising, for the same reason `_try_ocr`
+    does: speech-to-text being unavailable or refusing the file is a degraded
+    outcome, and the caller's fallback is the actionable error. Raising here
+    would turn "this phone has no whisper build" into a job that fails fifteen
+    times with exponential backoff and starves the queue behind it.
+    """
+    from open_notebook.speech import transcribe
+
+    if cmd_id:
+        await report_progress_record(cmd_id, progress=20, stage="transcribing")
+    result = await transcribe(file_path)
+    if not result.ok:
+        if result.held:
+            # A residency hold means the model is loaded but the device is
+            # committed. Say so plainly in the log and let the honest failure
+            # message reach the operator.
+            logger.info(
+                f"speech-to-text held for {Path(file_path).name}: {result.error}"
+            )
+        else:
+            logger.warning(
+                f"speech-to-text failed for {Path(file_path).name}: {result.error}"
+            )
+        return ""
+    logger.info(
+        f"Transcribed {len(result.text)} chars from {Path(file_path).name} "
+        f"with local speech-to-text"
+    )
+    return result.text
+
+
+def _media_failure_message(file_path: str, attempted: bool) -> str:
+    """Say what was tried on a media file, not what a setting could do.
+
+    Mirrors `_empty_file_message`'s contract: a remedy that names the wrong
+    thing sends the operator to a page that cannot help.
+    """
+    ok, detail = _speech_reachable()
+    if not ok:
+        return (
+            f"Could not read any text from this audio/video file, and local "
+            f"speech-to-text is unavailable here: {detail}."
+        )
+    if attempted:
+        return (
+            "Could not read any text from this audio/video file. Text "
+            "extraction returned nothing and the speech model produced no "
+            "transcript - the file may contain no speech, or the format may "
+            "be one the server cannot decode."
+        )
+    return (
+        "Could not read any text from this audio/video file. The speech "
+        "server could not be reached, so nothing was transcribed."
+    )
+
+
+def _speech_reachable() -> tuple[bool, str]:
+    """Can the speech server be reached from here?
+
+    `speech.available()` is a coroutine because its probe is HTTP. Building an
+    error message must not become an await point in the middle of an
+    extraction's failure path, so this does the same reachability check with a
+    socket - fast, local, and honest about the thing the message claims: that
+    the server is not reachable *from here*.
+
+    TCP-connectable, not answering. That is the right strength for a message
+    that says "the speech server could not be reached", and a server that is
+    listening but not yet loaded is exactly the state the residency reaper can
+    leave behind, which is not what this message is about.
+    """
+    import socket
+    from urllib.parse import urlparse as _urlparse
+
+    from open_notebook.speech import stt_url
+
+    url = stt_url()
+    parsed = _urlparse(url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 8090
+    try:
+        with socket.create_connection((host, port), timeout=1.0):
+            return True, f"speech-to-text at {url}"
+    except OSError as exc:
+        return False, f"{url} unreachable ({type(exc).__name__})"
+
+
 async def _extract_with_text_engine(
     cmd_id: str | None,
     content_state: dict,
@@ -297,7 +445,15 @@ async def _extract_with_text_engine(
     be wasted CPU and slightly worse output, while skipping the figures
     loses real content. So only the pages and regions the analysis
     flagged get read, and the result is appended.
+
+    Media files get a third ending: an audio or video source that the text
+    extractor cannot read is handed to the local speech server instead of
+    failing, which is what makes a recorded lecture searchable.
     """
+    # Set only when content-core refused a media file. Carried out of the
+    # `except` block so the speech fallback below can explain a joint failure
+    # with the cause attached, rather than reporting the speech outcome alone.
+    core_error: Optional[cc.ContentCoreError] = None
     await report_progress_record(cmd_id, progress=25, stage="extracting_content")
     try:
         # Fast profile when Docling is explicitly chosen: the heavy
@@ -345,7 +501,41 @@ async def _extract_with_text_engine(
                 processed.content = ocr_text
     except cc.ContentCoreError as e:
         logger.warning(f"content-core extraction failed ({type(e).__name__}): {e}")
-        raise _extraction_error(e, url) from e
+        if not (file_path and _is_media(file_path)):
+            raise _extraction_error(e, url) from e
+        # A text extractor declining a media file is the expected answer, not a
+        # fault: `UnsupportedTypeException` and `FileOperationError` are what a
+        # lecture recording produces, and converting them into a permanent
+        # "this file type is not supported" would throw away the one thing that
+        # can read it. Swallow the error here and let the speech fallback below
+        # decide, so an unreachable speech server produces an actionable
+        # message instead of this one.
+        core_error = e
+        processed = ExtractionOutput(content="", title="")
+
+    # Speech fallback. Runs after the try/except so it covers both shapes of the
+    # same thing — an extractor that returned nothing and one that refused the
+    # file outright — and only when the file is actually media, because for
+    # everything else an empty extraction means an empty document.
+    if (
+        file_path
+        and _is_media(file_path)
+        and not content_state.get("skip_extraction")
+        and not processed.content.strip()
+    ):
+        content_state["_stt_attempted"] = True
+        transcript = await _try_stt(file_path, cmd_id)
+        if transcript.strip():
+            processed.content = transcript
+        elif core_error is not None:
+            # The extractor refused the file *and* the speech server could not
+            # read it either. Say so together: reporting only the first would
+            # send the operator to configure a content engine when the missing
+            # piece was speech-to-text.
+            raise ValueError(
+                _media_failure_message(file_path, attempted=True)
+            ) from core_error
+
     return processed
 
 

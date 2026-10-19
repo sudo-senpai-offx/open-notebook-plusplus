@@ -76,9 +76,18 @@ def timeout() -> float:
 #: `__no_model__` and `__unknown__` deliberately map to nothing. The first is
 #: plumbing and needs no model; the second is an unresolved job whose class is
 #: not knowable, and guessing one would make an uncertain job look schedulable.
+#:
+#: `transcription` is deliberately absent even though a media source does need
+#: the STT model. Whether a `process_source` job needs speech-to-text is a fact
+#: about the file, and the file is not opened until the job runs — so charging
+#: every text source 256 MB to cover the minority that turns out to be audio
+#: would hold work that has nothing to do with speech. The transcription client
+#: asks for residency at the point of use instead, which is the same place the
+#: answer becomes knowable.
 MODEL_ROLE: Dict[str, str] = {
     "generation": "chat",
     "embedding": "embed",
+    "synthesis": "tts",
 }
 
 

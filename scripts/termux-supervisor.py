@@ -125,6 +125,36 @@ ROLES: Dict[str, Role] = {
         max_concurrent_jobs=2,
         threads=2,
     ),
+    # Speech-to-text and text-to-speech. Neither is a language model, so both are
+    # their own role rather than a mode of chat: whisper-server transcribes and
+    # cannot generate, piper synthesizes and cannot generate. One process, one
+    # port, one model each - the same reason embed is separate from chat.
+    #
+    # Priority places them below embed because a lecture being transcribed is
+    # longer than a paragraph being embedded, so holding STT back would cost more
+    # wall-clock than holding embedding back would.
+    "stt": Role(
+        name="stt",
+        probe=["sh", f"{BIN}/onb-stt", "probe"],
+        load=["sh", f"{BIN}/onb-stt", "up"],
+        unload=["sh", f"{BIN}/onb-stt", "down"],
+        model_path=["sh", f"{BIN}/onb-stt", "model-path"],
+        port=8090,
+        priority=60,
+        max_concurrent_jobs=1,
+        threads=2,
+    ),
+    "tts": Role(
+        name="tts",
+        probe=["sh", f"{BIN}/onb-tts", "probe"],
+        load=["sh", f"{BIN}/onb-tts", "up"],
+        unload=["sh", f"{BIN}/onb-tts", "down"],
+        model_path=["sh", f"{BIN}/onb-tts", "model-path"],
+        port=8091,
+        priority=70,
+        max_concurrent_jobs=1,
+        threads=2,
+    ),
 }
 
 KV = re.compile(r"(\w+)=(\S+)")

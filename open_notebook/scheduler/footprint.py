@@ -55,6 +55,17 @@ WEIGHT_OVERHEAD = 1.10
 EXPLICIT_FOOTPRINTS: Dict[str, int] = {
     # category keys
     "embedding": 1_200 * 1024 * 1024,
+    # Speech. Stated rather than derived because the *weights* are a small part
+    # of the cost: whisper base.en q5_1 is 57 MB of weights but its decode
+    # scratch on aarch64 runs to a couple of hundred MB, and piper's onnxruntime
+    # arena is larger than the voice. Charging the weights would understate both
+    # by a factor of three.
+    #
+    # Deliberately a floor, not a ceiling. Overstating holds a job that might
+    # have run; understating is an OOM kill of the model server, which takes the
+    # embedding and chat models down with it.
+    "transcription": 256 * 1024 * 1024,
+    "synthesis": 256 * 1024 * 1024,
     "__no_model__": 64 * 1024 * 1024,
     # model names, for callers that know the specific model
     "bge-m3": 1_200 * 1024 * 1024,
@@ -151,6 +162,11 @@ COMMAND_MODEL: Dict[str, str] = {
     "embed_source": "__embedding__",
     "embed_insight": "__embedding__",
     "embed_note": "__embedding__",
+    # Speech. Sized as *known* models rather than derived from disk: both servers
+    # live outside the guest, on the phone's Termux side, so the bytes-on-disk
+    # figure that generation and embedding are sized from is not visible from
+    # here. The category key is the honest description of what is known.
+    "synthesize_speech": "synthesis",
 }
 
 
@@ -184,7 +200,13 @@ def job_footprint(
             return JobFootprint(uncertain=True)
         return JobFootprint(models={key: cost})
 
-    return JobFootprint(models={marker: EXPLICIT_FOOTPRINTS["__no_model__"]})
+    # Any other marker names a model class whose size is stated outright -
+    # `synthesis` today, `__no_model__` for everything that needs none. The
+    # lookup is by marker rather than by a hardcoded 64 MB because the previous
+    # form charged every unlisted command kind the cost of a *placeholder*, so
+    # a class with a real model behind it would have been billed as plumbing.
+    cost = EXPLICIT_FOOTPRINTS.get(marker, EXPLICIT_FOOTPRINTS["__no_model__"])
+    return JobFootprint(models={marker: cost})
 
 
 def merge_footprints(parts: Iterable[JobFootprint]) -> FootprintEstimate:

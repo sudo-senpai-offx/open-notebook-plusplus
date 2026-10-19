@@ -1,0 +1,727 @@
+"""Local speech: the media fallback, the two clients, and the role accounting.
+
+What is worth testing here, and why it is not the same as testing the servers
+----------------------------------------------------------------------------
+The servers are the phone's problem — they are built and run by the operator, and
+a test that shells out to them proves nothing on a machine that does not have
+them. What lives here is everything that decides *whether to call them and what
+to do with the answer*, and that is where the failure modes are:
+
+1. **The media test.** `_is_media` exists because the blob store hands files back
+   as `{sha}.bin`. Every `endswith(".mp3")` gate silently skipped every synced
+   recording, so the file kind has to come from the bytes. One test per
+   container, because a detector that recognises MP3 and nothing else turns a
+   recorded lecture into "this file type is not supported" — a permanent
+   failure the operator retries three times before believing.
+
+2. **The fallback firing.** An audio source whose text extractor returns nothing,
+   and an audio source the extractor *refuses*, must both reach speech-to-text.
+   The second is the one that was easy to get wrong: `UnsupportedTypeException`
+   reads like a fault, and converting it directly to a permanent error throws
+   away the only thing that can read the file.
+
+3. **Honest empties.** A 200 with no text is a failed transcription, not a silent
+   recording, and the two must not share a return value.
+
+4. **The residency refusal.** A hold is `held=True`, not `ok=False`, so the
+   caller can distinguish "the phone is busy" from "the model is broken".
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import pytest
+
+from open_notebook.graphs import source as sg
+from open_notebook.residency import client as residency
+from open_notebook.scheduler import footprint as fp
+from open_notebook.speech import client as speech
+
+# ---------------------------------------------------------------------------
+# Media detection, by content
+# ---------------------------------------------------------------------------
+
+
+def _write(tmp_path: Path, name: str, head: bytes) -> str:
+    path = tmp_path / name
+    path.write_bytes(head + b"\x00" * 64)
+    return str(path)
+
+
+class TestMediaDetection:
+    @pytest.mark.parametrize(
+        "name,head",
+        [
+            ("a.bin", b"ID3\x03\x00\x00\x00"),  # mp3 with ID3
+            ("a.bin", b"\xff\xfb\x90\x64"),  # mp3 frame sync
+            ("a.bin", b"RIFF\x24\x08\x00\x00WAVEfmt "),  # wav
+            ("a.bin", b"OggS\x00\x02\x00\x00"),  # ogg / opus
+            ("a.bin", b"fLaC\x00\x00\x00\x22"),  # flac
+            ("a.bin", b"\x1a\x45\xdf\xa3\x01\x00\x00\x00"),  # mkv / webm
+            ("a.bin", b"\x00\x00\x00\x18ftypM4A "),  # m4a
+            ("a.bin", b"\x00\x00\x00\x20ftypisom"),  # mp4
+        ],
+    )
+    def test_recognises_every_container_we_accept(self, tmp_path: Path, name, head):
+        """All of these are names a blob store has already thrown away.
+
+        The suffix is `.bin` on purpose in every case: a synced recording has no
+        usable extension, which is the whole reason this reads magic bytes.
+        """
+        assert sg._is_media(_write(tmp_path, name, head)) is True
+
+    @pytest.mark.parametrize(
+        "name,head",
+        [
+            ("a.pdf", b"%PDF-1.7\n"),  # a document
+            ("a.txt", b"just some words"),
+            ("a.png", b"\x89PNG\r\n\x1a\n"),
+            ("a.jpg", b"\xff\xd8\xff\xe0"),  # jpeg: 0xFF then 0xD8, not a frame
+            ("empty.bin", b""),
+        ],
+    )
+    def test_rejects_what_is_not_media(self, tmp_path: Path, name, head):
+        assert sg._is_media(_write(tmp_path, name, head)) is False
+
+    def test_a_jpeg_is_not_mistaken_for_an_mp3(self, tmp_path: Path):
+        """The one collision in the 0xFF branch, and a real one.
+
+        Both JPEG and MPEG audio start with 0xFF. The layer bits in an MPEG
+        frame header (bits 2-3) are never `10`, while JPEG's marker byte 0xD8 is
+        exactly that - so a photo would be handed to whisper, which would answer
+        with an empty transcript and a confident-looking error about a file that
+        was never audio.
+        """
+        assert sg._is_media(_write(tmp_path, "photo.bin", b"\xff\xd8\xff\xe0")) is False
+
+    def test_a_missing_file_is_not_media(self, tmp_path: Path):
+        """Reading the bytes is what decides, so an unreadable path is False.
+
+        A suffix short-circuit placed before the read would classify any file
+        that merely cannot be opened as whatever it claims to be.
+        """
+        assert sg._is_media(str(tmp_path / "nope.mp3")) is False
+
+    def test_none_is_not_media(self):
+        assert sg._is_media(None) is False
+
+
+# ---------------------------------------------------------------------------
+# The fallback into the extraction path
+# ---------------------------------------------------------------------------
+
+
+class _FakeExtraction:
+    """Stand-in for content-core's ExtractionOutput.
+
+    Mutable like the real one — `_extract_with_text_engine` assigns to
+    `.content` — and takes the same two keywords the graph constructs it with.
+    """
+
+    def __init__(self, content: str = "", title: str = "") -> None:
+        self.content = content
+        self.title = title
+
+
+class _ContentCoreStub:
+    """The slice of `content_core` that `_extract_with_text_engine` touches."""
+
+    class ContentCoreError(Exception):
+        pass
+
+    class UnsupportedTypeException(ContentCoreError):
+        pass
+
+    class FileOperationError(ContentCoreError):
+        pass
+
+    class NotFoundError(ContentCoreError):
+        pass
+
+    class NetworkError(ContentCoreError):
+        pass
+
+    class InvalidInputError(ContentCoreError):
+        pass
+
+    class ConfigurationError(ContentCoreError):
+        pass
+
+    class ExternalServiceError(ContentCoreError):
+        pass
+
+    class NoTranscriptFound(ContentCoreError):
+        pass
+
+    def __init__(self, content: str = "", error: Optional[Exception] = None) -> None:
+        self.content = content
+        self.error = error
+
+
+def _patch_engine(monkeypatch, stub: _ContentCoreStub) -> List[Optional[Dict]]:
+    """Replace content-core's extractor and the OCR helpers; record calls."""
+    calls: List[Optional[Dict]] = []
+
+    async def fake_extract(**_kwargs):
+        calls.append({"extract": True})
+        if stub.error is not None:
+            raise stub.error
+        return _FakeExtraction(stub.content)
+
+    async def fake_try_ocr(*_a, **_k):
+        calls.append({"ocr": True})
+        return ""
+
+    async def fake_augment(*_a, **_k):  # pragma: no cover - not reached for media
+        raise AssertionError("selective OCR must not run on an audio file")
+
+    monkeypatch.setattr(sg, "extract_content", fake_extract)
+    monkeypatch.setattr(sg, "_try_ocr", fake_try_ocr)
+    monkeypatch.setattr(sg, "_augment_with_ocr", fake_augment)
+    monkeypatch.setattr(sg, "ExtractionOutput", _FakeExtraction)
+    monkeypatch.setattr(sg.cc, "ContentCoreError", _ContentCoreStub.ContentCoreError)
+    for name in (
+        "UnsupportedTypeException",
+        "FileOperationError",
+        "NotFoundError",
+        "NetworkError",
+        "InvalidInputError",
+        "ConfigurationError",
+        "ExternalServiceError",
+        "NoTranscriptFound",
+    ):
+        monkeypatch.setattr(sg.cc, name, getattr(_ContentCoreStub, name))
+    return calls
+
+
+async def _run(
+    monkeypatch,
+    stub: _ContentCoreStub,
+    path: str,
+    transcript: Optional[str] = None,
+    *,
+    transcript_error: Optional[str] = None,
+    stt_held: bool = False,
+):
+    """Drive `_extract_with_text_engine` with a stubbed speech client."""
+    _patch_engine(monkeypatch, stub)
+    asked: List[str] = []
+
+    async def fake_transcribe(p: str, **_kwargs):
+        asked.append(p)
+        if transcript_error is not None:
+            return speech.TranscriptionResult(
+                ok=False, error=transcript_error, held=stt_held
+            )
+        return speech.TranscriptionResult(ok=True, text=transcript or "")
+
+    monkeypatch.setattr(speech, "transcribe", fake_transcribe)
+
+    # `_try_stt` returns text, not a result: the degradation decision lives in
+    # the graph, not in the client. Stubbing it with the client's own return
+    # value would have tested a contract that does not exist - and the first
+    # version of this helper did exactly that, failing with an AttributeError
+    # that read like a bug in the graph.
+    async def fake_try_stt(p: str, _cmd_id: Optional[str] = None) -> str:
+        result = await fake_transcribe(p)
+        return result.text
+
+    monkeypatch.setattr(sg, "_try_stt", fake_try_stt)
+
+    content_state: Dict[str, Any] = {}
+    result = await sg._extract_with_text_engine(None, content_state, None, {}, "", path)
+    return result, content_state, asked
+
+
+class TestSpeechFallback:
+    @pytest.mark.asyncio
+    async def test_audio_with_empty_extraction_is_transcribed(
+        self, monkeypatch, tmp_path
+    ):
+        path = _write(tmp_path, "lecture.bin", b"ID3\x03\x00\x00\x00")
+        result, _state, asked = await _run(
+            monkeypatch, _ContentCoreStub(content=""), path, transcript="good morning"
+        )
+        assert asked == [path]
+        assert result.content == "good morning"
+
+    @pytest.mark.asyncio
+    async def test_a_refused_media_file_still_reaches_speech(
+        self, monkeypatch, tmp_path
+    ):
+        """The case that reads like a fault and is not one.
+
+        A text extractor declining an m4a is its expected answer. Converting
+        `UnsupportedTypeException` straight into a permanent "this file type is
+        not supported" would discard a lecture that whisper reads in a minute.
+        """
+        path = _write(tmp_path, "lecture.bin", b"\x00\x00\x00\x20ftypisom")
+        stub = _ContentCoreStub(error=_ContentCoreStub.UnsupportedTypeException("no"))
+        result, _state, asked = await _run(
+            monkeypatch, stub, path, transcript="spoken words"
+        )
+        assert asked == [path]
+        assert result.content == "spoken words"
+
+    @pytest.mark.asyncio
+    async def test_a_text_file_is_never_handed_to_speech(self, monkeypatch, tmp_path):
+        """A PDF that extracted nothing is an empty document, not a broken one.
+
+        Whisper on a PDF returns an empty transcript, so the operator would get
+        a speech error naming a remedy that cannot help - the exact failure
+        `_empty_file_message` was written to stop.
+        """
+        path = _write(tmp_path, "paper.pdf", b"%PDF-1.7\n")
+        result, _state, asked = await _run(
+            monkeypatch, _ContentCoreStub(content=""), path, transcript="should not run"
+        )
+        assert asked == []
+        assert result.content == ""
+
+    @pytest.mark.asyncio
+    async def test_a_refused_text_file_still_raises_its_own_error(
+        self, monkeypatch, tmp_path
+    ):
+        path = _write(tmp_path, "paper.pdf", b"%PDF-1.7\n")
+        stub = _ContentCoreStub(error=_ContentCoreStub.UnsupportedTypeException("no"))
+        with pytest.raises(ValueError, match="not supported"):
+            await _run(monkeypatch, stub, path, transcript="should not run")
+
+    @pytest.mark.asyncio
+    async def test_text_the_extractor_did_get_is_kept(self, monkeypatch, tmp_path):
+        """An audio file with an embedded description is not overwritten.
+
+        content-core can return real text for a media file that carries
+        metadata or chapters. Replacing it with the transcript would discard
+        content the extractor already had.
+        """
+        path = _write(tmp_path, "clip.bin", b"ID3\x03\x00\x00\x00")
+        result, _state, asked = await _run(
+            monkeypatch,
+            _ContentCoreStub(content="Chapter 1: introduction"),
+            path,
+            transcript="spoken words",
+        )
+        assert asked == []
+        assert result.content == "Chapter 1: introduction"
+
+    @pytest.mark.asyncio
+    async def test_a_joint_failure_names_speech_not_the_content_engine(
+        self, monkeypatch, tmp_path
+    ):
+        """Both halves failing must produce one message about both.
+
+        Reporting only the extractor's error sends the operator to configure a
+        content engine; the missing piece was speech-to-text all along.
+        """
+        path = _write(tmp_path, "lecture.bin", b"ID3\x03\x00\x00\x00")
+        stub = _ContentCoreStub(error=_ContentCoreStub.UnsupportedTypeException("no"))
+        monkeypatch.setattr(sg, "_speech_reachable", lambda: (True, "ready"))
+        _patch_engine(monkeypatch, stub)
+
+        async def fake_transcribe(_p, **_k):
+            return speech.TranscriptionResult(ok=False, error="no speech")
+
+        async def fake_try_stt(_p: str, _cmd_id: Optional[str] = None) -> str:
+            return (await fake_transcribe(_p)).text
+
+        monkeypatch.setattr(speech, "transcribe", fake_transcribe)
+        monkeypatch.setattr(sg, "_try_stt", fake_try_stt)
+
+        with pytest.raises(ValueError) as excinfo:
+            await sg._extract_with_text_engine(None, {}, None, {}, "", path)
+        message = str(excinfo.value)
+        assert "speech" in message.lower()
+        assert "content engine" not in message.lower()
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_server_says_so(self, monkeypatch, tmp_path):
+        """Unavailability outranks attempt, exactly as `_empty_file_message` does.
+
+        "The speech server could not be reached" is actionable; "the model
+        produced no transcript" blames a file that may be perfectly fine.
+        """
+        path = _write(tmp_path, "lecture.bin", b"ID3\x03\x00\x00\x00")
+        stub = _ContentCoreStub(error=_ContentCoreStub.UnsupportedTypeException("no"))
+        monkeypatch.setattr(
+            sg, "_speech_reachable", lambda: (False, "connection refused")
+        )
+        _patch_engine(monkeypatch, stub)
+
+        async def fake_transcribe(_p, **_k):
+            return speech.TranscriptionResult(ok=False, error="refused")
+
+        async def fake_try_stt(_p: str, _cmd_id: Optional[str] = None) -> str:
+            return (await fake_transcribe(_p)).text
+
+        monkeypatch.setattr(speech, "transcribe", fake_transcribe)
+        monkeypatch.setattr(sg, "_try_stt", fake_try_stt)
+
+        with pytest.raises(ValueError) as excinfo:
+            await sg._extract_with_text_engine(None, {}, None, {}, "", path)
+        assert "connection refused" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# The clients
+# ---------------------------------------------------------------------------
+
+
+class TestTranscriptionClient:
+    @pytest.mark.asyncio
+    async def test_a_missing_file_is_an_error_not_an_empty_transcript(
+        self, monkeypatch, tmp_path
+    ):
+        result = await speech.transcribe(tmp_path / "absent.wav")
+        assert result.ok is False
+        assert result.held is False
+
+    @pytest.mark.asyncio
+    async def test_a_200_with_no_text_is_a_failure(self, monkeypatch, tmp_path):
+        """Silence and brokenness are different facts and share no return value.
+
+        Returning `ok=True, text=""` would make a silent recording look like a
+        successful transcription, and the source would then be embedded and
+        indexed as an empty document.
+        """
+        path = _write(tmp_path, "silence.wav", b"RIFF\x00\x00\x00\x00WAVE")
+
+        class _Client:
+            def __init__(self, **_k): ...
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_a):
+                return False
+
+            async def post(self, *_a, **_k):
+                class _R:
+                    status_code = 200
+
+                    @staticmethod
+                    def json():
+                        return {"text": "   "}
+
+                return _R()
+
+        monkeypatch.setattr(speech, "transcribe", speech.transcribe)
+        monkeypatch.setitem(
+            __import__("sys").modules,
+            "httpx",
+            type("m", (), {"AsyncClient": _Client}),
+        )
+        result = await speech.transcribe(path, ensure_resident=False)
+        assert result.ok is False
+        assert "empty transcript" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_a_residency_refusal_is_a_hold(self, monkeypatch, tmp_path):
+        """`held` is what tells the caller to retry rather than to give up.
+
+        Without it a busy phone looks identical to a missing whisper build, and
+        the operator retries a working feature against a device that was simply
+        committed elsewhere.
+        """
+        path = _write(tmp_path, "a.wav", b"RIFF\x00\x00\x00\x00WAVE")
+
+        async def refused(role: str):
+            return residency.ResidencyResult(
+                ok=False, role=role, error="supervisor refused the load"
+            )
+
+        monkeypatch.setattr(residency, "enabled", lambda: True)
+        monkeypatch.setattr(residency, "ensure_resident", refused)
+
+        result = await speech.transcribe(path)
+        assert result.ok is False
+        assert result.held is True
+        assert "residency:stt" in (result.error or "")
+
+
+class TestSynthesisClient:
+    @pytest.mark.asyncio
+    async def test_empty_text_is_refused_before_any_request(
+        self, monkeypatch, tmp_path
+    ):
+        called = []
+
+        class _Client:
+            def __init__(self, **_k): ...
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_a):
+                return False
+
+            async def post(self, *_a, **_k):
+                called.append(True)
+                raise AssertionError("must not call the server with no text")
+
+        monkeypatch.setitem(
+            __import__("sys").modules,
+            "httpx",
+            type("m", (), {"AsyncClient": _Client}),
+        )
+        result = await speech.synthesize(
+            "   ", tmp_path / "out.wav", ensure_resident=False
+        )
+        assert result.ok is False
+        assert not called
+
+    @pytest.mark.asyncio
+    async def test_audio_is_renamed_into_place_only_after_the_full_body(
+        self, monkeypatch, tmp_path
+    ):
+        """A partial write must not leave a truncated file where an episode points.
+
+        piper streams its response, so a connection cut mid-render produces real
+        bytes and a real exception. The destination path is only claimed once
+        the whole body has arrived.
+        """
+        destination = tmp_path / "speech" / "clip.wav"
+
+        class _Client:
+            def __init__(self, **_k): ...
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_a):
+                return False
+
+            async def post(self, *_a, **_k):
+                class _R:
+                    status_code = 200
+                    content = b"RIFF" + b"\x00" * 128
+
+                return _R()
+
+        monkeypatch.setitem(
+            __import__("sys").modules,
+            "httpx",
+            type("m", (), {"AsyncClient": _Client}),
+        )
+        result = await speech.synthesize("hello", destination, ensure_resident=False)
+        assert result.ok is True
+        assert result.path == destination
+        assert result.bytes_written == 132
+        # No .part left behind, and the file that exists is the real one.
+        assert not destination.with_name("clip.wav.part").exists()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_render_leaves_no_file_at_all(self, monkeypatch, tmp_path):
+        destination = tmp_path / "speech" / "clip.wav"
+
+        class _Client:
+            def __init__(self, **_k): ...
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_a):
+                return False
+
+            async def post(self, *_a, **_k):
+                class _R:
+                    status_code = 500
+                    text = "voice not found"
+
+                return _R()
+
+        monkeypatch.setitem(
+            __import__("sys").modules,
+            "httpx",
+            type("m", (), {"AsyncClient": _Client}),
+        )
+        result = await speech.synthesize("hello", destination, ensure_resident=False)
+        assert result.ok is False
+        assert "500" in (result.error or "")
+        assert not destination.exists()
+        assert not destination.with_name("clip.wav.part").exists()
+
+
+# ---------------------------------------------------------------------------
+# Role and footprint accounting
+# ---------------------------------------------------------------------------
+
+
+class TestSpeechRoleAccounting:
+    def test_synthesis_resolves_to_the_tts_role(self):
+        assert residency.role_for_model("synthesis") == "tts"
+
+    def test_transcription_is_demanded_at_the_point_of_use(self):
+        """`process_source` is deliberately *not* mapped to speech.
+
+        Whether a source needs the STT model is a fact about the file, and the
+        gate cannot open the file. Mapping it would charge every PDF 256 MB for a
+        model it will never load, holding work that has nothing to do with speech.
+        The client asks at the moment the answer is knowable instead.
+        """
+        assert "transcription" not in residency.MODEL_ROLE
+        assert fp.job_footprint("process_source").models == {
+            "__no_model__": 64 * 1024 * 1024
+        }
+
+    def test_speech_footprints_are_stated_not_derived(self):
+        """Both cost more than their weights, and saying so beats guessing.
+
+        whisper base.en is 57 MB of weights with a couple of hundred MB of
+        decode scratch behind it; charging the weights would understate by 3x,
+        and understating is an OOM kill of the model server.
+
+        Asserted against the *keys* rather than against commands. `synthesis` is
+        demanded by `synthesize_speech`, but `transcription` is deliberately
+        demanded by no command - see the test above - so a command-level
+        assertion would describe a design that was chosen against.
+        """
+        for key in ("transcription", "synthesis"):
+            assert fp.EXPLICIT_FOOTPRINTS[key] >= 256 * 1024 * 1024, key
+
+    def test_speech_footprints_exceed_the_runtime_overhead_derivation(self):
+        """Stated, not `WEIGHT_OVERHEAD * bytes` — the weights are the small part."""
+        for key in ("transcription", "synthesis"):
+            weights_only = int(fp.EXPLICIT_FOOTPRINTS[key] / fp.WEIGHT_OVERHEAD)
+            assert fp.EXPLICIT_FOOTPRINTS[key] > weights_only
+
+    def test_a_speech_job_is_not_charged_the_placeholder(self):
+        """The bug this closes: every unlisted kind cost 64 MB, plumbing's price.
+
+        A command kind with a real model behind it was being billed as if it
+        needed none, which understates rather than holds - the expensive
+        direction.
+        """
+        speech_cost = fp.job_footprint("synthesize_speech").total
+        plumbing_cost = fp.job_footprint("process_source").total
+        assert speech_cost > plumbing_cost * 2
+
+
+def _load_supervisor():
+    """Import the Termux supervisor from scripts/.
+
+    Registered in `sys.modules` before exec because `@dataclass` resolves its own
+    module through that mapping - without it the import dies on a Role dataclass
+    with an error that says nothing about the cause.
+    """
+    import importlib.util
+    import sys
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "termux-supervisor.py"
+    spec = importlib.util.spec_from_file_location("termux_supervisor_speech", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestSupervisorSpeechRoles:
+    def _sup(self):
+        return _load_supervisor()
+
+    def test_both_speech_roles_are_registered(self):
+        sup = self._sup()
+        assert "stt" in sup.ROLES
+        assert "tts" in sup.ROLES
+
+    def test_every_role_still_has_its_own_port(self):
+        """Four servers, four ports. A collision would have the reaper unload
+        the model another role is serving."""
+        sup = self._sup()
+        ports = [role.port for role in sup.ROLES.values()]
+        assert len(set(ports)) == len(ports)
+        assert set(ports) == {8080, 8081, 8090, 8091}
+
+    def test_speech_ranks_below_the_text_classes(self):
+        """A lecture is longer than a paragraph, so holding it back costs more."""
+        sup = self._sup()
+        assert sup.ROLES["chat"].priority < sup.ROLES["embed"].priority
+        assert sup.ROLES["embed"].priority < sup.ROLES["stt"].priority
+        assert sup.ROLES["stt"].priority < sup.ROLES["tts"].priority
+
+    def test_the_supervisor_only_calls_verbs_that_exist(self):
+        for role in self._sup().ROLES.values():
+            for verb in (role.probe, role.load, role.unload, role.model_path):
+                assert verb[0] == "sh"
+                assert verb[-1] in (
+                    "chat-status",
+                    "chat-up",
+                    "chat-down",
+                    "model-path",
+                    "probe",
+                    "up",
+                    "down",
+                )
+
+
+class TestShellContract:
+    """The verbs are a contract between a Python file and two shell files."""
+
+    @staticmethod
+    def _script(name: str) -> str:
+        return (Path(__file__).resolve().parents[1] / "scripts" / name).read_text(
+            encoding="utf-8"
+        )
+
+    def _code(self, text: str) -> str:
+        lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith("echo "):
+                continue
+            lines.append(line)
+        return "\n".join(lines)
+
+    @pytest.mark.parametrize("script", ["termux-stt.sh", "termux-tts.sh"])
+    def test_both_expose_the_four_residency_verbs(self, script):
+        code = self._code(self._script(script))
+        for verb in ("up)", "down)", "probe)", "model-path)"):
+            assert verb in code, f"{script} lost {verb}"
+
+    @pytest.mark.parametrize("script", ["termux-stt.sh", "termux-tts.sh"])
+    def test_both_bind_their_own_port(self, script):
+        """Four servers, four ports. A collision would let one role's reaper
+        unload the model another role is serving, and the symptom would be a
+        model that reports itself unloaded with nothing in the logs."""
+        code = self._code(self._script(script))
+        expected = "STT_PORT:-8090" if "stt" in script else "TTS_PORT:-8091"
+        assert expected in code
+        # And the pid matcher must distinguish it from the other three, which
+        # is the same executable pattern on some of these ports.
+        assert ("--port\\ 8090" in code) or ("8091" in code)
+
+    @pytest.mark.parametrize("script", ["termux-stt.sh", "termux-tts.sh"])
+    def test_both_read_their_threads_from_the_shared_library(self, script):
+        """A hardcoded thread count is how chat and embed came to disagree.
+
+        Every consumer of the CPU budget sources `onb-cpu`; a launcher that
+        hardcodes its own would drift from the supervisor's accounting and
+        saturate the device while the gate believed it had headroom.
+        """
+        code = self._code(self._script(script))
+        assert "onb-cpu" in code
+        assert "cpu_threads" in code
+
+    def test_both_scripts_are_installed_as_wrappers(self):
+        """A script that exists only in the repo is a script the phone cannot run."""
+        code = self._code(self._script("install-bin.sh"))
+        assert "install_one termux-stt.sh     onb-stt" in code
+        assert "install_one termux-tts.sh     onb-tts" in code
+
+    def test_the_cpu_library_answers_for_both_new_roles(self):
+        """A missing case would fall through to one thread, silently.
+
+        `cpu_threads`'s default arm is one thread, which is safe but means a
+        transcription runs at a fifth of the device while the panel reports a
+        budget it never used.
+        """
+        code = self._code(self._script("termux-cpu.sh"))
+        assert "stt | tts)" in code
+
+    def test_the_summary_reports_both_new_roles(self):
+        code = self._code(self._script("termux-cpu.sh"))
+        assert "$(cpu_threads stt)" in code
+        assert "$(cpu_threads tts)" in code

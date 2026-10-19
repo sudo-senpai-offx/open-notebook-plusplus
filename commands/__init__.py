@@ -32,6 +32,7 @@ from .maintenance_commands import prune_event_logs_command
 from .podcast_commands import generate_podcast_command
 from .site_commands import crawl_site_command
 from .source_commands import process_source_command
+from .speech_commands import synthesize_speech_command
 from .training_commands import train_tiny_command
 from .vault_commands import ingest_vault_command
 
@@ -48,4 +49,6 @@ __all__ = [
     "crawl_site_command",
     "train_tiny_command",
     "ingest_vault_command",
+    # Local speech
+    "synthesize_speech_command",
 ]
