@@ -433,16 +433,26 @@ async def dispatch_once(
 
     in_flight = len(live_rows)
 
-    # Per-class policy and ordering, both from the supervisor. Both are absent
-    # when residency control is off or the supervisor cannot be reached, and
-    # absent means "behave exactly as before" rather than "fall back to a local
-    # copy of the numbers" - a stale copy would hold work for limits that no
-    # longer exist, with no way to tell why.
+    # Per-class policy, from the supervisor. Absent when residency control is
+    # off or the supervisor cannot be reached, and absent means "enforce no
+    # per-class limits" rather than "fall back to a local copy of the numbers" -
+    # a stale copy would hold work for limits that no longer exist, with no way
+    # to tell why.
     policy = await residency.policies()
     counts = _role_counts(live_rows, generation_bytes) if policy else {}
     outcome.role_counts = dict(counts)
-    if policy:
-        held_rows = _order_held(held_rows, policy, generation_bytes)
+
+    # Ordering is applied unconditionally. `_order_held` sorts model work by
+    # class priority only when there is a policy to sort by, and puts no-model
+    # work first either way — that tier reads the command name off the row and
+    # needs no supervisor.
+    #
+    # This call used to sit behind `if policy:`, which made the ungating inside
+    # `_order_held` unreachable on the PC: the function was never called at all.
+    # A unit test that called `_order_held` directly passed against a change
+    # production could not execute, which is why the first attempt at this fix
+    # shipped green and changed nothing.
+    held_rows = _order_held(held_rows, policy, generation_bytes)
 
     # Shared CPU budget, fetched once like the policy. None means unknown - no
     # supervisor or an unreadable topology - and then nothing is enforced.

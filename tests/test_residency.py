@@ -273,6 +273,74 @@ class TestOrdering:
         assert names[:3] == ["create_insight"] * 3
         assert set(names[3:]) == {"run_transformation"}
 
+
+class TestOrderingIsActuallyApplied:
+    """The call site, not the function.
+
+    The first attempt at ungating the no-model tier changed `_order_held` and
+    left the caller behind `if policy:`. Every unit test passed, because they
+    call the function directly — and production never called it, so a 45-job
+    regeneration behaved exactly as before. These tests drive `dispatch_once`,
+    which is the only place the ordering can actually take effect.
+    """
+
+    @staticmethod
+    def _repo(monkeypatch, held):
+        """A repository whose held queue is `held` and whose live queue is empty."""
+        from open_notebook.database import repository
+
+        promoted: List[str] = []
+
+        async def repo_query(sql, params=None):
+            text = str(sql)
+            if "status = 'held'" in text and "ORDER BY" in text:
+                return list(held)
+            if "status IN" in text and "SELECT name" in text:
+                return []
+            if "UPDATE" in text:
+                if (params or {}).get("status"):
+                    promoted.append(str((params or {}).get("id")))
+                return []
+            return []
+
+        monkeypatch.setattr(repository, "repo_query", repo_query)
+        monkeypatch.setattr(repository, "ensure_record_id", lambda v: v)
+        return promoted
+
+    @pytest.mark.asyncio
+    async def test_a_pass_with_residency_off_still_orders(self, monkeypatch):
+        """The regression, end to end.
+
+        Residency off is the PC's default and the phone's before the guest
+        enables it, so this is the configuration in which the ordering was
+        silently absent.
+        """
+        from open_notebook.scheduler import dispatcher as disp
+
+        held = [_job("run_transformation", i) for i in range(1, 6)]
+        held += [_job("create_insight", i) for i in range(6, 9)]
+        promoted = self._repo(monkeypatch, held)
+
+        async def no_policy():
+            return None
+
+        monkeypatch.setattr(disp.residency, "policies", no_policy)
+        monkeypatch.setattr(disp.residency, "enabled", lambda: False)
+
+        outcome = await disp.dispatch_once(
+            generation_bytes=GENERATION_BYTES,
+            memory=_memory(total=15 * GIB, available=8 * GIB),
+            window=3,
+        )
+
+        assert outcome.promoted_count == 3, "the window should have been filled"
+        promoted_names = [str(row["id"]) for row in held if str(row["id"]) in promoted]
+        assert len(promoted_names) == 3
+        chosen = [row["name"] for row in held if str(row["id"]) in promoted]
+        assert chosen == ["create_insight"] * 3, (
+            f"with residency off, the no-model tier must still lead; promoted {chosen}"
+        )
+
     def test_oldest_first_within_a_class(self):
         held = [
             _job("run_transformation", 3),
