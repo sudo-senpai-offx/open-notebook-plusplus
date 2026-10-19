@@ -29,6 +29,7 @@ to do with the answer*, and that is where the failure modes are:
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -1175,6 +1176,199 @@ class TestTtsLauncherLibraryPath:
         # Derived from the binary's own location, not hardcoded, so a relocated
         # prefix keeps working.
         assert 'PIPER_LIB_DIR=$(dirname "$PIPER_BIN")' in text
+
+
+class TestSttModelSelection:
+    """The STT model is chosen from free RAM, because it cannot be a constant.
+
+    The installed default was `ggml-base.en-q5_1.bin` — English-only. It cannot
+    transcribe the zh/ja/ta/my material this app exists to handle, so it was
+    wrong for the product, not just outdated.
+
+    The multilingual tiers differ by 15x, and the difference decides whether the
+    device survives:
+
+        ggml-small-q5_1.bin             190 MB
+        ggml-large-v3-turbo-q5_0.bin    574 MB
+        ggml-large-v3.bin              2952 MB   exceeds a 3 GB phone outright
+
+    So "large" here means turbo-q5_0. Full large-v3 is a claim the 3 GB floor
+    cannot honour, and hardcoding it would OOM the weakest supported device.
+    """
+
+    def test_the_english_only_default_is_gone(self):
+        """`.en` models cannot do this job; they must not be the fallback for it."""
+        text = _read_script("termux-stt.sh")
+        assert 'MODEL="${STT_MODEL:-}"' in text, (
+            "the model must not be a hardcoded default"
+        )
+        # Order is asserted *inside the tier list*, not across the whole file: the
+        # comment above it names base.en when explaining why it is English-only,
+        # so a whole-file index would compare prose against code.
+        tiers = text[text.index("pick_model()") :]
+        large_at = tiers.index("ggml-large-v3-turbo-q5_0.bin")
+        small_at = tiers.index("ggml-small-q5_1.bin")
+        base_en_at = tiers.index("ggml-base.en-q5_1.bin")
+        assert large_at < small_at < base_en_at, "tiers must be ordered largest first"
+
+    def test_it_reads_memavailable_not_memfree(self):
+        """MemFree ignores reclaimable page cache, which on Android is most of it.
+
+        A device with plenty of room reports a small MemFree, so a MemFree-based
+        gate downgrades the model on a healthy phone and refuses it on a busy
+        one — the opposite of the intent, and invisible in the output.
+        """
+        text = _read_script("termux-stt.sh")
+        assert "^MemAvailable:" in text
+        # As *code*, not as prose: the comment above the function explains why
+        # MemFree is wrong, and would otherwise trip this assertion.
+        code = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        )
+        assert "MemFree" not in code
+
+    def test_it_reserves_headroom_for_the_app(self):
+        """The budget is what must remain *after* whisper maps the model.
+
+        Without a reserve the gate would happily hand a 574 MB model to a
+        process that then has no room for the app, piper, or the OS — which is
+        the OOM the gate exists to prevent.
+        """
+        text = _read_script("termux-stt.sh")
+        assert 'STT_RESERVE_MB="${STT_RESERVE_MB:-600}"' in text
+        assert "- STT_RESERVE_MB" in text
+
+    def test_a_roomy_device_gets_the_large_model_and_a_tight_one_falls_back(self):
+        """The behaviour itself, exercised by running the selection logic.
+
+        The tier table and the budget arithmetic are shell, so they are run as
+        shell with a faked /proc/meminfo, rather than asserted on as text. Text
+        assertions cannot tell whether the comparison is `<=` or `>=`.
+        """
+        script = _read_script("termux-stt.sh")
+        # Everything from the top up to the port config: the model-selection
+        # block and its functions, without the exit-1 guard or the rest of the
+        # launcher. Splitting on the guard lets the choice be read instead of
+        # exiting.
+        body = script.split("PORT=", 1)[0]
+        body = body.split('if [ -z "$MODEL" ]; then', 1)[0]
+        # Point the real reader at a fixture. Redefining `mem_available_mb`
+        # instead would be silently ineffective: this body contains the real
+        # definition, and a later definition wins.
+        body = body.replace("/proc/meminfo", '"$FAKE_MEMINFO"')
+        body += "\npick_model\n"
+        body += 'printf \'%s|%s\\n\' "$(basename "$MODEL")" "$STT_TIER_CHOSEN"\n'
+
+        def choose(available_kb: str) -> str:
+            meminfo = (
+                f"MemTotal:        8000000 kB\nMemAvailable:    {available_kb} kB\n"
+            )
+            harness = "HOME=$FAKE_HOME\n" + body
+            return _run_sh(
+                harness,
+                env={
+                    "FAKE_MEMINFO": _stt_fixture_file(meminfo),
+                    "FAKE_HOME": _fake_home(),
+                },
+            )
+
+        # Thresholds are chosen to land between tiers, so each case exercises a
+        # different branch rather than the same one three times. Budget is
+        # MemAvailable/1024 minus the 600 MB reserve:
+        #   6000000 kB -> 5859 MB, budget 5259 -> large (547) fits
+        #   1000000 kB ->  976 MB, budget  376 -> large no, small (181) fits
+        #    700000 kB ->  683 MB, budget   83 -> small no, base_en (56) fits
+        assert "ggml-large-v3-turbo-q5_0.bin|large" in choose("6000000")
+        assert "ggml-small-q5_1.bin|small" in choose("1000000")
+        assert "ggml-base.en-q5_1.bin|base_en" in choose("700000")
+
+    def test_the_fetcher_verifies_byte_counts_rather_than_existence(self):
+        """The lesson from the truncated piper voice, pinned.
+
+        curl reported `100 60.27M` three times while writing 14, 44 and 48 MB.
+        `[ -s file ]` could not tell a truncated file from a complete one, so it
+        was skipped on the next run and piper blamed the *config*. And `curl -C -`
+        made it worse: resuming appended to an already-wrong prefix until the
+        file was larger than the real thing.
+        """
+        text = _read_script("termux-fetch-models.sh")
+        assert "fetch_exact" in text
+        # Real sizes from the Hugging Face tree API, not "~63 MB".
+        assert "574041195" in text  # large-v3-turbo-q5_0
+        assert "190085487" in text  # small-q5_1
+        # Side file, promoted only on an exact match; never a resume base.
+        assert 'mv "$_d.part" "$_d"' in text
+        assert "-C -" not in text
+        # Completeness is re-read from the files, not a variable set in a
+        # subshell: `echo | while` loses `_rc`, so the script would report
+        # success with wrong-sized files still on disk.
+        assert "check_models" in text
+        assert "check_voices" in text
+
+    def test_it_ships_the_voices_that_exist_and_says_which_do_not(self):
+        """piper has no Taiwanese, Tamil or Malay voice in any of its 177.
+
+        Its locale list contains `hi` and `te` but not `ta`, `ms` or `yue`. So
+        multilingual TTS is an engine limitation, not a missing download, and the
+        suite must report those three as untestable rather than implying coverage.
+        """
+        text = _read_script("termux-fetch-models.sh")
+        for voice in (
+            "en_US-amy-medium",
+            "zh_CN-huayan-medium",
+            "ja_JP-hi_fi_captain-medium",
+        ):
+            assert voice in text, f"{voice} should be fetched"
+        # Named as a limitation, in the script's own words, so the next reader
+        # does not assume it was an oversight.
+        assert "Taiwanese, Tamil or Malay" in text
+
+
+def _stt_fixture_file(content: str) -> str:
+    """Write `content` to a temp file and return its path."""
+    import tempfile
+
+    fd, path = tempfile.mkstemp(prefix="onb-test-")
+    with os.fdopen(fd, "w") as handle:
+        handle.write(content)
+    return path
+
+
+def _fake_home() -> str:
+    """A throwaway $HOME containing the three STT model files, at real sizes."""
+    import tempfile
+
+    home = tempfile.mkdtemp(prefix="onb-home-")
+    sizes = {
+        "ggml-large-v3-turbo-q5_0.bin": 574041195,
+        "ggml-small-q5_1.bin": 190085487,
+        "ggml-base.en-q5_1.bin": 59707625,
+    }
+    gguf = os.path.join(home, "gguf")
+    os.makedirs(gguf, exist_ok=True)
+    for name, size in sizes.items():
+        # Sparse: the tests never read these, they only stat them.
+        with open(os.path.join(gguf, name), "wb") as handle:
+            handle.truncate(size)
+    return home
+
+
+def _run_sh(script: str, env: Dict[str, str]) -> str:
+    """Run a POSIX sh snippet with env applied, return stdout."""
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
+        handle.write(script)
+        path = handle.name
+    try:
+        full_env = {**os.environ, **env}
+        done = subprocess.run(
+            ["/bin/sh", path], capture_output=True, text=True, env=full_env, timeout=60
+        )
+        return done.stdout
+    finally:
+        os.unlink(path)
 
 
 class TestProcScanningIsRaceSafe:

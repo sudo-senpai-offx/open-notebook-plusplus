@@ -33,7 +33,86 @@
 #
 set -u
 
-MODEL="${STT_MODEL:-$HOME/gguf/ggml-base.en-q5_1.bin}"
+# Model choice is a function of free RAM, not a constant.
+#
+# The installed default was ggml-base.en-q5_1.bin, which is English-only - it
+# cannot transcribe the zh/ja/ta/my material this app is meant to handle. The
+# multilingual tiers differ by 10x in size, and the difference decides whether
+# the device survives:
+#
+#   ggml-small-q5_1.bin             190 MB   conservative tier
+#   ggml-large-v3-turbo-q5_0.bin    574 MB   the "large" tier that fits 3 GB
+#   ggml-large-v3.bin              2952 MB   exceeds a 3 GB device on its own
+#
+# The floor is 3 GB RAM with an octa-core A53 (Snapdragon 439), so a hardcoded
+# "large" is a claim the weakest supported device cannot honour. Instead the
+# largest tier that fits the current budget wins, and the budget leaves headroom
+# for the app itself - this is the same reasoning as the residency gate that
+# refuses a model when there is no room, applied before the model is even loaded.
+#
+# STT_MODEL overrides everything, so a specific model can still be forced.
+MODEL="${STT_MODEL:-}"
+
+# Headroom kept for the app, the scheduler, piper and the OS. Not a model cost:
+# it is what must remain available once whisper-server has the model mapped.
+STT_RESERVE_MB="${STT_RESERVE_MB:-600}"
+
+# Set by pick_model; empty when STT_MODEL overrides the choice.
+STT_TIER_CHOSEN=""
+STT_BUDGET_MB=""
+
+mem_available_mb() {
+  # MemAvailable, not MemFree: MemFree ignores reclaimable page cache, which on
+  # Android is most of the file cache, and would report a phone with plenty of
+  # room as being full.
+  #
+  # Echoed unconditionally, and divided down to MB. Two bugs in one line, both
+  # caught by the test that runs this with a fake /proc/meminfo rather than by any
+  # assertion on the text:
+  #
+  #   `[ -n "$_kb" ] || echo 0`  prints only on failure, so on success this
+  #     returned empty, the budget became `0 - 600`, and every tier was rejected.
+  #     No model would ever have been selected on the phone.
+  #   echoing `_kb` raw        kB compared against MB, so the budget was ~1024x
+  #     too large and the largest tier always won regardless of memory.
+  #
+  _kb=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)
+  echo $(( ${_kb:-0} / 1024 ))
+}
+
+pick_model() {
+  _budget=$(($(mem_available_mb) - STT_RESERVE_MB))
+  _picked=""; _picked_mb=0; _picked_name=""
+  # name:path, largest first. The `-gt` guard makes the order load-bearing rather
+  # than incidental, so reordering this list cannot silently downgrade the choice.
+  for tier in \
+      "large:$HOME/gguf/ggml-large-v3-turbo-q5_0.bin" \
+      "small:$HOME/gguf/ggml-small-q5_1.bin" \
+      "base_en:$HOME/gguf/ggml-base.en-q5_1.bin"; do
+    _name=${tier%%:*}
+    _path=${tier#*:}
+    [ -f "$_path" ] || continue
+    _mb=$(( $(wc -c < "$_path" | tr -d ' ') / 1024 / 1024 ))
+    [ "$_mb" -le "$_budget" ] || continue
+    [ "$_mb" -gt "$_picked_mb" ] || continue
+    _picked="$_path"; _picked_mb=$_mb; _picked_name=$_name
+  done
+  MODEL="$_picked"
+  STT_TIER_CHOSEN="$_picked_name"
+  STT_BUDGET_MB="$_budget"
+}
+
+if [ -z "$MODEL" ]; then
+  pick_model
+  if [ -z "$MODEL" ]; then
+    echo "[stt] FATAL: no STT model fits. Available $(mem_available_mb) MB," \
+      "budget $(( $(mem_available_mb) - STT_RESERVE_MB )) MB after a ${STT_RESERVE_MB}MB reserve."
+    echo "        Fetch models with:  sh ~/bin/onb-fetch-models"
+    echo "        Or lower the reserve:  STT_RESERVE_MB=300 sh ~/bin/onb-stt up"
+    exit 1
+  fi
+fi
+
 PORT="${STT_PORT:-8090}"
 WHISPER="$HOME/whisper.cpp/build/bin/whisper-server"
 LOG="$HOME/whisper-server.log"
@@ -111,6 +190,15 @@ served_model() {
 
 # Machine-readable residency answer, matching probe_chat/probe_embed shape.
 probe_stt() {
+  # The tier and the budget are reported, not implied. The model is chosen from
+  # free RAM at start, so "which model" and "why that one" are the first two
+  # questions when a transcript comes back wrong on a device that previously
+  # worked - and neither is answerable from the process alone once it is running.
+  if [ -n "$MODEL" ] && [ -f "$MODEL" ]; then
+    printf '[stt] model=%s tier=%s budget_mb=%s available_mb=%s reserve_mb=%s\n' \
+      "$(basename "$MODEL")" "${STT_TIER_CHOSEN:-override}" \
+      "${STT_BUDGET_MB:--}" "$(mem_available_mb)" "$STT_RESERVE_MB"
+  fi
   if _pid=$(pid_of) && [ -n "$_pid" ]; then
     if curl -sf -m 2 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
       printf 'role=stt resident=1 pid=%s model=%s rss_kb=%s\n' \
