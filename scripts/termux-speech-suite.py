@@ -297,6 +297,8 @@ def run_stt(manifest: dict, fixtures: Path, max_cer: float) -> tuple[bool, dict]
     # the multilingual tier is usable on this device at all.
     by_lang: dict[str, list[tuple[str, float | None, str, float]]] = {}
     failures: list[str] = []
+    total = len(manifest["clips"])
+    done = 0
 
     for clip in manifest["clips"]:
         lang = manifest["locales"][clip["locale"]]["lang"]
@@ -309,6 +311,27 @@ def run_stt(manifest: dict, fixtures: Path, max_cer: float) -> tuple[bool, dict]
         elapsed = time.monotonic() - started
         score = cer(clip["reference"], text, lang) if status == 200 else None
         by_lang.setdefault(lang, []).append((clip["file"], score, text, elapsed))
+        done += 1
+
+        # Per clip, as it lands, flushed.
+        #
+        # This loop is the longest phase in the suite — 150 seconds of audio
+        # through a multilingual model on a phone — and printing nothing until it
+        # finishes is indistinguishable from a hang. The first run gave two
+        # silent minutes on a device that was in fact at 89% CPU. Each line
+        # carries the CER so a weak language is visible while it is still
+        # running, rather than only in a summary nobody is watching arrive.
+        if score is None:
+            mark = RED + f"HTTP {status}" + RESET
+            score_text = f"CER n/a  ({status})"
+        else:
+            mark = GREEN + "ok" + RESET if score <= max_cer else RED + "FAIL" + RESET
+            score_text = f"CER {score:.3f}"
+        print(
+            f"  [{done:2}/{total}] {lang:3} {clip['file'][:26]:28} "
+            f"{score_text:20} {elapsed:6.2f}s  {mark}",
+            flush=True,
+        )
 
         if status != 200:
             failures.append(f"{clip['file']}: HTTP {status} {text[:80]}")

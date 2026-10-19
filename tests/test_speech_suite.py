@@ -216,6 +216,34 @@ class TestTheSuiteIsInstallable:
             in (REPO / "scripts" / "install-bin.sh").read_text()
         )
 
+    def test_it_reports_progress_during_the_longest_phase(self):
+        """The STT loop is the suite's long pole and must not be silent.
+
+        150 seconds of audio through a multilingual model on a phone, printing
+        nothing until it finished: the first run gave two silent minutes on a
+        device that was in fact at 89% CPU. Silence for the whole of the longest
+        phase is indistinguishable from a hang, and the operator has no way to
+        tell which it is without going and measuring CPU themselves.
+        """
+        source = SUITE.read_text()
+        stt_body = source[source.index("def run_stt(") : source.index("def run_tts(")]
+        # A per-clip line, and it must be flushed rather than left in a buffer.
+        assert "flush=True" in stt_body
+        assert 'for clip in manifest["clips"]' in stt_body
+        assert stt_body.count("flush=True") >= 1, "no flushed progress line in run_stt"
+
+    def test_progress_lines_carry_the_error_rate_and_the_time(self):
+        """A progress line that only says "working" tells an operator nothing.
+
+        The CER is what says a language is struggling, and the seconds are what
+        say the model is too slow for the tier to be usable on the device.
+        """
+        source = SUITE.read_text()
+        stt_body = source[source.index("def run_stt(") : source.index("def run_tts(")]
+        assert "CER" in stt_body
+        assert "score_text" in stt_body
+        assert "elapsed" in stt_body
+
 
 class TestFixtureBuilder:
     def test_it_parses_the_headerless_tsv(self):
