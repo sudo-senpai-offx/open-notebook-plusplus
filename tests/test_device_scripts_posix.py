@@ -269,6 +269,58 @@ class TestInstalledScriptsAreRunCorrectly:
         # by chmod, so direct invocation is the documented path.
         assert suite.startswith("#!/data/data/com.termux/files/usr/bin/python")
 
+    def test_installs_are_atomic(self):
+        """An installer must not rewrite the file it is running from.
+
+        A shell reads a script incrementally through an open fd and resumes at
+        its current byte offset after every command. `cp "$src" "$dst"`
+        truncates and rewrites the *same inode*, so a script that installs over
+        itself - which `onb-update` does, since it ships its own replacement -
+        finds the contents shifted underneath it and carries on parsing whatever
+        now sits at that offset. Observed on the device:
+
+            onb-update: 518: Syntax error: ";;" unexpected (expecting "fi")
+
+        from a file that `dash` parses cleanly, because `onb-update` had
+        installed a newer version over itself while the running copy was still
+        executing.
+
+        Writing beside the target and renaming over it replaces the directory
+        entry instead: the running process keeps its fd on the old inode and is
+        untouched, and a reader never observes a partial file.
+        """
+        text = (SCRIPTS / "install-bin.sh").read_text()
+        lines = text.split("\n")
+        start = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("install_one()")
+        )
+        # Closed by a brace at column 0. Sliced by line rather than by an
+        # indented `  }`, which this function does not have.
+        end = next(n for n in range(start + 1, len(lines)) if lines[n] == "}")
+        body = "\n".join(lines[start : end + 1])
+        # Code, not prose: the function's own comment quotes `cp "$src" "$dst"`
+        # in order to explain why it must not appear, so a whole-body search
+        # finds the warning instead of the defect.
+        code = "\n".join(
+            line for line in body.split("\n") if not line.lstrip().startswith("#")
+        )
+        assert 'cp "$src" "$dst"' not in code, (
+            "cp into the target rewrites the inode a running shell has open"
+        )
+        assert "mv " in body, (
+            "the install must rename over the target, not write into it"
+        )
+        assert 'rm -f "$tmp"' in body, (
+            "a failed install must not leave a stray executable in ~/bin"
+        )
+
+    def test_the_temporary_name_is_unique(self):
+        """`$$`, so two concurrent installs cannot share one temp path and
+        clobber each other's partial write."""
+        assert '"$dst.new.$$"' in (SCRIPTS / "install-bin.sh").read_text()
+
 
 def _shellcheck() -> str | None:
     """Locate shellcheck: PATH first, then the project venv."""

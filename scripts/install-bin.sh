@@ -46,7 +46,30 @@ install_one() {
     echo "  MISSING  $1"
     return 1
   fi
-  cp "$src" "$dst" && chmod +x "$dst" && echo "  installed $2  <- $1"
+  # Write beside the target and rename over it, never `cp` into place.
+  #
+  # `cp "$src" "$dst"` truncates and rewrites the *same inode*. A shell reads a
+  # script incrementally through an open fd, and resumes at its current byte
+  # offset after every command — so a script that overwrites itself mid-run finds
+  # the file's contents shifted underneath it and carries on parsing whatever now
+  # sits at that offset. That is what produced
+  #
+  #     onb-update: 518: Syntax error: ";;" unexpected (expecting "fi")
+  #
+  # from a file that dash parses cleanly: `onb-update` had installed a newer
+  # version over itself while that newer version's older sibling was still
+  # executing.
+  #
+  # `mv` replaces the directory entry instead. The running process keeps its open
+  # fd on the old inode and is untouched, and a reader never sees a partial file.
+  tmp="$dst.new.$$"
+  if cp "$src" "$tmp" && chmod +x "$tmp" && mv "$tmp" "$dst"; then
+    echo "  installed $2  <- $1"
+  else
+    rm -f "$tmp"
+    echo "  FAILED  $2  <- $1"
+    return 1
+  fi
 }
 
 # A second copy of the launcher lives at /root/termux-stack.sh inside the
