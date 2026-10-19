@@ -299,7 +299,15 @@ in_guest() {
     proot-distro login ubuntu -- "$@"
     return $?
   fi
-  timeout "${ONB_GUEST_TIMEOUT:-120}" proot-distro login ubuntu -- "$@"
+  # -k is not optional here, and its absence made this a no-op.
+  #
+  # Measured on the device: proot has SigIgn bit 15 set, so it discards SIGTERM.
+  # `timeout 120 cmd` sends TERM at 120s and then *waits forever* — it only
+  # escalates to SIGKILL when given -k. A `timeout 120` wrapper was observed at
+  # 134 seconds with its proot child still running, which is the opposite of the
+  # bound it appeared to provide. SigIgn bit 9 (SIGKILL) is clear, so KILL lands.
+  timeout -k "${ONB_GUEST_KILL_GRACE:-5}" "${ONB_GUEST_TIMEOUT:-120}" \
+    proot-distro login ubuntu -- "$@"
 }
 
 current_commit() {
@@ -484,9 +492,17 @@ fi
 do_check
 rc=$?
 case "$rc" in
-  0)
-    if [ "$CHECK_ONLY" -eq 1 ]; then exit 0; fi
-    exit 0 ;;
+    0)
+    # Up to date. Without --restart that is the whole job, done.
+    #
+    # With --restart it is NOT, and this used to exit here anyway - so
+    # `onb-update --restart` silently did nothing whenever the repo was already
+    # current, printed a success line, and left the old process tree running the
+    # old code. Reported as "the update rarely takes", and this is also the
+    # documented recovery for a wedged stack, so it failed exactly when it was
+    # most needed. The restart was asked for; honour it.
+    [ "$RESTART" -eq 1 ] || exit 0
+    ;;
   10)
     if [ "$CHECK_ONLY" -eq 1 ]; then exit 0; fi
     ;;

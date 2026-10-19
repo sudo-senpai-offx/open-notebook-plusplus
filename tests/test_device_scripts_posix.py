@@ -135,6 +135,53 @@ class TestUpdateSurvivesTheOperator:
             "the bound must be adjustable and documented"
         )
 
+    def test_the_bound_actually_terminates(self):
+        """`timeout N cmd` is not a bound when the child ignores SIGTERM.
+
+        Measured on the device: proot has SigIgn bit 15 set, so it discards
+        SIGTERM outright. `timeout` sends TERM at N and then *waits forever*; it
+        only escalates to SIGKILL when given `-k`. A `timeout 120` wrapper was
+        observed still running at 134 seconds with its proot child alive — the
+        opposite of the bound it appears to provide.
+        """
+        text = (SCRIPTS / "termux-update.sh").read_text()
+        body = text[text.index("in_guest()") :]
+        body = body[: body.index("\n  }")]
+        timeout_lines = [
+            l
+            for l in body.splitlines()
+            if "timeout" in l and "ONB_GUEST_TIMEOUT:-0" not in l
+        ]
+        assert timeout_lines, "no timeout in in_guest"
+        for line in timeout_lines:
+            if line.strip().startswith("timeout"):
+                assert "-k" in line, (
+                    "timeout without -k does not terminate a SIGTERM-ignoring "
+                    f"child: {line.strip()!r}"
+                )
+
+    def test_restart_is_honoured_when_already_up_to_date(self):
+        """The bug that made `--restart` a silent no-op, and a frequent one.
+
+        The up-to-date arm used to `exit 0` unconditionally, so
+        `onb-update --restart` did nothing at all whenever the repo was already
+        current — printing a success line and leaving the old process tree
+        running the old code. It is also the documented recovery for a wedged
+        stack, so it failed exactly when it was needed most. Reported as "the
+        update rarely takes".
+        """
+        text = (SCRIPTS / "termux-update.sh").read_text()
+        lines = text.split("\n")
+        start = next(n for n, l in enumerate(lines) if l.startswith('case "$rc" in'))
+        end = next(n for n in range(start, len(lines)) if lines[n].strip() == "esac")
+        arm = "\n".join(lines[start : end + 1])
+        assert '[ "$RESTART" -eq 1 ] || exit 0' in arm, (
+            "the up-to-date arm must honour --restart rather than always exiting"
+        )
+        after = "\n".join(lines[end : end + 20])
+        for step in ("stop_stack", "do_apply", 'if [ "$RESTART" -eq 1 ]'):
+            assert step in after, f"{step} unreachable after the up-to-date arm"
+
     def test_raw_proot_logins_outside_the_wrapper_are_named(self):
         """`in_guest` is the wrapper; a bare login beside it is an unbounded one
         that the wrapper cannot help with."""
