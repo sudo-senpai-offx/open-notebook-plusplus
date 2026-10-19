@@ -840,9 +840,72 @@ class TestPiperBuildRoute:
         the failure would be the glibc download it was meant to prevent.
         """
         text = _read_script("termux-build-piper.sh")
-        env_form = "ONNXRUNTIME_DIR=" in text
-        assert env_form
-        assert "-DONNXRUNTIME_DIR" not in text
+        assert "ONNXRUNTIME_DIR=" in text
+        # `-DONNXRUNTIME_DIR:PATH` is the patched CMAKE_ARGS, which is fine;
+        # a bare `-DONNXRUNTIME_DIR ` on piper's own command line is not.
+        assert "-DONNXRUNTIME_DIR " not in text
+
+    def test_piper_phonemize_dir_is_never_defined(self):
+        """The bug that cost the first phone attempt, pinned.
+
+        `PIPER_PHONEMIZE_DIR` is not "where to install piper-phonemize". It
+        guards the ExternalProject that *builds* it:
+
+            if(NOT DEFINED PIPER_PHONEMIZE_DIR)
+              ExternalProject_Add(piper_phonemize_external ...)
+            endif()
+
+        Defining it skips that build entirely. piper then finds neither
+        espeak-ng's headers nor onnxruntime's, because installing them is the
+        only thing that build does — so the build ran to 86%, failed on two
+        missing headers, and left no piper-phonemize anywhere on disk.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert "-DPIPER_PHONEMIZE_DIR" not in text
+
+    def test_it_forwards_onnxruntime_dir_into_the_nested_build(self):
+        """CMake does not turn $ENV{X} into a cache variable of that name.
+
+        So the environment alone is not enough — piper-phonemize's configure
+        never sees it, downloads the glibc onnxruntime, and produces a binary
+        Android cannot load. The value has to be written into the
+        ExternalProject's CMAKE_ARGS, read there with `$ENV{}`. An earlier
+        version of this script believed the environment was sufficient, and the
+        belief was never tested against anything.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert "CMAKE_ARGS -DONNXRUNTIME_DIR:PATH=\\$ENV{ONNXRUNTIME_DIR}" in text
+
+    def test_the_sed_is_verified_rather_than_assumed(self):
+        """A patch that does not match must stop the build, not pass silently.
+
+        The whole diagnosis rests on the patch having applied. If the sed ever
+        stops matching — upstream moves the line — the build would proceed to
+        fail hours later at a link error, which is exactly where the first
+        attempt died without anyone knowing why.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert "FAILED to patch CMAKE_ARGS" in text
+        # And the guard must actually gate the build rather than merely be
+        # printed near it: the abort sits between the verification grep and the
+        # next step, so a failed patch stops here instead of two hours later.
+        assert text.index('fail "patch piper"') > text.index(
+            "if grep -q 'ONNXRUNTIME_DIR:PATH' CMakeLists.txt; then"
+        )
+        assert text.index('fail "patch piper"') < text.index('step "clearing')
+
+    def test_it_checks_piper_phonemize_is_a_target_before_building(self):
+        """Cheap, and it is the check whose absence cost the attempt.
+
+        Configure can succeed while silently not building the thing everything
+        else depends on. Confirming the target exists costs one grep and turns
+        an hour of building into an immediate, legible failure.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert "piper_phonemize_external" in text
+        assert "configure sanity" in text
+        # And it has to run before the build, not after it.
+        assert text.index("configure sanity") < text.index('fail "build"')
 
     def test_it_wants_the_c_library_not_the_python_bindings(self):
         """`python-onnxruntime` ships the wheel; piper links `libonnxruntime.so`.

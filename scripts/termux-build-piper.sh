@@ -101,32 +101,75 @@ step "cloning piper"
 cd "$SRC/piper"
 
 step "patching piper for bionic"
-# piper's CMakeLists adds `-static-libgcc -static-libstdc++` whenever the target
-# is neither MSVC nor Apple — Android is neither, so Android gets a glibc-only
-# flag set. bionic has no static libstdc++ and the link fails naming a file
-# nobody has heard of rather than the CMakeLists line that caused it.
-if grep -q 'static-libstdc++' CMakeLists.txt; then
-  sed -i 's/ -static-libgcc -static-libstdc++//' CMakeLists.txt
-  echo "removed -static-libgcc -static-libstdc++"
+# Two patches, both because this is not the build piper's CMake expects.
+#
+# 1. `-static-libgcc -static-libstdc++` is added whenever the target is neither
+#    MSVC nor Apple — Android is neither, so Android gets a glibc-only flag set.
+#    bionic has no static libstdc++ and the link fails naming a file nobody has
+#    heard of rather than the CMakeLists line that caused it.
+sed -i 's/ -static-libgcc -static-libstdc++//' CMakeLists.txt
+echo "  stripped static link flags"
+
+# 2. Forward ONNXRUNTIME_DIR into piper-phonemize's own configure.
+#
+# piper-phonemize's ExternalProject forwards only CMAKE_INSTALL_PREFIX, so the
+# variable never reaches the nested build. It cannot be passed through the
+# environment either: CMake does not turn $ENV{X} into a cache variable of the
+# same name — that assumption was in an earlier version of this script and it
+# is wrong. It has to be written into the ExternalProject's CMAKE_ARGS, where
+# the nested configure reads it from the environment.
+if ! grep -q 'ONNXRUNTIME_DIR:PATH' CMakeLists.txt; then
+  sed -i "s|\(CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=\${PIPER_PHONEMIZE_DIR}\)|\1\n      CMAKE_ARGS -DONNXRUNTIME_DIR:PATH=\$ENV{ONNXRUNTIME_DIR}|" \
+    CMakeLists.txt
+  if grep -q 'ONNXRUNTIME_DIR:PATH' CMakeLists.txt; then
+    echo "  forwarded ONNXRUNTIME_DIR into piper-phonemize"
+  else
+    echo "  FAILED to patch CMAKE_ARGS — the sed did not match."
+    echo "  Open CMakeLists.txt and look at the piper_phonemize_external block."
+    fail "patch piper"
+  fi
 else
-  echo "no static flags found — upstream may have changed this; re-read the CMakeLists"
+  echo "  ONNXRUNTIME_DIR forwarding already present"
 fi
 
-step "configuring (this fetches piper-phonemize, which builds espeak-ng)"
-# ONNXRUNTIME_DIR goes in the *environment*, not on the command line. piper
-# builds piper-phonemize with ExternalProject_Add and passes only
-# CMAKE_INSTALL_PREFIX through, so a -D here would not reach the nested build.
-# The environment does propagate, which is the only way to reach it.
+# `PIPER_PHONEMIZE_DIR` must stay UNDEFINED. It guards the ExternalProject that
+# *builds* piper-phonemize; it is not a path to write to:
+#
+#   if(NOT DEFINED PIPER_PHONEMIZE_DIR)
+#     ExternalProject_Add(piper_phonemize_external ...)
+#   endif()
+#
+# Defining it skips that build entirely. piper then cannot find espeak-ng's
+# headers or onnxruntime's, because installing them is the only thing that
+# build does. An earlier version of this script passed it, and the build ran to
+# 86% and died on two missing headers with no piper-phonemize on disk at all.
+
+step "clearing the previous configure, which had that prefix baked in"
+rm -rf build
+
+step "configuring (builds piper-phonemize, which builds espeak-ng)"
 ONNXRUNTIME_DIR="$ORT" \
   cmake -B build -S . \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-    -DPIPER_PHONEMIZE_DIR="$SRC/phonemize" \
   || fail "cmake configure"
 
+# Prove piper-phonemize is a target before spending an hour discovering
+# otherwise. Its absence is what the last attempt could not report.
+if grep -rq 'piper_phonemize_external' build/CMakeFiles 2>/dev/null \
+   || grep -q 'piper_phonemize_external' build/Makefile 2>/dev/null; then
+  echo "  piper-phonemize is a build target"
+else
+  echo "  piper_phonemize_external is NOT a target — it will not be built."
+  echo "  Check that PIPER_PHONEMIZE_DIR is not defined anywhere above."
+  fail "configure sanity"
+fi
+
 step "building — the long one"
-# piper-phonemize compiles espeak-ng here. onnxruntime is NOT rebuilt: the
-# ONNXRUNTIME_DIR above skipped its download, and it links Termux's.
+# piper-phonemize compiles espeak-ng here and links Termux's onnxruntime rather
+# than downloading a glibc one. Watch for a `Downloading ... onnxruntime` line:
+# if it appears, the patch did not take, and the result is a binary Android
+# cannot load.
 ONNXRUNTIME_DIR="$ORT" cmake --build build --config Release -j"$JOBS" 2>&1 | tail -150 \
   || fail "build"
 
