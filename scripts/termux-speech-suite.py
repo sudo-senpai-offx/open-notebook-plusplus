@@ -300,6 +300,32 @@ def clip_timeout(duration_s: float, rtf_budget: float) -> int:
     return int(min(MAX_CLIP_TIMEOUT, max(MIN_CLIP_TIMEOUT, duration_s * rtf_budget)))
 
 
+def _served_model() -> str:
+    """Which model the server is actually serving, from the server itself.
+
+    Not what was asked for. The launcher selects a tier and the server serves
+    whatever it was started with; after a tier change the two disagree, and a
+    checkpoint keyed on the requested model would silently carry results across
+    a change it was never measured under.
+
+    Read from the process, because the STT server reports its model on the
+    command line, and the launcher reports it on stdout.
+    """
+    try:
+        done = subprocess.run(
+            ["sh", os.path.expanduser("~/bin/onb-stt"), "probe"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in (done.stdout + done.stderr).splitlines():
+            if line.startswith("[stt] model="):
+                return line.split("model=", 1)[1].split()[0]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
 def load_checkpoint(path: Path) -> dict[str, dict]:
     """Previously scored clips, so an interrupted run resumes.
 
@@ -424,6 +450,7 @@ def run_stt(
     done = 0
 
     global _CHECKPOINT, _RESULTS
+    model_id = _served_model()
     checkpoint = fixtures / "stt-results.json"
     seen: dict[str, dict] = {} if fresh else load_checkpoint(checkpoint)
     # Published so the SIGINT handler can save on Ctrl+C. Both names, because
@@ -447,6 +474,24 @@ def run_stt(
         prior = seen.get(clip["file"])
         if prior is not None and prior.get("status") not in ("scored", "timeout"):
             prior = None
+
+        # A cached result is only valid for the conditions it was measured
+        # under. Two of those change between runs:
+        #
+        #   * the budget - a clip that timed out at 90s may succeed at 317s, and
+        #     replaying the old outcome reports a failure that no longer exists;
+        #   * the model - a transcript from a 547 MB tier says nothing about a
+        #     181 MB one.
+        #
+        # Both were ignored, so a run with corrected budgets replayed fifteen
+        # stale timeouts and reported them as the current result. The lines even
+        # *displayed* the new budget beside the old outcome, which is how you
+        # can tell from the output that they disagree.
+        if prior is not None:
+            if prior.get("budget") != budget:
+                prior = None
+            elif prior.get("model") != model_id:
+                prior = None
         cached = prior is not None
 
         if cached and prior is not None:
@@ -475,6 +520,8 @@ def run_stt(
                 "seconds": round(elapsed, 2),
                 "duration_s": duration,
                 "http": status,
+                "budget": budget,
+                "model": model_id,
             }
             save_checkpoint(checkpoint, seen)
             # `seen` is the same object throughout, but rebind the global anyway:

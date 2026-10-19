@@ -22,6 +22,13 @@ SUITE = REPO / "scripts" / "termux-speech-suite.py"
 BUILDER = REPO / "scripts" / "build-speech-fixtures.py"
 
 
+def _read_script(name: str) -> str:
+    """A file from scripts/, as text. The other speech test file has one too."""
+    return (Path(__file__).resolve().parents[1] / "scripts" / name).read_text(
+        encoding="utf-8"
+    )
+
+
 def suite_module():
     """The suite module, for the few assertions that read module constants."""
     return _load_suite()
@@ -495,6 +502,78 @@ class TestTheSuiteIsInterruptible:
             proc.kill()
             proc.communicate()
             pytest.fail("the fixed shape still ignores SIGINT")
+
+
+class TestCachedResultsAreInvalidated:
+    """A cached result is only valid for the conditions it was measured under.
+
+    The suite replayed fifteen stale timeouts. Two things had changed - the
+    budget (the manifest gained durations, so every clip's deadline went from
+    the 90s floor to 142-556s) and the model (the shipped tier went from the
+    547 MB one to the 181 MB one) - and the cached outcomes were reported as the
+    current result anyway. The lines even *displayed* the new budget beside the
+    old outcome, so the output visibly disagreed with itself.
+    """
+
+    def test_the_checkpoint_records_the_budget_and_the_model(self):
+        source = SUITE.read_text()
+        assert '"budget": budget' in source, "the budget must be stored with the result"
+        assert '"model": model_id' in source, "the model must be stored with the result"
+
+    def test_a_cached_result_is_dropped_when_the_budget_changes(self):
+        source = SUITE.read_text()
+        assert 'prior.get("budget") != budget' in source, (
+            "a timeout measured under a shorter deadline says nothing about a "
+            "longer one"
+        )
+
+    def test_a_cached_result_is_dropped_when_the_model_changes(self):
+        source = SUITE.read_text()
+        assert 'prior.get("model") != model_id' in source, (
+            "a transcript from one model says nothing about another"
+        )
+
+    def test_the_model_is_the_one_being_served_not_the_one_requested(self):
+        """The launcher selects a tier; the server serves what it was started
+        with. After a tier change those disagree, and keying on the requested
+        model would carry results across the change."""
+        source = SUITE.read_text()
+        assert "def _served_model()" in source
+        body = source[source.index("def _served_model()") :]
+        body = body[: body.index("\ndef ")]
+        assert "probe" in body, (
+            "the served model must come from the server's own report"
+        )
+
+
+class TestTheSttLauncherRestartsOnAModelChange:
+    """`onb-stt up` reported "already up" with a model the operator had just
+    changed the default away from.
+
+    The shipped tier changed from the 574 MB multilingual model to the 181 MB
+    one, because the big model is five times slower on this hardware. The
+    running server was never restarted, so it kept serving the old model and
+    the change was invisible: the launcher said the server was up, and the
+    operator had no way to tell that the thing they had installed was not the
+    thing running.
+    """
+
+    def test_up_compares_the_served_model_with_the_selected_one(self):
+        text = _read_script("termux-stt.sh")
+        up_arm = text[text.index("  up)") :]
+        assert "served_model" in up_arm
+        assert "_want" in up_arm, (
+            "the selected model must be compared against the served one"
+        )
+        assert "restarting" in up_arm, (
+            "a mismatch must restart the server, not report success"
+        )
+
+    def test_a_matching_model_still_reports_already_up(self):
+        """The fast path has to survive the check, or every start restarts."""
+        text = _read_script("termux-stt.sh")
+        up_arm = text[text.index("  up)") :]
+        assert "already up" in up_arm
 
 
 class TestFixtureBuilder:

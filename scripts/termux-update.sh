@@ -369,8 +369,16 @@ stage_source() {
         # not called main - was never shown. The guess is also actively
         # misleading: the bundle almost always *is* of this repo, so the
         # message invites the reader to check the wrong thing.
+        # `gc.auto=0` and `maintenance.auto=false`: git otherwise leaves a
+        # background `git gc --auto` running after a fetch that packs a lot of
+        # objects, and `proot-distro login` waits for it because it holds the
+        # session's stdio. On a phone that gc takes minutes, so the wrapper's
+        # timeout fired and killed the session *after* the fetch had already
+        # succeeded - the work was done and the update was reported as failed
+        # with "Killed" for a reason that had nothing to do with the fetch.
         _fetch_err="$ROOTFS/tmp/onb-fetch-err.$$"
-        if ! in_guest git -C "$REPO_IN_GUEST" fetch "$BUNDLE_IN_GUEST" main 2>"$_fetch_err"; then
+        if ! in_guest git -c gc.auto=0 -c maintenance.auto=false \
+             -C "$REPO_IN_GUEST" fetch "$BUNDLE_IN_GUEST" main 2>"$_fetch_err"; then
           _why=$(tail -3 "$_fetch_err" 2>/dev/null | tr '\n' ' ')
           rm -f "$_fetch_err" 2>/dev/null
           STAGE_ERROR="git fetch rejected $src: ${_why:-no detail}"

@@ -288,8 +288,23 @@ case "${1:-up}" in
     ;;
   up)
     if pid=$(pid_of); then
-      echo "[stt] already up (pid $pid) port ${PORT} model $(served_model)"
-      exit 0
+      # Already up - but is it up with the *right* model?
+      #
+      # The selection changed once already: the shipped default went from the
+      # 574 MB multilingual tier to the 181 MB one, because the big model is
+      # five times slower on this hardware. The running server was never
+      # restarted, so it kept serving the old model and the change was
+      # invisible - `onb-stt up` reported "already up" and the operator had no
+      # way to tell that the thing they had just installed was not the thing
+      # running.
+      _served=$(served_model)
+      _want=$(basename "$MODEL")
+      if [ "$_served" = "$_want" ]; then
+        echo "[stt] already up (pid $pid) port ${PORT} model $_served"
+        exit 0
+      fi
+      echo "[stt] up with a different model (running $_served, want $_want) - restarting"
+      kill_stt
     fi
     if [ ! -f "$MODEL" ]; then
       echo "[stt] FATAL: model missing at $MODEL"
