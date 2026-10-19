@@ -725,3 +725,53 @@ class TestShellContract:
         code = self._code(self._script("termux-cpu.sh"))
         assert "$(cpu_threads stt)" in code
         assert "$(cpu_threads tts)" in code
+
+    def test_stt_passes_no_flag_whisper_server_would_reject(self):
+        """whisper-server exits on an unknown argument — with status 0.
+
+        The first version of `termux-stt.sh` passed `-c 512`, copied from
+        llama-server's vocabulary. whisper.cpp's server has no `-c`; its context
+        comes from the model and `-mc/--max-context` is a *text* context. The
+        server prints "error: unknown argument" and calls `exit(0)`, so a start
+        check that only looked at the exit code would have called that a clean
+        launch while nothing was listening.
+
+        Asserted here against the script because the failure is a flag name,
+        and flag names are exactly what drifts between the two projects.
+        """
+        code = self._code(self._script("termux-stt.sh"))
+        for forbidden in ("-c 512", "-c512", " --c "):
+            assert forbidden not in code, f"termux-stt.sh passes {forbidden!r}"
+
+    @pytest.mark.parametrize(
+        "flag",
+        ["-m", "-t", "--host", "--port", "--inference-path", "--convert"],
+    )
+    def test_stt_only_passes_flags_the_server_defines(self, flag):
+        code = self._code(self._script("termux-stt.sh"))
+        assert flag in code, f"termux-stt.sh should pass {flag}"
+
+    def test_stt_enables_conversion_because_sources_are_not_wav(self):
+        """The blob store hands back `{sha}.bin`; a lecture is m4a or mp3.
+
+        whisper-server only transcodes when `--convert` is passed. Without it the
+        server expects 16 kHz mono WAV on the wire and answers an m4a upload
+        with an empty transcript — which the source pipeline reports as
+        "produced no transcript", blaming the file rather than the missing flag.
+        """
+        code = self._code(self._script("termux-stt.sh"))
+        assert "--convert" in code
+
+    def test_stt_names_ffmpeg_in_its_own_failure_message(self):
+        """The operator is told how to fix it, in the message they will see.
+
+        A missing ffmpeg does not stop the server starting; it produces an empty
+        transcript on the first recording. That is the same class of failure as
+        the ones this session keeps finding — infrastructure that looks correct
+        and has never run — and it is only avoidable by saying so at the point
+        where the command is being run.
+        """
+        text = self._script("termux-stt.sh")
+        code = self._code(text)
+        assert "ffmpeg" in code
+        assert "pkg install ffmpeg" in text

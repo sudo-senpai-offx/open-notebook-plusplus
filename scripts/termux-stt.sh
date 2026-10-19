@@ -15,9 +15,18 @@
 # transcription. Chosen over large-v3-turbo (574 MB — would cost more RAM
 # than chat + embed combined and defeat the residency design).
 #
-# Memory: whisper-server loads the model into RAM and keeps it there; -c 512
-# keeps the KV context small. Threads from onb-cpu so STT shares the same
-# inference budget as chat and embed — never more than half the device.
+# Memory: there is no context flag to set. whisper-server takes its audio
+# context from the model itself; `-mc/--max-context` is a *text* context and is
+# not the same thing. An earlier version of this script passed `-c 512`, which
+# does not exist. whisper-server treats an unknown argument as fatal — prints
+# "error: unknown argument: -c" and exits, with status 0, so a check that only
+# looked at the exit code would have reported a clean start.
+#
+# Audio input: the server expects 16 kHz mono WAV unless `--convert` is given,
+# in which case it shells out to ffmpeg to transcode whatever was uploaded. A
+# lecture arrives as m4a or mp3, so `--convert` is what makes it work at all.
+# ffmpeg is checked at `up` rather than assumed, because its absence surfaces as
+# an empty transcript on the first recording rather than as a startup error.
 #
 # Endpoints: /health (liveness), /v1/audio/transcriptions (OpenAI-compatible,
 # same shape as the PC whisper server so one client serves both).
@@ -160,11 +169,32 @@ case "${1:-up}" in
       echo "          https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin"
       exit 1
     fi
-    [ -x "$WHISPER" ] || { echo "[stt] FATAL: whisper-server missing at $WHISPER"; return 1; }
+    [ -x "$WHISPER" ] || {
+      echo "[stt] FATAL: whisper-server missing at $WHISPER"
+      echo "        build it in Termux:"
+      echo "          pkg install clang cmake make git ffmpeg"
+      echo "          git clone https://github.com/ggerganov/whisper.cpp ~/whisper.cpp"
+      echo "          cd ~/whisper.cpp && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release -j\$(nproc)"
+      exit 1
+    }
+    # ffmpeg is only needed to *decode* the upload, and its absence does not
+    # stop the server starting — it fails on the first non-WAV file, with an
+    # empty transcript and no clue why. Said here, where the operator is
+    # already running the command that needs it.
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+      echo "[stt] WARNING: ffmpeg not found. WAV uploads will work;"
+      echo "        m4a/mp3/mp4 uploads will return an empty transcript."
+      echo "        Install it with:  pkg install ffmpeg"
+    fi
     echo "[stt] starting $(basename "$MODEL") on :${PORT} (${STT_THREADS} threads, whisper.cpp)"
+    # `--convert` is what lets the server accept m4a/mp3/mp4 at all; without it
+    # it expects 16 kHz mono WAV on the wire. No `-c`: that flag does not exist
+    # and an unknown argument makes whisper-server exit.
     # shellcheck disable=SC2086
-    nohup $CPU_AFFINITY "$WHISPER" -m "$MODEL" -t "$STT_THREADS" -c 512 \
-      --host 127.0.0.1 --port "$PORT" --inference-path /v1/audio/transcriptions \
+    nohup $CPU_AFFINITY "$WHISPER" -m "$MODEL" -t "$STT_THREADS" \
+      --host 127.0.0.1 --port "$PORT" \
+      --inference-path /v1/audio/transcriptions \
+      --convert \
       >>"$LOG" 2>&1 &
     if wait_healthy; then
       echo "[stt] healthy"
