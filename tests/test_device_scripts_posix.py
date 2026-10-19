@@ -212,6 +212,67 @@ class TestUpdateSurvivesTheOperator:
             )
 
 
+class TestLauncherDoesNotKillItsOwnSubshells:
+    """`onb stop` reported its own subshells as having survived SIGKILL.
+
+    A forked subshell keeps its parent's cmdline. `launcher_pids` matches on
+    `$HOME/bin/onb `, which is in the script's *own* command line, so the
+    command-substitution subshell that does the scanning looks exactly like a
+    launcher. `kill_stragglers` then SIGKILLed it, and the re-check found the
+    dying subshell still present and reported:
+
+        WARNING: launcher(s) survived SIGKILL (pid 26251 26252)
+        reboot, or: kill -9 26251 26252
+
+    Three things wrong with that: SIGKILL cannot be ignored, so "survived
+    SIGKILL" is a contradiction; "reboot" is drastic advice for a stray
+    subshell; and by the time the operator ran the suggested kill, the
+    processes were gone, so the warning described something that had already
+    resolved itself.
+
+    `$$` does not exclude a subshell — it is the *parent* shell's pid. The
+    exclusion has to be by parent.
+    """
+
+    def test_the_launcher_scan_excludes_our_own_children(self):
+        text = (SCRIPTS / "termux-launch.sh").read_text()
+        body = text[text.index("launcher_pids()") :]
+        body = body[: body.index("\n}")]
+        assert "PPid:" in body, (
+            "launcher_pids must exclude the script's own subshells by parent; "
+            "`$$` cannot do it"
+        )
+        assert '[ "$_ppid" = "$$" ] && continue' in body
+
+    def test_a_subshell_really_does_inherit_its_parents_cmdline(self):
+        """The premise, checked rather than assumed.
+
+        If a subshell did *not* inherit the parent's cmdline, this whole class
+        of bug could not happen, and the exclusion would be cargo cult.
+        """
+        import subprocess
+
+        done = subprocess.run(
+            [
+                "/bin/sh",
+                "-c",
+                'echo "parent: $$"; (echo "child: $$"; tr "\\0" " " < /proc/$$/cmdline)',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        out = done.stdout
+        assert "parent:" in out and "child:" in out
+        # `$$` is the same in both: the parent's pid. That is precisely why it
+        # cannot be used to exclude a subshell.
+        parent = out.split("parent:")[1].split()[0]
+        child = out.split("child:")[1].split()[0]
+        assert parent == child, (
+            "`$$` must be identical in a subshell to be useless here"
+        )
+
+
 class TestInstalledScriptsAreRunCorrectly:
     """A Python entry point must be invoked by its shebang, never through `sh`.
 

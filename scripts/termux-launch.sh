@@ -237,7 +237,27 @@ launcher_pids() {
   for p in /proc/[0-9]*; do
     _cl=$({ tr '\0' ' ' <"$p/cmdline"; } 2>/dev/null) || continue
     case "$_cl" in
-      *"$HOME/bin/onb "*) echo "${p#/proc/}" ;;
+      *"$HOME/bin/onb "*)
+        # Skip our own subshells.
+        #
+        # A forked subshell keeps its parent's cmdline, so this pattern matches
+        # the very subshell doing the scanning: `pids=$(launcher_pids | ...)`
+        # forks one, and it looks exactly like a launcher. Excluding `$$` does
+        # not help, because `$$` is the *parent* shell's pid, not the
+        # subshell's.
+        #
+        # The effect was that `kill_stragglers` SIGKILLed its own subshells and
+        # then reported them as survivors:
+        #
+        #     WARNING: launcher(s) survived SIGKILL (pid 26251 26252)
+        #     reboot, or: kill -9 26251 26252
+        #
+        # which is alarming, unachievable advice (SIGKILL cannot be ignored),
+        # and referred to processes that had already exited by the time the
+        # operator acted on it. Excluded by parent instead.
+        _ppid=$(sed -n 's/^PPid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$p/status" 2>/dev/null)
+        [ "$_ppid" = "$$" ] && continue
+        echo "${p#/proc/}" ;;
     esac
   done
 }
