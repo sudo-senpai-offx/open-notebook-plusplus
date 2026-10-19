@@ -93,8 +93,16 @@ served_model() {
   for p in /proc/[0-9]*; do
     cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
     case "$cl" in *whisper-server*--port\ 8090*)
-      # Extract the value after --model
-      echo "$cl" | tr ' ' '\n' | grep -A1 -- '--model' | tail -1 | sed 's|.*/||'
+      # The value after the model flag. `up` starts the server with `-m`, and
+      # grepping for `--model` found nothing — so the probe reported an empty
+      # model for a server that was demonstrably serving one. The supervisor's
+      # key/value parser needs a non-empty value to match at all, so the field
+      # vanished rather than showing as blank, and the status panel had nothing
+      # to say about which model was loaded.
+      echo "$cl" | tr ' ' '\n' \
+        | grep -A1 -e '^-m$' -e '^--model$' \
+        | grep -v -e '^-m$' -e '^--model$' -e '^--$' \
+        | head -1 | sed 's|.*/||'
       return 0
     esac
   done

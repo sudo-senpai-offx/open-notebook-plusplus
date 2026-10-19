@@ -50,8 +50,13 @@ fi
 pid_of() {
   for p in /proc/[0-9]*; do
     cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
-    # --port 8091 distinguishes TTS from chat (8080), embed (8081), STT (8090)
-    case "$cl" in *piper-server.py*8091*) echo "${p#/proc/}"; return 0 ;; esac
+    # Match the server script, not a port. The port is passed in the
+    # *environment* (`TTS_PORT=8091 python3 .../onb-tts-server`), so it never
+    # appears on the command line at all — an earlier version matched on
+    # `piper-server.py` and `8091` together and therefore never found its own
+    # process, so `up` would start a second server on every invocation and
+    # `down` would report nothing to stop.
+    case "$cl" in *onb-tts-server*) echo "${p#/proc/}"; return 0 ;; esac
   done
   return 1
 }
@@ -82,14 +87,21 @@ kill_tts() {
   echo "[tts] stopped (pid $pid)"
 }
 
-# The voice the running server is serving, from the command line.
+# The voice the running server is serving, read from its environment.
 served_model() {
+  # The voice comes from TTS_MODEL in the *environment*, so it has to be read
+  # from there. `/proc/<pid>/cmdline` shows only `python3 <script>` and the
+  # supervisor's status panel would show an empty model for a server that is
+  # demonstrably serving one. Same UID in Termux, so /proc/<pid>/environ is
+  # readable.
   for p in /proc/[0-9]*; do
     cl=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
-    case "$cl" in *piper-server.py*)
-      echo "$cl" | tr ' ' '\n' | grep -E 'model|TTS_MODEL' | tail -1 | sed 's|.*/||'
+    case "$cl" in *onb-tts-server*)
+      tr '\0' '\n' < "$p/environ" 2>/dev/null \
+        | sed -n 's/^TTS_MODEL=//p' | head -1 | sed 's|.*/||;s|\.onnx$||'
       return 0
-    esac
+      ;;
+  esac
   done
   echo ""
 }

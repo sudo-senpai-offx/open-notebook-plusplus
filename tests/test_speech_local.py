@@ -29,6 +29,7 @@ to do with the answer*, and that is where the failure modes are:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -857,6 +858,98 @@ class TestPiperBuildRoute:
         text = _read_script("termux-build-piper.sh")
         assert "static-libstdc++" in text
         assert "sed -i" in text
+
+
+class TestProcessIdentification:
+    """How each launcher finds the process it started.
+
+    Both bugs here were found on the device, not in review, and both had the
+    same shape: a matcher written against the command line when the thing it
+    needed was somewhere else. A probe that cannot find its own process reports
+    a role as unloaded while the server is serving, and a `down` with nothing to
+    stop reports success.
+
+    Driven against real `/proc`-shaped cmdlines so the matchers are exercised as
+    written rather than as intended.
+    """
+
+    @staticmethod
+    def _matches(script: str, cmdline: str, env: str = "") -> bool:
+        """Does `script`'s pid_of accept this process?
+
+        `env` is a NUL-separated environ blob, as /proc/<pid>/environ serves it.
+        """
+        text = _read_script(script)
+        # Pull the pid_of case pattern out of the shell source.
+        patterns = re.findall(r"case \"\$cl\" in (.*?)\)", text)
+        assert patterns, f"{script} has no cmdline case"
+        for raw in patterns:
+            for token in re.findall(r"\*[^*]*\*", raw):
+                needle = token.strip("*").replace("\\ ", " ")
+                if needle and needle in cmdline:
+                    return True
+        return False
+
+    def test_stt_finds_its_server_on_the_command_line_it_actually_uses(self):
+        """`up` starts whisper-server with `-m`, not `--model`."""
+        cmdline = (
+            "/data/data/com.termux/files/usr/bin/taskset -c 4-7 "
+            "/data/data/com.termux/files/home/whisper.cpp/build/bin/whisper-server "
+            "-m /data/data/com.termux/files/home/gguf/ggml-base.en-q5_1.bin "
+            "-t 2 --host 127.0.0.1 --port 8090 "
+            "--inference-path /v1/audio/transcriptions --convert"
+        )
+        assert self._matches("termux-stt.sh", cmdline)
+
+    def test_tts_finds_its_server_even_though_the_port_is_not_on_the_command_line(self):
+        """The bug found on the device.
+
+        TTS's port is passed as `TTS_PORT=8091 python3 .../onb-tts-server`, so
+        the command line is just `python3 <script>` — no port, and not the
+        script name the matcher expected after the server was replaced. Matching
+        on the port meant `pid_of` never matched: `up` would start a second
+        server on every call, and `down` would report nothing to stop.
+        """
+        cmdline = "python3 /data/data/com.termux/files/home/bin/onb-tts-server"
+        assert self._matches("termux-tts.sh", cmdline)
+
+    def test_neither_launcher_matches_the_other_roles(self):
+        """Four servers, four identities. A cross-match means the reaper can
+        unload a model another role is serving."""
+        chat = "llama-server -m /home/gguf/qwen.gguf --host 127.0.0.1 --port 8080"
+        embed = "llama-server -m /home/gguf/bge.gguf --embeddings --port 8081"
+        stt = "whisper-server -m /home/gguf/whisper.bin --port 8090 --convert"
+        tts = "python3 /home/bin/onb-tts-server"
+        assert self._matches("termux-stt.sh", stt)
+        assert not self._matches("termux-stt.sh", chat)
+        assert not self._matches("termux-stt.sh", embed)
+        assert not self._matches("termux-stt.sh", tts)
+        assert self._matches("termux-tts.sh", tts)
+        assert not self._matches("termux-tts.sh", chat)
+        assert not self._matches("termux-tts.sh", embed)
+        assert not self._matches("termux-tts.sh", stt)
+
+    def test_served_model_reads_the_flag_up_actually_passes(self):
+        """STT reports `model=` empty when the matcher looks for `--model`.
+
+        `up` starts the server with `-m`, so grepping the command line for
+        `--model` finds nothing. The supervisor's key/value parser needs a
+        non-empty value to match at all, so the field vanished rather than
+        showing blank — and the status panel had nothing to say about which
+        model was resident.
+        """
+        text = _read_script("termux-stt.sh")
+        block = text.split("served_model() {", 1)[1].split("\n}", 1)[0]
+        assert "-m" in block, "must match the short flag the launcher uses"
+        assert "--model" in block, "and the long form, in case that is used"
+
+    def test_tts_reads_its_model_from_the_environment_not_the_command_line(self):
+        text = _read_script("termux-tts.sh")
+        block = text.split("served_model() {", 1)[1].split("\n}", 1)[0]
+        # TTS_MODEL is an environment variable of the server process; the
+        # command line is just `python3 <script>`.
+        assert "/environ" in block
+        assert "TTS_MODEL" in block
 
     """The verbs are a contract between a Python file and two shell files."""
 
