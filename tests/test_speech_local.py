@@ -919,29 +919,58 @@ class TestPiperBuildRoute:
 
         and it arrives via piper-phonemize's ExternalProject, downloaded during
         the build rather than at configure time — so patching it beforehand is
-        impossible and patching it afterwards is the only option. Skipping this
-        is what left the build dying at 94%, just after the dictionary data
-        finished generating, which looks like success right up until it stops.
+        impossible and patching it afterwards is the only option.
         """
         text = _read_script("termux-build-piper.sh")
-        assert "patch_espeak_static_flags" in text
+        assert "patch_espeak_for_android" in text
         assert "static-libstdc++" in text
         assert "espeak_ng_external" in text
+
+    def test_it_gates_speechplayer_which_piper_phonemize_failed_to_disable(self):
+        """`USE_SPEECHPLAYER=OFF` stops the link, not the compile.
+
+        piper-phonemize passes `-DUSE_SPEECHPLAYER:BOOL=OFF`, which gates only
+        `target_link_libraries(espeak-ng PRIVATE speechPlayer)`. The
+        subdirectory itself is added unconditionally in espeak-ng's
+        `src/CMakeLists.txt`, so speechPlayer's sources were compiled anyway and
+        the build died on:
+
+            speechWaveGenerator.cpp:197: error: reference to 'sample' is ambiguous
+
+        — espeak-ng declares its own `sample`, and C++17's `<algorithm>` brings
+        in `std::sample`. Gating `add_subdirectory(speechPlayer)` is what
+        actually stops it, and piper needs a library, not a speech player.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert "add_subdirectory(speechPlayer)" in text
+        assert "USE_SPEECHPLAYER" in text
+        # Gated, not deleted: the upstream intent stays readable in the patch.
+        assert "if (USE_SPEECHPLAYER)" in text
+
+    def test_it_patches_a_leftover_espeak_before_building(self):
+        """ExternalProject caches its download, so a retry can patch up front.
+
+        Otherwise every retry pays a full espeak-ng compile — dictionary data
+        generation included — only to fail on the same line and patch
+        afterwards. The pre-patch is best-effort; the one after a failure is
+        what guarantees the retry happens at all.
+        """
+        text = _read_script("termux-build-piper.sh")
+        first_patch = text.index("patching any espeak-ng left over")
+        build = text.index('step "building')
+        assert first_patch < build, "patch the leftover tree before the build"
 
     def test_the_espeak_patch_only_fires_on_the_static_link_failure(self):
         """A patch applied on any failure would paper over unrelated errors.
 
-        The retry is gated on the log actually mentioning the static flags. If
-        the build failed for some other reason, patching espeak-ng and building
-        again would burn another twenty minutes and produce a second, more
-        confusing failure.
+        Only the first attempt's failure decides whether a retry is worthwhile.
+        A build that failed for another reason must report, not rebuild.
         """
         text = _read_script("termux-build-piper.sh")
-        gate = text.split("if ! build_once; then", 1)[1].split("fi", 1)[0]
-        assert "grep -qiE" in gate
-        assert "static-libstdc" in gate
-        # The gate must consult the log, not its own optimism.
-        assert "$BUILD_LOG" in gate
+        # The gate is now "did the patch change anything", which is checked by
+        # the function's own return value rather than by grepping the log.
+        gate = text.split("if ! build_once; then", 1)[1].split("else", 1)[0]
+        assert "patch_espeak_for_android" in gate
 
     def test_a_failed_build_reports_the_compiler_error_not_the_make_wrapper(self):
         """Six levels of `make[N]: Error 2` and no reason is not a diagnosis.

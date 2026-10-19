@@ -177,16 +177,40 @@ BUILD_LOG="$SRC/build.log"
 # not at configure time. So: build; if it fails on the static flags, patch what
 # was downloaded and build again. ExternalProject caches the download, so the
 # patch sticks and the second attempt does not re-fetch.
-patch_espeak_static_flags() {
+patch_espeak_for_android() {
   _found=0
   for _f in build/p/src/*/e/src/espeak_ng_external/src/libespeak-ng/CMakeLists.txt \
            build/p/src/*/e/src/espeak_ng_external/src/CMakeLists.txt \
            build/p/src/*/e/src/espeak_ng_external/CMakeLists.txt; do
     [ -f "$_f" ] || continue
+
+    # 1. `target_link_options(espeak-ng PRIVATE "-static-libstdc++" "-static")`.
+    #    bionic has no static libstdc++ and Termux's clang rejects the flag.
     if grep -q 'static-libstdc++' "$_f"; then
       sed -i 's/ "-static-libstdc++"//; s/ "-static"//' "$_f"
-      echo "  patched static link flags in $_f"
+      echo "  stripped espeak-ng's static link flags in $_f"
       _found=1
+    fi
+
+    # 2. `add_subdirectory(speechPlayer)` is unconditional, so piper-phonemize's
+    #    `-DUSE_SPEECHPLAYER:BOOL=OFF` stops the *link* but not the *compile* —
+    #    it gates only `target_link_libraries(espeak-ng PRIVATE speechPlayer)`.
+    #    speechWaveGenerator.cpp then fails to build:
+    #
+    #      error: reference to 'sample' is ambiguous
+    #
+    #    because espeak-ng declares its own `sample` and C++17's `<algorithm>`
+    #    brings in `std::sample`. Nothing here needs a speech *player* — piper
+    #    uses the library API — so the subdirectory is gated rather than
+    #    deleted, which keeps the upstream intent readable.
+    if grep -q '^[[:space:]]*add_subdirectory(speechPlayer)' "$_f"; then
+      sed -i 's|^\([[:space:]]*\)add_subdirectory(speechPlayer)|\1if (USE_SPEECHPLAYER)\n\1  add_subdirectory(speechPlayer)\n\1endif()|' "$_f"
+      if grep -q 'if (USE_SPEECHPLAYER)' "$_f"; then
+        echo "  gated speechPlayer behind USE_SPEECHPLAYER in $_f"
+        _found=1
+      else
+        echo "  FAILED to gate speechPlayer in $_f"
+      fi
     fi
   done
   [ "$_found" -eq 1 ]
@@ -211,15 +235,22 @@ report_failure() {
   exit 1
 }
 
+step "patching any espeak-ng left over from a previous attempt"
+# ExternalProject caches its download, so on a retry the tree is already on
+# disk and can be patched before the build rather than after a failed one. On a
+# first run there is nothing to patch yet, and the retry below handles it.
+patch_espeak_for_android || true
+
 step "building — the long one"
 # piper-phonemize compiles espeak-ng here and links Termux's onnxruntime rather
 # than downloading a glibc one. Watch for a `Downloading ... onnxruntime` line:
 # if it appears the patch did not take, and the result is a binary Android
 # cannot load.
 if ! build_once; then
-  if grep -qiE 'static-libstdc\+\+|unsupported option.*-static' "$BUILD_LOG" \
-     && patch_espeak_static_flags; then
-    step "espeak-ng wanted to static-link; patched, building again"
+  # Either espeak-ng arrived during this build and needs patching, or it failed
+  # for a reason the patches do not address. Only the former is worth a retry.
+  if patch_espeak_for_android; then
+    step "patched espeak-ng; building again"
     build_once || { tail -40 "$BUILD_LOG"; report_failure; }
   else
     tail -40 "$BUILD_LOG"
