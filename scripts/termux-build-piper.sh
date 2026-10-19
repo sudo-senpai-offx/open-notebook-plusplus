@@ -165,13 +165,67 @@ else
   fail "configure sanity"
 fi
 
+BUILD_LOG="$SRC/build.log"
+
+# espeak-ng static-links: `target_link_options(espeak-ng PRIVATE
+# "-static-libstdc++" "-static")`. bionic has no static libstdc++ and Termux's
+# clang rejects the flag, so the link dies at ~94% — *after* the dictionary data
+# has finished generating, which is what makes it look like it nearly worked.
+#
+# It cannot be patched before the build, because piper-phonemize fetches
+# espeak-ng as an ExternalProject and the download happens during the build,
+# not at configure time. So: build; if it fails on the static flags, patch what
+# was downloaded and build again. ExternalProject caches the download, so the
+# patch sticks and the second attempt does not re-fetch.
+patch_espeak_static_flags() {
+  _found=0
+  for _f in build/p/src/*/e/src/espeak_ng_external/src/libespeak-ng/CMakeLists.txt \
+           build/p/src/*/e/src/espeak_ng_external/src/CMakeLists.txt \
+           build/p/src/*/e/src/espeak_ng_external/CMakeLists.txt; do
+    [ -f "$_f" ] || continue
+    if grep -q 'static-libstdc++' "$_f"; then
+      sed -i 's/ "-static-libstdc++"//; s/ "-static"//' "$_f"
+      echo "  patched static link flags in $_f"
+      _found=1
+    fi
+  done
+  [ "$_found" -eq 1 ]
+}
+
+build_once() {
+  _status=0
+  ONNXRUNTIME_DIR="$ORT" cmake --build build --config Release -j"$JOBS" \
+    >"$BUILD_LOG" 2>&1 || _status=$?
+  return "$_status"
+}
+
+# Say what failed, not what make said. A nested ExternalProject reports several
+# make levels of `Error 2`; the compiler message that explains it is above, and
+# an earlier version piped to `tail` and lost exactly that.
+report_failure() {
+  echo
+  echo "!!! full log: $BUILD_LOG ($(wc -l < "$BUILD_LOG" | tr -d ' ') lines)"
+  echo "!!! first real errors:"
+  grep -n -m 8 -iE "error:|fatal error|undefined reference|cannot find|No such file" \
+    "$BUILD_LOG" | head -8 | sed 's/^/    /'
+  exit 1
+}
+
 step "building — the long one"
 # piper-phonemize compiles espeak-ng here and links Termux's onnxruntime rather
 # than downloading a glibc one. Watch for a `Downloading ... onnxruntime` line:
-# if it appears, the patch did not take, and the result is a binary Android
+# if it appears the patch did not take, and the result is a binary Android
 # cannot load.
-ONNXRUNTIME_DIR="$ORT" cmake --build build --config Release -j"$JOBS" 2>&1 | tail -150 \
-  || fail "build"
+if ! build_once; then
+  if grep -qiE 'static-libstdc\+\+|unsupported option.*-static' "$BUILD_LOG" \
+     && patch_espeak_static_flags; then
+    step "espeak-ng wanted to static-link; patched, building again"
+    build_once || { tail -40 "$BUILD_LOG"; report_failure; }
+  else
+    tail -40 "$BUILD_LOG"
+    report_failure
+  fi
+fi
 
 step "installing"
 cmake --install build || fail "install"

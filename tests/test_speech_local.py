@@ -904,8 +904,60 @@ class TestPiperBuildRoute:
         text = _read_script("termux-build-piper.sh")
         assert "piper_phonemize_external" in text
         assert "configure sanity" in text
-        # And it has to run before the build, not after it.
-        assert text.index("configure sanity") < text.index('fail "build"')
+        # And it has to run before the build starts, not after it. An earlier
+        # version of this script had no such check at all, and the cost of that
+        # was an hour of building before finding out the target was absent.
+        assert text.index("configure sanity") < text.index('step "building')
+
+    def test_it_patches_espeak_ngs_static_link_too(self):
+        """The same bionic problem as piper's, in a file that arrives later.
+
+        piper's own `-static-libgcc -static-libstdc++` is stripped, but
+        espeak-ng also static-links:
+
+            target_link_options(espeak-ng PRIVATE "-static-libstdc++" "-static")
+
+        and it arrives via piper-phonemize's ExternalProject, downloaded during
+        the build rather than at configure time — so patching it beforehand is
+        impossible and patching it afterwards is the only option. Skipping this
+        is what left the build dying at 94%, just after the dictionary data
+        finished generating, which looks like success right up until it stops.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert "patch_espeak_static_flags" in text
+        assert "static-libstdc++" in text
+        assert "espeak_ng_external" in text
+
+    def test_the_espeak_patch_only_fires_on_the_static_link_failure(self):
+        """A patch applied on any failure would paper over unrelated errors.
+
+        The retry is gated on the log actually mentioning the static flags. If
+        the build failed for some other reason, patching espeak-ng and building
+        again would burn another twenty minutes and produce a second, more
+        confusing failure.
+        """
+        text = _read_script("termux-build-piper.sh")
+        gate = text.split("if ! build_once; then", 1)[1].split("fi", 1)[0]
+        assert "grep -qiE" in gate
+        assert "static-libstdc" in gate
+        # The gate must consult the log, not its own optimism.
+        assert "$BUILD_LOG" in gate
+
+    def test_a_failed_build_reports_the_compiler_error_not_the_make_wrapper(self):
+        """Six levels of `make[N]: Error 2` and no reason is not a diagnosis.
+
+        The build log is captured whole and the first `error:` lines are
+        printed. Piping to `tail` — what an earlier version did — discarded
+        precisely the compiler message that explained the failure.
+        """
+        text = _read_script("termux-build-piper.sh")
+        assert 'BUILD_LOG="$SRC/build.log"' in text
+        assert "report_failure" in text
+        body = text.split("report_failure() {", 1)[1].split("\n}", 1)[0]
+        assert "error:" in body
+        assert "wc -l" in body
+        # And the whole log must be captured, not just the tail.
+        assert '>"$BUILD_LOG" 2>&1' in text
 
     def test_it_wants_the_c_library_not_the_python_bindings(self):
         """`python-onnxruntime` ships the wheel; piper links `libonnxruntime.so`.
