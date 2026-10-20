@@ -1258,3 +1258,34 @@ class TestTheUpdateStopsTheResidencySupervisor:
         and nobody would know."""
         source = _read_script("termux-update.sh")
         assert "residency supervisor survived SIGKILL" in source
+
+
+class TestARefusedConnectionIsRetried:
+    """A request that arrived before the supervisor was listening.
+
+    The stack launches the guest and the supervisor together, so a request in
+    that window gets "connection refused" - and the fallback is to carry on
+    with whatever model is loaded. That is the right fallback, but it means the
+    tier is silently wrong for that request, which is the failure this whole
+    feature exists to prevent.
+
+    A refusal is retried briefly. A timeout is NOT: a timeout means the
+    supervisor is busy loading a model, and retrying would only queue behind the
+    same work.
+    """
+
+    def test_a_refusal_is_retried(self):
+        source = (REPO / "open_notebook" / "residency" / "client.py").read_text()
+        body = source[source.index("async def select_model(") :]
+        body = body[: body.index("\n\n\n")]
+        assert "httpx.ConnectError" in body
+        assert "for attempt in range(3)" in body
+        assert "await asyncio.sleep(" in body
+
+    def test_a_timeout_is_not_retried(self):
+        """Retrying a timeout would queue behind the load it is waiting for."""
+        source = (REPO / "open_notebook" / "residency" / "client.py").read_text()
+        body = source[source.index("async def select_model(") :]
+        body = body[: body.index("\n\n\n")]
+        assert "httpx.ReadTimeout" not in body
+        assert "httpx.TimeoutException" not in body

@@ -20,6 +20,7 @@ success.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -189,28 +190,56 @@ async def select_model(role: str, variant: str) -> ResidencyResult:
     """
     if not variant:
         return ResidencyResult(ok=True, role=role)
-    try:
-        import httpx
+    # A *refused* connection is retried briefly, because the supervisor is a
+    # local process that may still be starting: the stack launches the guest and
+    # the supervisor together, and a request arriving in that window gets
+    # "connection refused" and silently keeps the wrong model.
+    #
+    # A timeout is NOT retried - that means the supervisor is busy loading a
+    # model, and retrying would only queue behind the same work.
+    import httpx
 
-        async with httpx.AsyncClient(timeout=timeout()) as client:
-            response = await client.post(
-                f"{supervisor_url()}/resident",
-                json={"role": role, "variant": variant},
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout()) as client:
+                response = await client.post(
+                    f"{supervisor_url()}/resident",
+                    json={"role": role, "variant": variant},
+                )
+            break
+        except httpx.ConnectError as exc:
+            last_exc = exc
+            if attempt < 2:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            logger.debug(
+                f"residency supervisor refused the connection for {role} after "
+                "3 attempts - it may not have started yet"
             )
-    except Exception as exc:  # noqa: BLE001 - unreachable supervisor is a hold
-        # An f-string, not %-style args. This project uses loguru, which does
-        # not format %-style arguments: the placeholders came out literally in
-        # the log, so the one line that says *why* the supervisor was
-        # unreachable said "%s" instead of the reason.
-        # The type is included because httpx's ReadTimeout has an empty
-        # str(): the message ended with a bare colon and named no cause.
-        logger.debug(
-            f"residency supervisor unreachable for {role}: {type(exc).__name__}: {exc}"
-        )
+            return ResidencyResult(
+                ok=False,
+                role=role,
+                error=f"supervisor unreachable: {type(exc).__name__}",
+            )
+        except Exception as exc:  # noqa: BLE001 - unreachable supervisor is a hold
+            # The type is included because httpx's ReadTimeout has an empty
+            # str(): the message ended with a bare colon and named no cause.
+            logger.debug(
+                f"residency supervisor unreachable for {role}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return ResidencyResult(
+                ok=False,
+                role=role,
+                error=f"supervisor unreachable: {type(exc).__name__}",
+            )
+    else:
+        assert last_exc is not None
         return ResidencyResult(
             ok=False,
             role=role,
-            error=f"supervisor unreachable: {type(exc).__name__}",
+            error=f"supervisor unreachable: {type(last_exc).__name__}",
         )
 
     if response.status_code == 409:
