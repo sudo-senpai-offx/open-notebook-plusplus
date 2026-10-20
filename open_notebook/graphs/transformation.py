@@ -1,7 +1,11 @@
+import os
+from typing import List
+
 from ai_prompter import Prompter
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
+from loguru import logger
 from typing_extensions import TypedDict
 
 from open_notebook.ai.provision import provision_langchain_model
@@ -14,7 +18,9 @@ from open_notebook.exceptions import (
 )
 from open_notebook.utils import clean_thinking_content
 from open_notebook.utils.error_classifier import classify_error
+from open_notebook.utils.long_document import split_for_context
 from open_notebook.utils.text_utils import extract_text_content
+from open_notebook.utils.token_utils import token_count
 
 
 class TransformationState(TypedDict):
@@ -22,6 +28,21 @@ class TransformationState(TypedDict):
     source: Source
     transformation: Transformation
     output: str
+
+
+def _map_output_tokens() -> int:
+    """How many tokens a *part* of a long document may write.
+
+    Small on purpose. A part is an intermediate, not the answer: the reduce
+    step writes the real one. Too generous and the map step costs as much as the
+    whole transformation, repeated once per part.
+    """
+    raw = os.getenv("OPEN_NOTEBOOK_TRANSFORMATION_MAP_TOKENS", "500")
+    try:
+        value = int(raw)
+        return value if value > 0 else 500
+    except ValueError:
+        return 500
 
 
 async def run_transformation(state: dict, config: RunnableConfig) -> dict:
@@ -56,10 +77,18 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
             data={**state, "instructions": instructions}
         )
         content_str = str(content) if content else ""
-        payload = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=content_str),
-        ]
+
+        # A document longer than the context is split, analysed in parts, and
+        # the parts combined. See open_notebook/utils/long_document.py for why
+        # this is not optional: the provider truncates silently, and the insight
+        # is then presented as covering the whole document when it covers only
+        # the first few thousand tokens of it.
+        chunks = split_for_context(content_str)
+        if len(chunks) > 1:
+            logger.info(
+                f"source is {token_count(content_str)} tokens, which does not fit "
+                f"the context: analysing in {len(chunks)} parts and combining"
+            )
         from open_notebook.utils.job_control import (
             get_current_command_id,
             report_progress_record,
@@ -67,6 +96,14 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
 
         cmd_id = get_current_command_id()
         await report_progress_record(cmd_id, progress=30, stage="loading_model")
+
+        # The payload is what the model is provisioned against. In the
+        # multi-part path it is the first part; the single-part path is the
+        # whole document, which is the same thing it has always been.
+        payload = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=chunks[0] if len(chunks) > 1 else content_str),
+        ]
 
         chain = await provision_langchain_model(
             str(payload),
@@ -77,7 +114,64 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
         await report_progress_record(cmd_id, progress=50, stage="model_ready")
 
         await report_progress_record(cmd_id, progress=60, stage="generating")
-        response = await chain.ainvoke(payload)
+
+        if len(chunks) > 1:
+            # Map: one pass per part, each producing a *short* analysis.
+            #
+            # The short output budget is the whole economics of this. Generation
+            # on this hardware runs at about 1.1 tokens per second while
+            # reading a prompt is nearly free, so a part that wrote a full-length
+            # summary would cost as much as the final answer - eighteen parts of
+            # seven hundred tokens each is three and a half hours for one
+            # source. A part that writes a couple of hundred tokens is minutes.
+            #
+            # The parts are then combined into one answer of the length the
+            # transformation actually calls for, by the reduce step below.
+            map_chain = await provision_langchain_model(
+                str(payload),
+                config.get("configurable", {}).get("model_id"),
+                "transformation",
+                max_tokens=_map_output_tokens(),
+            )
+            partials: List[str] = []
+            for index, chunk in enumerate(chunks):
+                await report_progress_record(
+                    cmd_id,
+                    progress=60 + int(25 * index / len(chunks)),
+                    stage=f"analysing_part_{index + 1}_of_{len(chunks)}",
+                )
+                part_prompt = Prompter(
+                    prompt_template="transformation/execute_part"
+                ).render(data={**state, "instructions": instructions, "content": chunk})
+                part = await map_chain.ainvoke(
+                    [
+                        SystemMessage(content=part_prompt),
+                        HumanMessage(content=chunk),
+                    ]
+                )
+                partials.append(extract_text_content(part))
+                logger.info(
+                    f"part {index + 1}/{len(chunks)} analysed: "
+                    f"{len(partials[-1])} characters"
+                )
+
+            # Reduce: one pass over the partials.
+            await report_progress_record(cmd_id, progress=88, stage="combining_parts")
+            combine_prompt = Prompter(prompt_template="transformation/combine").render(
+                data={
+                    **state,
+                    "instructions": instructions,
+                    "partials": "\n\n---\n\n".join(partials),
+                }
+            )
+            response = await chain.ainvoke(
+                [
+                    SystemMessage(content=combine_prompt),
+                    HumanMessage(content=""),
+                ]
+            )
+        else:
+            response = await chain.ainvoke(payload)
 
         # Provider adapters use different keys for the termination reason.
         # Check before saving: a nonempty answer can still be incomplete.
