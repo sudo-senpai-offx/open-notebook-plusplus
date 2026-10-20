@@ -80,6 +80,60 @@ mem_available_mb() {
   echo $(( ${_kb:-0} / 1024 ))
 }
 
+# ---------------------------------------------------------------------------
+# The language -> model policy
+#
+# Measured on this device, 10.58s of English audio per clip, four threads,
+# FLEURS ground truth, the language forced so the comparison is like for like:
+#
+#     language   small-q5_1 (181 MB)      large-v3-turbo-q5_0 (574 MB)
+#     en         CER 0.009  RTF 1.8       CER 0.000  RTF  9.3
+#     ja         CER 0.153  RTF 1.4       CER 0.016  RTF  7.3
+#     ta         CER 0.144  RTF 2.4       CER 0.109  RTF 13.0
+#     zh         CER 0.222  RTF 3.5       CER 0.000  RTF 20.2
+#     my         CER 0.836  RTF 14.6      CER 0.455  RTF 29.3
+#
+# Two things fall out of that.
+#
+# Mandarin is the one language where the *small* model is not merely less
+# accurate but *wrong*: CER 0.222 there means fluent Mandarin that is not what
+# was said. For a study app whose text is searched, a plausible wrong
+# transcript is worse than a slow one, so Mandarin gets the big model.
+#
+# Malay does not work on either tier - the model does not speak it, and large
+# still lands at CER 0.455 producing mixed-script noise. It is refused
+# explicitly rather than transcribed into gibberish, because a clear "not
+# supported" beats a transcript that is confidently wrong.
+#
+# Everything else takes the small model: it is five times faster and accurate
+# enough, and a 10-minute lecture goes from 93 minutes to 18.
+
+STT_LANG_LARGE="zh tw"
+
+# Languages the models do not speak. Refused, not mistranscribed.
+STT_LANG_UNSUPPORTED="my"
+
+stt_model_for_language() {
+  case "$1" in
+    my|ms|malay|"")
+      # Empty means "not declared", which is not the same as "Malay". The
+      # caller decides; here the small model is the safe default because it is
+      # the fast one and an unknown language is usually English.
+      ;;
+  esac
+  for _l in $STT_LANG_LARGE; do
+    [ "$1" = "$_l" ] && { echo "$HOME/gguf/ggml-large-v3-turbo-q5_0.bin"; return 0; }
+  done
+  echo "$HOME/gguf/ggml-small-q5_1.bin"
+}
+
+stt_language_supported() {
+  for _l in $STT_LANG_UNSUPPORTED; do
+    [ "$1" = "$_l" ] && return 1
+  done
+  return 0
+}
+
 pick_model() {
   _budget=$(($(mem_available_mb) - STT_RESERVE_MB))
   _picked=""; _picked_mb=0; _picked_name=""
@@ -122,7 +176,32 @@ pick_model() {
   STT_BUDGET_MB="$_budget"
 }
 
-if [ -z "$MODEL" ]; then
+# A language may be given as a second argument: `up zh`, `model-path zh`.
+# The app knows the language of the source it is transcribing, and the tier
+# follows from it - the phone owns the model files, so the phone owns the
+# policy.
+#
+# Parsed here rather than next to the case statement, because the model
+# selection below reads it and a script that uses a variable before it is set
+# gets an empty one - which silently means "the small model" and no error.
+STT_LANG="${2:-}"
+
+if [ -n "$STT_LANG" ] && ! stt_language_supported "$STT_LANG"; then
+  case "${1:-up}" in
+    up|model-path)
+      echo "[stt] language '$STT_LANG' is not supported" >&2
+      echo "        the multilingual models do not speak it: large-v3-turbo" >&2
+      echo "        still scores CER 0.455 on Malay, producing mixed-script" >&2
+      echo "        noise rather than a transcript." >&2
+      exit 3
+      ;;
+  esac
+fi
+
+if [ -n "$STT_LANG" ]; then
+  MODEL=$(stt_model_for_language "$STT_LANG")
+  STT_TIER_CHOSEN="lang:$STT_LANG"
+elif [ -z "$MODEL" ]; then
   pick_model
   if [ -z "$MODEL" ]; then
     echo "[stt] FATAL: no STT model fits. Available $(mem_available_mb) MB," \
@@ -272,6 +351,15 @@ vm_rss_kb() {
 # verb in termux-launch.sh / termux-embed.sh: the supervisor needs the size
 # before loading so a load that cannot fit is refused rather than attempted.
 model_path() {
+  if [ -n "$STT_LANG" ]; then
+    _m=$(stt_model_for_language "$STT_LANG")
+    if [ -f "$_m" ]; then
+      printf 'model=%s bytes=%s\n' "$_m" "$(wc -c <"$_m" | tr -d ' ')"
+    else
+      printf 'model=- bytes=0\n'
+    fi
+    return 0
+  fi
   if [ -f "$MODEL" ]; then
     printf 'model=%s bytes=%s\n' "$MODEL" "$(wc -c <"$MODEL" | tr -d ' ')"
   else
@@ -314,6 +402,7 @@ case "${1:-up}" in
       # running.
       _served=$(served_model)
       _want=$(basename "$MODEL")
+      # A language may ask for a different tier than the one running.
       if [ "$_served" = "$_want" ]; then
         echo "[stt] already up (pid $pid) port ${PORT} model $_served"
         exit 0

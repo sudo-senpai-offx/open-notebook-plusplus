@@ -354,6 +354,17 @@ class SourceCreate(BaseModel):
     file_path: Optional[str] = Field(None, description="File path for upload type")
     content: Optional[str] = Field(None, description="Text content for text type")
     title: Optional[str] = Field(None, description="Source title")
+    language: Optional[str] = Field(
+        None,
+        max_length=8,
+        description=(
+            "Language of the content, as a two-letter code (en, zh, ja, ta). "
+            "Set it for media: the speech model cannot be trusted to detect the "
+            "language of a short clip, and a declared language also selects the "
+            "model tier - Mandarin is wrong on the small model and exact on the "
+            "large one."
+        ),
+    )
     transformations: Optional[List[str]] = Field(
         default_factory=list,
         max_length=50,

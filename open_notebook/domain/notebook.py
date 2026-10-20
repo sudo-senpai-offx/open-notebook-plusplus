@@ -446,6 +446,13 @@ class Source(ObjectModel):
     table_name: ClassVar[str] = "source"
     asset: Optional[Asset] = None
     title: Optional[str] = None
+    #: The language of the content, as a two-letter code ("en", "zh", "ja",
+    #: "ta"). Set for media, where the model cannot be trusted to detect it:
+    #: whisper guesses, and on a short Tamil or Malay clip it guesses wrong
+    #: and emits mixed-script noise. A declared language also picks the
+    #: model tier - Mandarin is wrong at CER 0.222 on the small model and
+    #: exact on the large one.
+    language: Optional[str] = None
     topics: Optional[List[str]] = Field(default_factory=list)
     full_text: Optional[str] = None
     last_viewed_at: Optional[datetime] = None

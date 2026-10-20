@@ -236,7 +236,9 @@ async def _run(
     # value would have tested a contract that does not exist - and the first
     # version of this helper did exactly that, failing with an AttributeError
     # that read like a bug in the graph.
-    async def fake_try_stt(p: str, _cmd_id: Optional[str] = None) -> str:
+    async def fake_try_stt(
+        p: str, _cmd_id: Optional[str] = None, _language: str = ""
+    ) -> str:
         result = await fake_transcribe(p)
         return result.text
 
@@ -336,7 +338,9 @@ class TestSpeechFallback:
         async def fake_transcribe(_p, **_k):
             return speech.TranscriptionResult(ok=False, error="no speech")
 
-        async def fake_try_stt(_p: str, _cmd_id: Optional[str] = None) -> str:
+        async def fake_try_stt(
+            _p: str, _cmd_id: Optional[str] = None, _language: str = ""
+        ) -> str:
             return (await fake_transcribe(_p)).text
 
         monkeypatch.setattr(speech, "transcribe", fake_transcribe)
@@ -365,7 +369,9 @@ class TestSpeechFallback:
         async def fake_transcribe(_p, **_k):
             return speech.TranscriptionResult(ok=False, error="refused")
 
-        async def fake_try_stt(_p: str, _cmd_id: Optional[str] = None) -> str:
+        async def fake_try_stt(
+            _p: str, _cmd_id: Optional[str] = None, _language: str = ""
+        ) -> str:
             return (await fake_transcribe(_p)).text
 
         monkeypatch.setattr(speech, "transcribe", fake_transcribe)
@@ -439,7 +445,10 @@ class TestTranscriptionClient:
         """
         path = _write(tmp_path, "a.wav", b"RIFF\x00\x00\x00\x00WAVE")
 
-        async def refused(role: str):
+        async def refused(role: str, variant: str = ""):
+            # The variant is the language of the job, and it reaches the gate
+            # because the gate is what loads the model.
+            assert variant == "", f"unexpected variant {variant!r}"
             return residency.ResidencyResult(
                 ok=False, role=role, error="supervisor refused the load"
             )
@@ -656,9 +665,14 @@ class TestSupervisorSpeechRoles:
 
     def test_the_supervisor_only_calls_verbs_that_exist(self):
         for role in self._sup().ROLES.values():
-            for verb in (role.probe, role.load, role.unload, role.model_path):
-                assert verb[0] == "sh"
-                assert verb[-1] in (
+            for command in (role.probe, role.load, role.unload, role.model_path):
+                assert command[0] == "sh"
+                # A `{variant}` slot is an argument the supervisor fills in,
+                # not a verb: the launcher's verb is the one before it.
+                verb = command[-1]
+                if verb.startswith("{") and verb.endswith("}"):
+                    verb = command[-2]
+                assert verb in (
                     "chat-status",
                     "chat-up",
                     "chat-down",
@@ -1515,7 +1529,10 @@ class TestSttModelSelection:
         # launcher. Splitting on the guard lets the choice be read instead of
         # exiting.
         body = script.split("PORT=", 1)[0]
-        body = body.split('if [ -z "$MODEL" ]; then', 1)[0]
+        # Cut before the language block: it selects a model by language, and
+        # this harness is testing the tier *order* on its own.
+        body = body.split('if [ -n "$STT_LANG" ]; then', 1)[0]
+        body += '\nSTT_LANG=""\nMODEL=""\n'
         # Point the real reader at a fixture. Redefining `mem_available_mb`
         # instead would be silently ineffective: this body contains the real
         # definition, and a later definition wins.

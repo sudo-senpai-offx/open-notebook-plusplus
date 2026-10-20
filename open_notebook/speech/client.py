@@ -101,8 +101,14 @@ class SynthesisResult:
     held: bool = False
 
 
-async def _ensure(role: str) -> Optional[str]:
+async def _ensure(role: str, variant: str = "") -> Optional[str]:
     """Ask the supervisor for `role`; return an error string, or None if ready.
+
+    `variant` selects which model the role loads, when it has more than one.
+    For STT it is the language of the job, and the tier follows from it:
+    measured on the device, Mandarin at the small tier scores CER 0.222 -
+    fluent Mandarin that is not what was said - against CER 0.000 at the large
+    tier, for five times the time.
 
     Returns early when residency control is off, which is the PC's normal state
     and the one in which these servers are started by hand and simply reachable.
@@ -111,7 +117,7 @@ async def _ensure(role: str) -> Optional[str]:
 
     if not residency.enabled():
         return None
-    result = await residency.ensure_resident(role)
+    result = await residency.ensure_resident(role, variant)
     if result.ok:
         return None
     return result.hold_reason()
@@ -162,7 +168,7 @@ async def transcribe(
         return TranscriptionResult(ok=False, error=f"no such file: {path}")
 
     if ensure_resident:
-        held = await _ensure("stt")
+        held = await _ensure("stt", language or "")
         if held is not None:
             return TranscriptionResult(ok=False, error=held, held=True)
 

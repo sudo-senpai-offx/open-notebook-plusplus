@@ -594,7 +594,9 @@ class TestReaperOnlyReapsWhatItLoaded:
         body = source[start : source.index("\n    def release", start)]
         assert "state.owned = True" in body
         after_probe = body.index(
-            "state = self.probe(role)", body.index("run(role.load")
+            "state = self.probe(role)",
+            # The load goes through _command so the variant reaches it.
+            body.index("run(self._command(role.load"),
         )
         assert body.index("state.owned = True") > after_probe, (
             "claiming ownership before the load is verified means a failed load "
@@ -885,17 +887,22 @@ class TestSupervisorPolicyOwnership:
         has already had `start_llama` kill the embedder it meant to replace.
         """
         for role in sup.ROLES.values():
-            for verb in (role.probe, role.load, role.unload, role.model_path):
-                assert verb[0] == "sh"
-                assert verb[-1] in (
-                    "chat-status",
-                    "chat-up",
-                    "chat-down",
-                    "model-path",
-                    "probe",
-                    "up",
-                    "down",
-                )
+            for command in (role.probe, role.load, role.unload, role.model_path):
+                assert command[0] == "sh"
+                # A `{variant}` slot is an argument the supervisor fills in,
+                # not a verb: the launcher's verb is the one before it.
+                verb = command[-1]
+                if verb.startswith("{") and verb.endswith("}"):
+                    verb = command[-2]
+                    assert verb in (
+                        "chat-status",
+                        "chat-up",
+                        "chat-down",
+                        "model-path",
+                        "probe",
+                        "up",
+                        "down",
+                    )
 
 
 class TestShellContract:

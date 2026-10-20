@@ -132,8 +132,15 @@ class ResidencyResult:
         return f"residency:{self.role}:{detail}"
 
 
-async def ensure_resident(role: str) -> ResidencyResult:
+async def ensure_resident(role: str, variant: str = "") -> ResidencyResult:
     """Ask the supervisor to make `role` loaded.
+
+    `variant` selects which model the role loads, when it has more than one.
+    For STT it is the language of the job, and the tier follows from it:
+    measured on the device, Mandarin at the small tier scores CER 0.222 - fluent
+    Mandarin that is not what was said - against CER 0.000 at the large tier,
+    for five times the time. The supervisor reloads the role when the running
+    model is not the one the variant calls for.
 
     Never raises. Every failure mode - supervisor down, load refused for
     memory, load timed out - is an `ok=False` the caller holds on.
@@ -145,7 +152,10 @@ async def ensure_resident(role: str) -> ResidencyResult:
         import httpx
 
         async with httpx.AsyncClient(timeout=timeout()) as client:
-            response = await client.post(f"{base_url()}/resident", json={"role": role})
+            response = await client.post(
+                f"{base_url()}/resident",
+                json={"role": role, "variant": variant},
+            )
     except Exception as exc:  # noqa: BLE001 - unreachable supervisor is a hold
         logger.debug(f"residency supervisor unreachable for {role}: {exc}")
         return ResidencyResult(

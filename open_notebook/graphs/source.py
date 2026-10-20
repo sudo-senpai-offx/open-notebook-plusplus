@@ -341,7 +341,9 @@ def _is_media(file_path: str | None) -> bool:
     return any(head.startswith(sig) for sig in _MEDIA_SIGNATURES)
 
 
-async def _try_stt(file_path: str, cmd_id: str | None = None) -> str:
+async def _try_stt(
+    file_path: str, cmd_id: str | None = None, language: str = ""
+) -> str:
     """Transcribe a media file with the local speech server.
 
     Returns empty string rather than raising, for the same reason `_try_ocr`
@@ -354,7 +356,12 @@ async def _try_stt(file_path: str, cmd_id: str | None = None) -> str:
 
     if cmd_id:
         await report_progress_record(cmd_id, progress=20, stage="transcribing")
-    result = await transcribe(file_path)
+    # The declared language, when there is one. It reaches both the model and
+    # the residency gate, because the tier follows from it: Mandarin is wrong
+    # at CER 0.222 on the small model and exact on the large one, for five
+    # times the time. Without a declared language the model guesses, and on
+    # Tamil and Malay it guesses wrong and emits mixed-script noise.
+    result = await transcribe(file_path, language=language or None)
     if not result.ok:
         if result.held:
             # A residency hold means the model is loaded but the device is
@@ -437,6 +444,7 @@ async def _extract_with_text_engine(
     config_kwargs: dict,
     url: str,
     file_path: str | None,
+    language: str = "",
 ):
     """Run content-core, then read whatever only the figures contain.
 
@@ -524,7 +532,7 @@ async def _extract_with_text_engine(
         and not processed.content.strip()
     ):
         content_state["_stt_attempted"] = True
-        transcript = await _try_stt(file_path, cmd_id)
+        transcript = await _try_stt(file_path, cmd_id, language)
         if transcript.strip():
             processed.content = transcript
         elif core_error is not None:
@@ -725,8 +733,11 @@ async def content_process(state: SourceState) -> dict:
         processed = ExtractionOutput(content=content_state["ocr_text"], title="")
         await report_progress_record(cmd_id, progress=35, stage="extraction_done")
     else:
+        # The source's declared language, when it has one. It decides the
+        # model tier and stops the model guessing - see _try_stt.
+        _lang = getattr(state.get("source"), "language", "") or ""
         processed = await _extract_with_text_engine(
-            cmd_id, content_state, config, config_kwargs, url, file_path
+            cmd_id, content_state, config, config_kwargs, url, file_path, _lang
         )
 
     # Since content-core 2.2, empty content means the source was genuinely

@@ -710,3 +710,97 @@ class TestFixtureBuilder:
         source = BUILDER.read_text()
         assert "tarfile.open" in source
         assert "extractall" not in source
+
+
+class TestTheTierFollowsTheLanguage:
+    """The policy, and the four layers it has to travel through.
+
+    Mandarin at the small tier is CER 0.222 — fluent Mandarin that is not what
+    was said. For a study app whose text is searched, that is a correctness
+    problem, not a quality one. The large tier is exact, for five times the
+    time. So the tier follows the language, and the language has to reach the
+    phone through four layers to get there.
+    """
+
+    def test_the_launcher_owns_the_policy(self):
+        """The model files are on the phone, so the phone owns the policy.
+
+        Putting it in the app would mean the container deciding which of the
+        phone's files to load.
+        """
+        text = _read_script("termux-stt.sh")
+        assert "stt_model_for_language()" in text
+        assert 'STT_LANG_LARGE="zh tw"' in text, (
+            "Mandarin and Taiwanese Mandarin need the large tier; the small one "
+            "is wrong, not merely less accurate"
+        )
+
+    def test_malay_is_refused_rather_than_mistranscribed(self):
+        """The models do not speak it: CER 0.455 on the large tier, producing
+        mixed-script noise. A clear refusal beats a confident wrong answer."""
+        text = _read_script("termux-stt.sh")
+        assert 'STT_LANG_UNSUPPORTED="my"' in text
+        assert "is not supported" in text
+        assert "exit 3" in text, "an unsupported language must fail loudly"
+
+    def test_the_launcher_takes_the_language_as_an_argument(self):
+        text = _read_script("termux-stt.sh")
+        assert 'STT_LANG="${2:-}"' in text
+        # Both the load and the size lookup need it: the supervisor sizes the
+        # model before loading it.
+        assert "model-path" in text
+
+    def test_the_language_is_parsed_before_it_is_used(self):
+        """A variable used before it is set is empty, and empty silently means
+        "the small model" with no error."""
+        text = _read_script("termux-stt.sh")
+        assert text.index('STT_LANG="${2:-}"') < text.index(
+            'stt_model_for_language "$STT_LANG"'
+        )
+
+    def test_the_supervisor_passes_the_variant_through(self):
+        text = _read_script("termux-supervisor.py")
+        assert 'def ensure(self, name: str, variant: str = "")' in text
+        assert "self._command(role.load, variant)" in text, (
+            "the load command must carry the variant, or the tier never changes"
+        )
+        assert "self.model_bytes(role, variant)" in text, (
+            "the size check must be for the model that will be loaded"
+        )
+
+    def test_the_supervisor_reloads_when_the_wrong_model_is_serving(self):
+        """'The server is up' is not the same question as 'the server is up with
+        the right model'."""
+        text = _read_script("termux-supervisor.py")
+        assert "_want != state.model" in text
+        assert "self.release(name)" in text
+
+    def test_the_residency_client_carries_the_variant(self):
+        source = (REPO / "open_notebook" / "residency" / "client.py").read_text()
+        assert '"variant": variant' in source, (
+            "the variant must reach the supervisor, or the tier never changes"
+        )
+
+    def test_the_speech_client_passes_the_language_to_the_gate(self):
+        """The gate is what loads the model, so the language has to reach it —
+        not just the request."""
+        source = (REPO / "open_notebook" / "speech" / "client.py").read_text()
+        assert '_ensure("stt", language or "")' in source
+
+    def test_a_source_can_declare_its_language(self):
+        from open_notebook.domain.notebook import Source
+
+        assert "language" in Source.model_fields
+
+    def test_the_api_accepts_a_language(self):
+        from api.models import SourceCreate
+
+        assert "language" in SourceCreate.model_fields
+
+    def test_the_extraction_path_threads_it_to_the_transcription(self):
+        source = (REPO / "open_notebook" / "graphs" / "source.py").read_text()
+        assert "_try_stt(file_path, cmd_id, language)" in source, (
+            "the declared language must reach the transcription, or the model "
+            "guesses and produces mixed-script noise on Tamil and Malay"
+        )
+        assert "language=language or None" in source

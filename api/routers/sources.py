@@ -239,6 +239,10 @@ def parse_source_form_data(
     url: Optional[str] = Form(None),
     content: Optional[str] = Form(None),
     title: Optional[str] = Form(None),
+    # The language of the content. Set it for media: the speech model guesses
+    # otherwise, and on a short Tamil or Malay clip it guesses wrong and
+    # produces mixed-script noise rather than a transcript.
+    language: Optional[str] = Form(None),
     transformations: Optional[str] = Form(None),  # JSON string of transformation IDs
     embed: str = Form("false"),  # Accept as string, convert to bool
     delete_source: str = Form("false"),  # Accept as string, convert to bool
@@ -286,6 +290,7 @@ def parse_source_form_data(
             url=url,
             content=content,
             title=title,
+            language=language,
             file_path=None,  # Will be set later if file is uploaded
             transformations=transformations_list,
             embed=embed_bool,
@@ -662,6 +667,9 @@ async def _create_source_async_path(
         title=source_data.title or "Processing...",
         topics=source_data.topics or [],
         asset=source_asset,
+        # The declared language. It decides which speech model the phone
+        # loads, and stops the model guessing - see speech/client.py.
+        language=source_data.language,
     )
     await source.save()
 

@@ -100,6 +100,17 @@ class Role:
     #: onb-cpu. Charged against the shared CPU budget by the guest's admission
     #: gate so CPU and memory are held alike.
     threads: int = 2
+    #: A variant changes *which* model the role loads. The guest asks for the
+    #: role by name, and for STT it also says what language the job is in,
+    #: because the tier follows from the language: measured on the device,
+    #: Mandarin at the small tier scores CER 0.222 - fluent Mandarin that is
+    #: not what was said - against CER 0.000 at the large tier, for five times
+    #: the time. The variant is the language, and the launcher owns the
+    #: language-to-model policy because the model files are on the phone.
+    #:
+    #: Declared last because a dataclass cannot have a defaulted field before a
+    #: required one, and the fields above it are required.
+    variant_arg: Optional[str] = None
 
 
 ROLES: Dict[str, Role] = {
@@ -136,9 +147,11 @@ ROLES: Dict[str, Role] = {
     "stt": Role(
         name="stt",
         probe=["sh", f"{BIN}/onb-stt", "probe"],
-        load=["sh", f"{BIN}/onb-stt", "up"],
+        # The language is appended, so `up zh` loads the tier Mandarin needs
+        # and `up` with no language keeps the current default.
+        load=["sh", f"{BIN}/onb-stt", "up", "{variant}"],
         unload=["sh", f"{BIN}/onb-stt", "down"],
-        model_path=["sh", f"{BIN}/onb-stt", "model-path"],
+        model_path=["sh", f"{BIN}/onb-stt", "model-path", "{variant}"],
         port=8090,
         priority=60,
         max_concurrent_jobs=1,
@@ -412,8 +425,19 @@ class Manager:
             state.loaded_at = time.time()
         return state
 
-    def model_bytes(self, role: Role) -> int:
-        code, out, _ = run(role.model_path, PROBE_TIMEOUT)
+    def _command(self, template: List[str], variant: str = "") -> List[str]:
+        """A role command with the variant substituted.
+
+        The variant is dropped when it is empty, so `up` with no language keeps
+        the launcher's own default rather than passing an empty argument that
+        the launcher would read as a language named "".
+        """
+        if not variant:
+            return list(template)
+        return [part.replace("{variant}", variant) for part in template]
+
+    def model_bytes(self, role: Role, variant: str = "") -> int:
+        code, out, _ = run(self._command(role.model_path, variant), PROBE_TIMEOUT)
         if code != 0:
             return 0
         raw = parse_kv(out).get("bytes", "0")
@@ -499,14 +523,35 @@ class Manager:
             )
         return True, ""
 
-    def ensure(self, name: str) -> Dict[str, Any]:
-        """Make `name` resident. Idempotent, and serialised across roles."""
+    def ensure(self, name: str, variant: str = "") -> Dict[str, Any]:
+        """Make `name` resident. Idempotent, and serialised across roles.
+
+        `variant` selects the model when the role has more than one - the
+        language, for STT. A role already serving the *wrong* variant is
+        unloaded and reloaded, because "the server is up" is not the same
+        question as "the server is up with the right model".
+        """
         role = ROLES.get(name)
         if role is None:
             return {"ok": False, "role": name, "error": f"unknown role {name!r}"}
 
         with self._lock:
             state = self.probe(role)
+
+            # Already serving, but with a different model than this job needs?
+            # The probe already parses `model=`, so the answer is available.
+            if state.serving and variant and role.variant_arg:
+                _code, _out, _ = run(
+                    self._command(role.model_path, variant), PROBE_TIMEOUT
+                )
+                _want = parse_kv(_out).get("model", "")
+                if _want and _want != state.model:
+                    # The method is `release` — it unloads and reports. There is
+                    # no `unload`, and calling one would have raised at exactly
+                    # the moment a tier change was needed.
+                    self.release(name)
+                    state = self.probe(role)
+
             # Admission is about `serving`, not `resident`.
             #
             # A server whose weights are in zram will still answer a request -
@@ -530,14 +575,14 @@ class Manager:
                     "model": state.model,
                 }
 
-            disk = self.model_bytes(role)
+            disk = self.model_bytes(role, variant)
             fits, why = self.fits(role, disk)
             if not fits:
                 state.error = why
                 return {"ok": False, "role": name, "loaded": False, "error": why}
 
             started = time.monotonic()
-            code, out, err = run(role.load, LOAD_TIMEOUT)
+            code, out, err = run(self._command(role.load, variant), LOAD_TIMEOUT)
             # Re-probe rather than trusting the exit code. The launchers have
             # been wrong about success before - `down` reported stopping a
             # server that was still holding its port - and the only trustworthy
@@ -702,7 +747,11 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(role, str):
             self._send(400, {"ok": False, "error": "role must be a string"})
             return
-        result = MANAGER.ensure(role)
+        # The variant picks which model the role loads — the language, for STT.
+        variant = body.get("variant") or ""
+        if not isinstance(variant, str):
+            variant = ""
+        result = MANAGER.ensure(role, variant)
         self._send(200 if result.get("ok") else 409, result)
 
     def do_DELETE(self) -> None:  # noqa: N802
