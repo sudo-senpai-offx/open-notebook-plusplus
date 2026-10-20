@@ -270,7 +270,7 @@ class TestTheRunIsBounded:
         that actually aborts the request, so it has to be passed through."""
         source = SUITE.read_text()
         stt_body = source[source.index("def run_stt(") : source.index("def run_tts(")]
-        assert "transcribe(path, timeout=budget)" in stt_body
+        assert "transcribe(path, timeout=budget" in stt_body
         assert "clip_timeout(" in stt_body
 
     def test_the_deadline_scales_with_audio_length(self, suite):
@@ -574,6 +574,38 @@ class TestTheSttLauncherRestartsOnAModelChange:
         text = _read_script("termux-stt.sh")
         up_arm = text[text.index("  up)") :]
         assert "already up" in up_arm
+
+
+class TestTheSuiteTellsTheModelTheLanguage:
+    """Without the language, the CER measures a script mismatch, not accuracy.
+
+    The first Tamil run scored CER 1.010 with a hypothesis of Latin-script
+    phonetics - "Bushin Pradinithi Petsalar Garden" - against a Tamil-script
+    reference. Whisper had detected the wrong language and transliterated, and
+    comparing Tamil characters to Latin ones by character gives a CER near 1.0
+    whether or not the audio was understood at all.
+
+    The app's own client sends the field; the suite did not, so it was
+    measuring something other than what it claimed.
+    """
+
+    def test_transcribe_accepts_and_sends_a_language(self):
+        source = SUITE.read_text()
+        assert 'fields["language"] = language' in source
+        assert "language=lang" in source, (
+            "each clip must be transcribed in its own language"
+        )
+
+    def test_the_language_comes_from_the_manifest(self):
+        source = SUITE.read_text()
+        body = source[source.index("def run_stt(") : source.index("def run_tts(")]
+        assert 'lang = manifest["locales"][clip["locale"]]["lang"]' in body
+
+    def test_it_is_the_same_endpoint_the_app_uses(self):
+        """The suite must exercise the path the product uses, or it is testing
+        something else."""
+        source = SUITE.read_text()
+        assert "/v1/audio/transcriptions" in source
 
 
 class TestFixtureBuilder:

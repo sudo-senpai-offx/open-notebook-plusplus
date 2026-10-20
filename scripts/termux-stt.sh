@@ -107,8 +107,15 @@ pick_model() {
     [ -f "$_path" ] || continue
     _mb=$(( $(wc -c < "$_path" | tr -d ' ') / 1024 / 1024 ))
     [ "$_mb" -le "$_budget" ] || continue
-    [ "$_mb" -gt "$_picked_mb" ] || continue
+    # The FIRST tier that fits wins. The order above *is* the preference.
+    #
+    # A "keep the largest" guard was left over from when the order was
+    # largest-first, and it quietly defeated the new order: the list was
+    # reordered to put the fast model first, and the guard then went on to
+    # pick the biggest one that fitted. The shipped default stayed exactly
+    # what it had been, and nothing said so.
     _picked="$_path"; _picked_mb=$_mb; _picked_name=$_name
+    break
   done
   MODEL="$_picked"
   STT_TIER_CHOSEN="$_picked_name"

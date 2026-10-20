@@ -44,6 +44,13 @@ CPU_MAX_DECODE_THREADS=4
 # shares the budget rather than owning it.
 CPU_MAX_EMBED_THREADS=2
 
+# The ceiling for transcription, which is a different class from embedding: a
+# transcription is one long serial decode, so it wants every core it can get,
+# while an embedder is many short parallel jobs that scale differently.
+# It was clamped by the embedder's ceiling, which silently halved it back to
+# two threads and made the whole change invisible.
+CPU_MAX_STT_THREADS="${CPU_MAX_STT_THREADS:-4}"
+
 # Where the topology is read from. Overridable so the derivation can be tested
 # against a simulated floor without a second implementation - the numbers here
 # are the ones that decide how hard the phone works, and a derivation that can
@@ -158,7 +165,7 @@ cpu_threads() {
       # realtime.
       _t=$_budget
       [ "$_t" -ge 1 ] || _t=1
-      [ "$_t" -le "$CPU_MAX_EMBED_THREADS" ] || _t="$CPU_MAX_EMBED_THREADS"
+      [ "$_t" -le "$CPU_MAX_STT_THREADS" ] || _t="$CPU_MAX_STT_THREADS"
       ;;
     tts)
       # Piper already runs faster than realtime (RTF 0.43-0.55 on this phone),

@@ -1380,6 +1380,51 @@ class TestBenchmarkArithmetic:
         assert "$wall/10" not in text, "the wall time is already in seconds"
 
 
+class TestTheTierOrderIsHonoured:
+    """The preference order was reordered and then silently ignored.
+
+    The tier list was changed to put the fast 181 MB model first, but a
+    leftover "keep the largest that fits" guard went on choosing the biggest
+    one that fitted. The shipped default stayed exactly what it had been -
+    547 MB, five times slower on this hardware - and nothing said so.
+
+    The order *is* the preference, so the first tier that fits wins.
+    """
+
+    def test_the_first_tier_that_fits_wins(self):
+        text = _read_script("termux-stt.sh")
+        lines = text.split("\n")
+        start = next(n for n, l in enumerate(lines) if l.startswith("pick_model()"))
+        # Closed by a brace at column 0; this function does not have an indented one.
+        end = next(
+            index for index in range(start + 1, len(lines)) if lines[index] == "}"
+        )
+        body = "\n".join(lines[start : end + 1])
+        # A "keep the largest" guard defeats a preference order.
+        assert '"_mb" -gt "$_picked_mb"' not in body, (
+            "a keep-the-largest guard defeats the preference order; the first "
+            "tier that fits must win"
+        )
+        assert "break" in body, "the loop must stop at the first tier that fits"
+
+    def test_stt_is_not_clamped_by_the_embedder_ceiling(self):
+        """STT was clamped by `CPU_MAX_EMBED_THREADS`, which is 2.
+
+        That silently halved the thread count back to two and made the whole
+        change invisible: the launcher printed "2 threads" and the benchmark
+        said four was nearly twice as fast.
+        """
+        text = _read_script("termux-cpu.sh")
+        stt = text[text.index("    stt)") :]
+        stt = stt[: stt.index(";;")]
+        assert "CPU_MAX_EMBED_THREADS" not in stt, (
+            "STT is a different class from embedding and must have its own "
+            "ceiling; the embedder's clamps it back to two threads"
+        )
+        assert "CPU_MAX_STT_THREADS" in stt
+        assert "CPU_MAX_STT_THREADS" in text, "the ceiling must be declared"
+
+
 class TestSttModelSelection:
     """The STT model is chosen from free RAM, because it cannot be a constant.
 
@@ -1491,13 +1536,17 @@ class TestSttModelSelection:
 
         # Thresholds are chosen to land between tiers, so each case exercises a
         # different branch rather than the same one three times. Budget is
-        # MemAvailable/1024 minus the 600 MB reserve:
-        #   6000000 kB -> 5859 MB, budget 5259 -> large (547) fits
-        #   1000000 kB ->  976 MB, budget  376 -> large no, small (181) fits
-        #    700000 kB ->  683 MB, budget   83 -> small no, base_en (56) fits
-        assert "ggml-large-v3-turbo-q5_0.bin|large" in choose("6000000")
+        # MemAvailable/1024 minus the 600 MB reserve. The order is the
+        # preference, and the first tier that fits wins:
+        #   6000000 kB -> 5859 MB, budget 5259 -> small (181) fits first
+        #   1000000 kB ->  976 MB, budget  376 -> small fits first
+        #    700000 kB ->  683 MB, budget   83 -> small (181) no, base (58) yes
+        #    300000 kB ->  292 MB, budget -308 -> nothing fits at all
+        assert "ggml-small-q5_1.bin|small" in choose("6000000")
         assert "ggml-small-q5_1.bin|small" in choose("1000000")
-        assert "ggml-base.en-q5_1.bin|base_en" in choose("700000")
+        assert "ggml-base-q5_1.bin|base" in choose("700000")
+        # And with nothing fitting, no model is chosen rather than a wrong one.
+        assert choose("300000").strip() == "|"
 
     def test_the_fetcher_verifies_byte_counts_rather_than_existence(self):
         """The lesson from the truncated piper voice, pinned.
@@ -1559,6 +1608,7 @@ def _fake_home() -> str:
     sizes = {
         "ggml-large-v3-turbo-q5_0.bin": 574041195,
         "ggml-small-q5_1.bin": 190085487,
+        "ggml-base-q5_1.bin": 59707625,
         "ggml-base.en-q5_1.bin": 59707625,
     }
     gguf = os.path.join(home, "gguf")

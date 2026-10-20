@@ -271,13 +271,32 @@ def post_json(url: str, payload: dict, timeout: int = 300) -> tuple[int, bytes]:
         return 0, str(exc).encode()
 
 
-def transcribe(path: Path, model: str = "", timeout: int = 300) -> tuple[int, str]:
-    """Returns (status, text). A status of 0 means the transport itself failed."""
+def transcribe(
+    path: Path, model: str = "", timeout: int = 300, language: str = ""
+) -> tuple[int, str]:
+    """Returns (status, text). A status of 0 means the transport itself failed.
+
+    `language` is the expected language, and it matters more than it looks.
+    Without it whisper detects the language itself, and on a short Tamil or
+    Malay clip it guesses wrong: the first Tamil run scored CER 1.010 with a
+    transcript of Latin-script phonetics ("Bushin Pradinithi Petsalar Garden")
+    against a Tamil-script reference. That is not a transcription failure - it
+    is a *script* mismatch, and comparing Tamil characters to Latin ones by
+    character gives a CER near 1.0 whether or not the audio was understood.
+
+    The app's own client already sends this field; the suite did not, so it
+    was measuring something other than what it claimed.
+    """
+    fields: dict[str, str] = {}
+    if model:
+        fields["model"] = model
+    if language:
+        fields["language"] = language
     status, body = post_multipart(
         f"{STT_URL}/v1/audio/transcriptions",
         "file",
         path,
-        {"model": model} if model else None,
+        fields or None,
         timeout=timeout,
     )
     if status != 200:
@@ -504,7 +523,7 @@ def run_stt(
         else:
             began = time.monotonic()
             try:
-                status, text = transcribe(path, timeout=budget)
+                status, text = transcribe(path, timeout=budget, language=lang)
             except (TimeoutError, OSError, ValueError) as exc:
                 # A read timeout surfaces as a transport failure while the server
                 # is still chewing on the clip. Both facts are recorded: the
