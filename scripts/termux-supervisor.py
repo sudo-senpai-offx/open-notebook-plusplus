@@ -156,6 +156,12 @@ ROLES: Dict[str, Role] = {
         priority=60,
         max_concurrent_jobs=1,
         threads=2,
+        # This role has variants: the language decides the model. Without this
+        # set, the supervisor skipped the "already serving, but with the wrong
+        # model" branch entirely, so the first request chose its tier and every
+        # later one inherited it. Mandarin loaded the 547 MB model and English
+        # then used it too - right once, and silently wrong after.
+        variant_arg="language",
     ),
     "tts": Role(
         name="tts",
@@ -545,7 +551,12 @@ class Manager:
                     self._command(role.model_path, variant), PROBE_TIMEOUT
                 )
                 _want = parse_kv(_out).get("model", "")
-                if _want and _want != state.model:
+                # `model-path` prints a full path and the probe prints a
+                # basename, so comparing them as strings says they always
+                # differ - and every call with a variant would reload the model
+                # even when it was already the right one.
+                _want_name = os.path.basename(_want) if _want else ""
+                if _want_name and _want_name != state.model:
                     # The method is `release` — it unloads and reports. There is
                     # no `unload`, and calling one would have raised at exactly
                     # the moment a tier change was needed.

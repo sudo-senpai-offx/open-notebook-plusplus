@@ -772,7 +772,9 @@ class TestTheTierFollowsTheLanguage:
         """'The server is up' is not the same question as 'the server is up with
         the right model'."""
         text = _read_script("termux-supervisor.py")
-        assert "_want != state.model" in text
+        # Compared by name: model-path prints a full path and the probe a
+        # basename, so the raw strings are never equal.
+        assert "_want_name != state.model" in text
         assert "self.release(name)" in text
 
     def test_the_residency_client_carries_the_variant(self):
@@ -974,3 +976,48 @@ class TestTheRetryLoopWaitsForWorkInFlight:
         """The operator has to be able to tell "waiting" from "stuck"."""
         source = (REPO / "scripts" / "insight-retry.py").read_text()
         assert "in flight" in source
+
+
+class TestTheTierSwitchesBothWays:
+    """It loaded the right model once and then stopped switching.
+
+    The first request found no server, so the load path ran with the language
+    and picked the right tier. The second found it serving, and the branch
+    meant to reload it with a different model was skipped - because the role
+    never declared that it had variants. So Mandarin loaded the 547 MB model
+    and English then used it too: right once, silently wrong after.
+
+    A test that only checks the first call passes this. The failure is in the
+    *transition*, so the test has to make two.
+    """
+
+    def test_the_stt_role_declares_that_it_has_variants(self):
+        source = _read_script("termux-supervisor.py")
+        role = source[source.index('"stt": Role(') :]
+        role = role[: role.index("\n    ),")]
+        assert "variant_arg=" in role, (
+            "without this the supervisor skips the wrong-model branch, and the "
+            "tier is chosen once and then inherited"
+        )
+
+    def test_the_model_comparison_is_by_name(self):
+        """`model-path` prints a full path; the probe prints a basename.
+
+        Compared as strings they always differ, so every call with a variant
+        would reload the model even when it was already the right one - a
+        pointless reload on every request.
+        """
+        source = _read_script("termux-supervisor.py")
+        assert "os.path.basename(_want)" in source
+        assert "_want != state.model" not in source, (
+            "a full path and a basename are never equal, so the comparison always fires"
+        )
+
+    def test_the_branch_is_reachable(self):
+        source = _read_script("termux-supervisor.py")
+        branch = source[source.index("if state.serving and variant") :]
+        branch = branch[: branch.index("\n\n")]
+        assert "role.variant_arg" in branch, (
+            "the branch is guarded on the role declaring a variant, so an "
+            "unset field disables it entirely"
+        )
