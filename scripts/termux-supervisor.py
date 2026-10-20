@@ -789,6 +789,22 @@ def main() -> int:
         f"idle={idle_seconds()}s",
         flush=True,
     )
+    # Serve *before* probing the roles.
+    #
+    # The socket is bound above, but nothing accepts on it until
+    # `serve_forever` runs - and the role probes below are slow: four roles,
+    # each a shell command with an eight-second timeout plus a model-size
+    # lookup. So for that window the port is bound and silent, and a client
+    # that connects gets a connection nobody answers.
+    #
+    # The launcher waits fifteen seconds for this to come up, gives up, and
+    # reports that the per-language model tier will not work - which is what
+    # happened on the device. The probes are informational startup output;
+    # they must not stand between the supervisor being reachable and the
+    # thing that is waiting to reach it.
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+
     for role in sorted(ROLES, key=lambda n: ROLES[n].priority):
         state = MANAGER.probe(ROLES[role])
         state.disk_bytes = MANAGER.model_bytes(ROLES[role])
@@ -800,11 +816,13 @@ def main() -> int:
             flush=True,
         )
     try:
-        server.serve_forever()
+        while not MANAGER._stop.is_set():
+            MANAGER._stop.wait(1.0)
     except KeyboardInterrupt:
         pass
     finally:
         MANAGER._stop.set()
+        server.shutdown()
     return 0
 
 

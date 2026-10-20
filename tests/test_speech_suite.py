@@ -886,3 +886,57 @@ class TestTheTierIsReachableAtRuntime:
             "select_model must not short-circuit on the residency flag; that is "
             "the whole reason it is a separate entry point"
         )
+
+
+class TestTheSupervisorIsReachableWhenItSaysItIs:
+    """A 25-second window where the port is bound and nobody answers.
+
+    The supervisor bound its socket, then probed all four roles — each a shell
+    command with an eight-second timeout, plus a model-size lookup — and only
+    then called `serve_forever`. So for that whole window the port was bound
+    and silent. The launcher waits fifteen seconds for it to come up, gives up,
+    and reports that the per-language model tier will not work.
+
+    Measured with probes that take three seconds each, the way they do on a
+    phone: the old code answered /health after 25.05 seconds, the new code
+    after 0.27. The probes are informational startup output; they must not
+    stand between the supervisor being reachable and the thing waiting to
+    reach it.
+
+    And a second, independent bug: the launcher health-checked `/state`, which
+    probes every role, instead of `/health`, which is a constant. Even with the
+    supervisor serving, the check could not pass in the three seconds it allowed.
+    """
+
+    def test_the_supervisor_serves_before_it_probes(self):
+        text = _read_script("termux-supervisor.py")
+        serve = text.index("serving = threading.Thread(target=server.serve_forever")
+        probe = text.index("state = MANAGER.probe(ROLES[role])")
+        assert serve < probe, (
+            "the supervisor must start serving before it probes the roles, or the "
+            "port is bound and silent for as long as the probes take"
+        )
+
+    def test_the_launcher_health_checks_the_constant_endpoint(self):
+        text = _read_script("termux-launch.sh")
+        assert "/health" in text
+        # /state probes every role; it is not a health check.
+        start = text[text.index("start_residency()") :]
+        start = start[: start.index("\n}")]
+        # Code, not prose: the function's own comment names /state in order to
+        # explain why it is not used.
+        code = "\n".join(
+            line for line in start.splitlines() if not line.lstrip().startswith("#")
+        )
+        assert "/state" not in code, (
+            "/state probes every role and takes far longer than a health check "
+            "may; /health is the constant one"
+        )
+        assert "/health" in code
+
+    def test_the_health_endpoint_is_the_constant_one(self):
+        """It must not probe anything - it is what a caller polls."""
+        text = _read_script("termux-supervisor.py")
+        handler = text[text.index('elif path == "/health":') :]
+        handler = handler[: handler.index("\n")]
+        assert "probe" not in handler, "the health endpoint must not probe the roles"

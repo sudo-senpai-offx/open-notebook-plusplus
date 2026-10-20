@@ -347,7 +347,11 @@ kill_stragglers() {
 start_residency() {
   _sup="$HOME/bin/onb-residency"
   [ -f "$_sup" ] || return 0
-  if curl -sf -m 3 http://127.0.0.1:8099/state >/dev/null 2>&1; then
+  # /health, not /state. /state probes every role, and each probe is a shell
+  # command with an eight-second timeout - so on a phone it takes far longer
+  # than a health check should, and the answer arrives after the caller has
+  # already given up. /health is a constant.
+  if curl -sf -m 3 http://127.0.0.1:8099/health >/dev/null 2>&1; then
     echo "[onb] residency supervisor already running"
     return 0
   fi
@@ -355,7 +359,7 @@ start_residency() {
   nohup python3 "$_sup" >>"$HOME/residency.log" 2>&1 </dev/null &
   _i=0
   while [ "$_i" -lt 15 ]; do
-    if curl -sf -m 2 http://127.0.0.1:8099/state >/dev/null 2>&1; then
+    if curl -sf -m 2 http://127.0.0.1:8099/health >/dev/null 2>&1; then
       echo "[onb] residency supervisor started on 127.0.0.1:8099"
       return 0
     fi
