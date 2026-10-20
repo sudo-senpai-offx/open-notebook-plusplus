@@ -401,7 +401,22 @@ class Manager:
     """Decides, serialises and records what is loaded."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # A *reentrant* lock, and the reason is the wrong-model branch.
+        #
+        # `ensure` holds this lock while it works, and that branch calls
+        # `self.release(name)` - which takes the lock again. A plain
+        # `threading.Lock` is not reentrant, so the request waits for a lock it
+        # already holds, and never returns. Measured on the device: a
+        # `POST /resident` with a variant naming a different model never
+        # answered, at 600 seconds, twice, while `/health` answered in zero and
+        # `/state` in eleven. The supervisor was not slow; it was deadlocked,
+        # and every request behind it queued on the same lock.
+        #
+        # The alternative - releasing the lock around `release` - would let two
+        # requests interleave inside the same ensure, which is worse. An RLock
+        # gives the same mutual exclusion as before and lets the nested
+        # acquisition through.
+        self._lock = threading.RLock()
         self._state: Dict[str, Residency] = {n: Residency(role=n) for n in ROLES}
         self._reaper: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -723,7 +738,13 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "onb-residency/1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        print(f"[residency] {fmt % args}", flush=True)
+        # Timestamped. Without them the access log cannot be correlated with
+        # anything else the supervisor prints, and a run that took four minutes
+        # to answer leaves no trace of where the time went.
+        print(
+            f"[residency] {time.strftime('%H:%M:%S')} {fmt % args}",
+            flush=True,
+        )
 
     def _send(self, code: int, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")

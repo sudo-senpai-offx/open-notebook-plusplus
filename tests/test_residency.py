@@ -1022,9 +1022,19 @@ class TestShellContract:
         source = (
             Path(__file__).resolve().parents[1] / "scripts" / "termux-supervisor.py"
         ).read_text(encoding="utf-8")
-        assert "self._lock = threading.Lock()" in source
+        # One lock for the whole process, and *reentrant*.
+        #
+        # This used to assert `threading.Lock()` exactly, which pinned the type
+        # rather than the invariant - and the type it pinned was the bug.
+        # `ensure` holds the lock while it works, and the wrong-model branch
+        # calls `release`, which takes it again; a plain Lock is not reentrant,
+        # so the request waited for a lock it already held and never returned.
+        # Measured on the device: `POST /resident` timed out at 600 seconds,
+        # twice, while `/health` answered in zero. An RLock gives the same
+        # mutual exclusion and lets the nested acquisition through.
+        assert "self._lock = threading.RLock()" in source
         assert source.count("with self._lock:") >= 2
-        assert (
-            "threading.Lock()"
-            not in source.split("self._lock")[0].split("__init__")[-1]
-        )
+        # Still one lock, not one per role: a second lock object anywhere would
+        # mean two roles could load at once, which is the race this is about.
+        assert source.count("= threading.RLock()") == 1
+        assert source.count("= threading.Lock()") == 0

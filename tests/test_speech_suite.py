@@ -1142,3 +1142,85 @@ class TestTheResidencyBudgetsAreOrdered:
         """
         source = (REPO / "open_notebook" / "residency" / "client.py").read_text()
         assert "type(exc).__name__" in source
+
+
+class TestTheSupervisorDoesNotDeadlock:
+    """A `POST /resident` that never answered.
+
+    Measured on the device: the request timed out at 600 seconds, twice, while
+    `/health` answered in zero and `/state` in eleven. The supervisor was not
+    slow - it was deadlocked, and everything behind it queued on the same lock.
+
+    The cause: `ensure` holds the lock while it works, and the wrong-model branch
+    calls `self.release(name)`, which takes the lock again. A plain
+    `threading.Lock` is not reentrant, so the request waited for a lock it
+    already held.
+
+    The test runs the real code with a role whose served model differs from the
+    one the variant asks for - the exact branch that deadlocked - and requires it
+    to return.
+    """
+
+    def _manager_with_a_role(self, tmp_path, served_model: str, wanted_model: str):
+        """A Manager with one role, wired to scripts that report the models."""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "onb_residency", REPO / "scripts" / "termux-supervisor.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        # Registered before it is executed: a dataclass resolves its module
+        # through sys.modules when it is defined, and a module that was never
+        # registered makes that lookup return None.
+        sys.modules["onb_residency"] = module
+        spec.loader.exec_module(module)
+
+        probe = tmp_path / "probe.sh"
+        probe.write_text(
+            "#!/bin/sh\n"
+            f'echo "resident=1 serving=1 pid=123 model={served_model} rss_kb=1"\n'
+        )
+        probe.chmod(0o755)
+        model_path = tmp_path / "model-path.sh"
+        model_path.write_text(
+            "#!/bin/sh\necho 'model=/models/%s bytes=1'\n" % wanted_model
+        )
+        model_path.chmod(0o755)
+        unload = tmp_path / "unload.sh"
+        unload.write_text("#!/bin/sh\nexit 0\n")
+        unload.chmod(0o755)
+        load = tmp_path / "load.sh"
+        load.write_text("#!/bin/sh\nexit 0\n")
+        load.chmod(0o755)
+
+        module.ROLES.clear()
+        module.ROLES["stt"] = module.Role(
+            name="stt",
+            probe=["sh", str(probe)],
+            load=["sh", str(load)],
+            unload=["sh", str(unload)],
+            model_path=["sh", str(model_path), "{variant}"],
+            port=8090,
+            priority=60,
+            max_concurrent_jobs=1,
+            threads=2,
+            variant_arg="language",
+        )
+        return module, module.MANAGER
+
+    def test_ensure_with_a_different_model_returns(self, tmp_path):
+        module, manager = self._manager_with_a_role(
+            tmp_path, "big-model.bin", "small-model.bin"
+        )
+        # The branch that deadlocked: serving a different model than the variant
+        # asks for, so `release` is called while `ensure` holds the lock.
+        result = manager.ensure("stt", "en")
+        assert result.get("ok") is not False, f"ensure() did not complete: {result}"
+
+    def test_the_lock_is_reentrant(self):
+        source = (REPO / "scripts" / "termux-supervisor.py").read_text()
+        assert "threading.RLock()" in source, (
+            "ensure() holds the lock and calls release(), which takes it again; "
+            "a plain Lock deadlocks"
+        )
+        assert "threading.Lock()" not in source
