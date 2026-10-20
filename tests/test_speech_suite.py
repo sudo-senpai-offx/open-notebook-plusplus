@@ -1021,3 +1021,52 @@ class TestTheTierSwitchesBothWays:
             "the branch is guarded on the role declaring a variant, so an "
             "unset field disables it entirely"
         )
+
+
+class TestLoggerCallsAreFormatted:
+    """loguru does not format %-style arguments, and the placeholders print.
+
+    This project uses loguru, not the standard library's logging. A call like
+
+        logger.warning("failed for %s: %s", role, error)
+
+    emits the message with the placeholders *literally* - so the one line that
+    says why something went wrong says "%s" instead. Seen on the device:
+
+        residency supervisor unreachable for %s: %s
+
+    which is a log line that tells you nothing, on the exact failure that
+    needed explaining.
+
+    A whole class of bug, so it is checked as a class.
+    """
+
+    def test_no_percent_style_logger_calls_in_the_package(self):
+        import re
+
+        offenders = []
+        for path in sorted((REPO / "open_notebook").rglob("*.py")):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                # A logger call whose first argument is a plain string literal
+                # containing %s and which passes extra arguments. loguru
+                # formats with braces, so those arguments are dropped.
+                if not re.search(r"logger\.\w+\(", line):
+                    continue
+                if "%s" not in line:
+                    continue
+                if 'f"' in line or "f'" in line:
+                    continue
+                # The call may span lines; look a little ahead for the args.
+                window = "\n".join(
+                    path.read_text(encoding="utf-8").splitlines()[
+                        number - 1 : number + 5
+                    ]
+                )
+                if re.search(r"logger\.\w+\(\s*\"[^\"]*%s[^\"]*\"\s*,", window):
+                    offenders.append(f"{path.relative_to(REPO)}:{number}")
+        assert not offenders, (
+            "loguru does not format %-style arguments; these log calls print "
+            "their placeholders literally: " + ", ".join(offenders)
+        )

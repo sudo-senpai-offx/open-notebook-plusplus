@@ -139,11 +139,12 @@ async def _ensure(role: str, variant: str = "") -> Optional[str]:
             # job: the transcript would still be produced, just at a tier that
             # may be wrong for the language. Holding the job for it would
             # stall the queue behind a device-configuration problem.
+            # An f-string, for the same reason: loguru does not format
+            # %-style arguments, and this is the line that tells an operator
+            # which model could not be selected and why.
             logger.warning(
-                "residency could not select the model for %s (%s): %s",
-                role,
-                variant,
-                result.error,
+                f"residency could not select the model for {role} "
+                f"({variant}): {result.error}"
             )
     return None
 

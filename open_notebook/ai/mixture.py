@@ -28,7 +28,10 @@ async def _gather_bounded(
             try:
                 results[i] = await c
             except Exception as e:
-                logger.warning("mixture.task_failed idx=%s err=%s", i, e)
+                # An f-string: this project uses loguru, which does not format
+                # %-style arguments, so the placeholders were printed literally
+                # and the log said nothing about which task failed or why.
+                logger.warning(f"mixture.task_failed idx={i} err={e}")
                 results[i] = None
 
     await asyncio.gather(*(run(i, c) for i, c in enumerate(coros)))

@@ -78,7 +78,9 @@ def rerank_before_truncate(
             out = trimmed
         return out
     except Exception as e:
-        logger.warning("reranker.failed err=%s", e)
+        # An f-string: loguru does not format %-style arguments, so this
+        # printed "err=%s" and named neither the error nor its value.
+        logger.warning(f"reranker.failed err={e}")
         if max_results and len(chunks) > max_results:
             return chunks[:max_results]
         return list(chunks)

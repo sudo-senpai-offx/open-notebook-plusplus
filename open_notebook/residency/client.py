@@ -185,7 +185,11 @@ async def select_model(role: str, variant: str) -> ResidencyResult:
                 json={"role": role, "variant": variant},
             )
     except Exception as exc:  # noqa: BLE001 - unreachable supervisor is a hold
-        logger.debug("residency supervisor unreachable for %s: %s", role, exc)
+        # An f-string, not %-style args. This project uses loguru, which does
+        # not format %-style arguments: the placeholders came out literally in
+        # the log, so the one line that says *why* the supervisor was
+        # unreachable said "%s" instead of the reason.
+        logger.debug(f"residency supervisor unreachable for {role}: {exc}")
         return ResidencyResult(
             ok=False,
             role=role,
