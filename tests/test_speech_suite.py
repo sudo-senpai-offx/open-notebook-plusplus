@@ -1098,3 +1098,47 @@ class TestTheModelIsKeptAliveDuringARequest:
         assert "a failed touch must not fail the job" in source, (
             "losing the supervisor must not lose the transcription"
         )
+
+
+class TestTheResidencyBudgetsAreOrdered:
+    """The client gave up while the supervisor was still working.
+
+    The supervisor's path to a resident role is: check the model, release the
+    wrong one, size the new one, load it, probe again. The launcher's own health
+    wait allows a minute for a 547 MB model to load, and that happens *outside*
+    the supervisor's load budget - so the supervisor can take well over ninety
+    seconds to answer.
+
+    A client that gives up at ninety sees a timeout on a load that was about to
+    succeed, and the request then runs against the *old* model. That is
+    indistinguishable from the feature not working, which is exactly how it
+    looked.
+    """
+
+    def test_the_client_outlasts_the_supervisor(self):
+        client = (REPO / "open_notebook" / "residency" / "client.py").read_text()
+        supervisor = (REPO / "scripts" / "termux-supervisor.py").read_text()
+        client_budget = float(
+            client.split("DEFAULT_LOAD_TIMEOUT = ")[1].split("\n")[0].strip()
+        )
+        import re as _re
+
+        match = _re.search(
+            r'OPEN_NOTEBOOK_RESIDENCY_LOAD_TIMEOUT",\s*"(\d+)"', supervisor
+        )
+        assert match, "could not find the supervisor's load budget"
+        load_budget = float(match.group(1))
+        assert client_budget > load_budget, (
+            f"the client gives up at {client_budget}s but the supervisor may "
+            f"take {load_budget}s; the request would then run against the old "
+            "model and look like the feature not working"
+        )
+
+    def test_the_error_names_the_exception_type(self):
+        """httpx's ReadTimeout has an empty str().
+
+        The message ended with a bare colon and named no cause, on the one line
+        that existed to say why the supervisor was unreachable.
+        """
+        source = (REPO / "open_notebook" / "residency" / "client.py").read_text()
+        assert "type(exc).__name__" in source

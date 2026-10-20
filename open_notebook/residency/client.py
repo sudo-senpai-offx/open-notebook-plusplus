@@ -31,7 +31,20 @@ DEFAULT_TIMEOUT = 60.0
 #: Probing a role is one shell call; loading is a model read off disk. The
 #: supervisor's own load timeout is 45 s, so the client must outlast it or a
 #: slow-but-successful load would be reported as a failure and the job held.
-DEFAULT_LOAD_TIMEOUT = 90.0
+# The client's budget must outlast the supervisor's worst case.
+#
+# The supervisor's path to a resident role is: check the model (8s), release the
+# wrong one (15s, waiting on a SIGTERM that whisper.cpp may not honour), size the
+# new model (8s), load it (45s), probe again (8s) - and the launcher's own
+# health wait allows 60s for a 547 MB model to load, which happens *outside* the
+# supervisor's load budget. So the supervisor can take well over ninety seconds
+# to answer, and a client that gives up at ninety sees a timeout on a load that
+# was about to succeed.
+#
+# Four minutes is generous but bounded, and it is the difference between "the
+# model was selected" and "the selection timed out and the old model was used
+# instead" - which is indistinguishable from the feature not working.
+DEFAULT_LOAD_TIMEOUT = 240.0
 
 
 def supervisor_url() -> str:
@@ -189,7 +202,11 @@ async def select_model(role: str, variant: str) -> ResidencyResult:
         # not format %-style arguments: the placeholders came out literally in
         # the log, so the one line that says *why* the supervisor was
         # unreachable said "%s" instead of the reason.
-        logger.debug(f"residency supervisor unreachable for {role}: {exc}")
+        # The type is included because httpx's ReadTimeout has an empty
+        # str(): the message ended with a bare colon and named no cause.
+        logger.debug(
+            f"residency supervisor unreachable for {role}: {type(exc).__name__}: {exc}"
+        )
         return ResidencyResult(
             ok=False,
             role=role,

@@ -76,7 +76,11 @@ DEFAULT_RESERVE_MB = 512
 #: pay a model load on every cold request.
 DEFAULT_IDLE_SECONDS = 300
 
-LOAD_TIMEOUT = float(os.getenv("OPEN_NOTEBOOK_RESIDENCY_LOAD_TIMEOUT", "45"))
+# Long enough for a 547 MB whisper model to load on a phone. The launcher's own
+# health wait allows 60s, and the model is paged in from storage, so 45s - the
+# value this had - was short enough to time out on a load that was about to
+# succeed. The client waited 90s for a supervisor that needed longer.
+LOAD_TIMEOUT = float(os.getenv("OPEN_NOTEBOOK_RESIDENCY_LOAD_TIMEOUT", "150"))
 PROBE_TIMEOUT = float(os.getenv("OPEN_NOTEBOOK_RESIDENCY_PROBE_TIMEOUT", "8"))
 
 
