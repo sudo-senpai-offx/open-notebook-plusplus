@@ -328,6 +328,53 @@ kill_stragglers() {
   return 0
 }
 
+# The residency supervisor.
+#
+# It is the mechanism by which the app asks the phone for a *particular* model,
+# and the reason the per-language speech tier works at all: the app knows the
+# language of the job, and Mandarin needs the 547 MB multilingual model while
+# English does not. Without the supervisor the app's request for a model is a
+# no-op - the guest's `_ensure` returns immediately when residency is off, and
+# the phone keeps serving whatever model it last loaded.
+#
+# Started here, beside the other model servers, because the guest stack comes up
+# afterwards and its first request would otherwise find nobody to ask.
+#
+# Idle reaping is left off by default. The supervisor unloads idle roles after
+# five minutes, which is right for a RAM-starved phone but is a behaviour change
+# to chat and embedding, which currently survive until the device reboots. It is
+# one environment variable away and deliberately not switched on by this change.
+start_residency() {
+  _sup="$HOME/bin/onb-residency"
+  [ -f "$_sup" ] || return 0
+  if curl -sf -m 3 http://127.0.0.1:8099/state >/dev/null 2>&1; then
+    echo "[onb] residency supervisor already running"
+    return 0
+  fi
+  mkdir -p "$HOME"
+  nohup python3 "$_sup" >>"$HOME/residency.log" 2>&1 </dev/null &
+  _i=0
+  while [ "$_i" -lt 15 ]; do
+    if curl -sf -m 2 http://127.0.0.1:8099/state >/dev/null 2>&1; then
+      echo "[onb] residency supervisor started on 127.0.0.1:8099"
+      return 0
+    fi
+    _i=$((_i + 1)); sleep 1
+  done
+  echo "[onb] residency supervisor did not start - see $HOME/residency.log"
+  echo "     speech still works; the per-language model tier will not."
+  return 1
+}
+
+stop_residency() {
+  for p in /proc/[0-9]*; do
+    _cl=$({ tr '\0' ' ' <"$p/cmdline"; } 2>/dev/null) || continue
+    case "$_cl" in
+      *onb-residency*) kill "${p#/proc/}" 2>/dev/null ;;
+    esac
+  done
+}
+
 start_llama() {
   # A process matching is not the same as a server serving. Requiring
   # both means the two checks can no longer disagree in the direction
@@ -548,7 +595,7 @@ case "${1:-up}" in
     [ -t 0 ] && ONB_FOREGROUND=1
     export ONB_FOREGROUND
 
-    trap 'stop_llama; exit 0' INT TERM
+    trap 'stop_llama; stop_residency; exit 0' INT TERM
     start_llama || exit 1
     wait_for_llama
 
@@ -563,6 +610,10 @@ case "${1:-up}" in
     else
       echo "[onb] no embedding model - skipping (vector search off)"
     fi
+
+    # The residency supervisor, before the guest stack: the app's first
+    # request for a model has to find it.
+    start_residency || true
 
     # Bring up the guest stack, then block so --kill-on-exit has something
     # to reap when Ctrl+C arrives.

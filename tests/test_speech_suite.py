@@ -804,3 +804,85 @@ class TestTheTierFollowsTheLanguage:
             "guesses and produces mixed-script noise on Tamil and Malay"
         )
         assert "language=language or None" in source
+
+
+class TestTheTierIsReachableAtRuntime:
+    """The chain was built, unit-tested at every layer, and inert.
+
+    The supervisor is fully implemented - client, server, roles, admission gate -
+    and on the phone *nothing started it* and nothing set
+    `OPEN_NOTEBOOK_RESIDENCY_ENABLED`. The guest's `_ensure` returns immediately
+    when residency is off, so the variant never left the app and the phone kept
+    serving whatever model it last loaded. The same shape as the update that
+    silently declined to update: the code path exists, is tested, and is
+    unreachable.
+
+    So the wiring is part of the feature, not a deployment detail.
+    """
+
+    def test_the_launcher_starts_the_supervisor(self):
+        text = _read_script("termux-launch.sh")
+        assert "start_residency()" in text
+        assert "stop_residency()" in text
+        assert "start_residency || true" in text, (
+            "the supervisor must come up with the stack, or the app's first "
+            "request for a model finds nobody to ask"
+        )
+
+    def test_the_supervisor_is_reachable_from_the_guest(self):
+        """proot does not isolate the network namespace, so the guest's
+        127.0.0.1 is the phone's - the same path the app already uses to reach
+        the speech servers."""
+        from open_notebook.residency import client as residency
+
+        assert residency.supervisor_url().startswith("http://127.0.0.1")
+
+    def test_model_selection_is_a_separate_switch_from_full_residency(self):
+        """Turning on the tier must not switch on the reaper.
+
+        The supervisor unloads idle roles after five minutes. That is right for a
+        RAM-starved phone and wrong as a side effect of wanting the right
+        transcription model: chat and embedding currently survive until reboot,
+        and that is not a change this feature should make silently.
+        """
+        from open_notebook.residency import client as residency
+
+        assert residency.model_selection_enabled() is False, (
+            "the default must be off: it is a device setting, not a shipped one"
+        )
+        source = (REPO / "open_notebook" / "residency" / "client.py").read_text()
+        assert "OPEN_NOTEBOOK_RESIDENCY_MODEL_SELECTION" in source
+
+    def test_the_stt_path_asks_for_the_model_opportunistically(self):
+        """A device with no supervisor still transcribes.
+
+        The language reaches the request either way, which is what stops the
+        model transliterating Tamil into Latin script. Only the *tier* depends
+        on the supervisor, and failing the job over it would stall the queue
+        behind a configuration problem.
+        """
+        source = (REPO / "open_notebook" / "speech" / "client.py").read_text()
+        assert "residency.select_model(role, variant)" in source
+        assert "residency.model_selection_enabled()" in source
+        # A failure to select must not hold the job.
+        body = source[source.index("def _ensure(") :]
+        body = body[: body.index("\n\n\n")]
+        assert "return None" in body, "an unreachable supervisor must not hold the job"
+
+    def test_select_model_reaches_the_supervisor_even_with_residency_off(self):
+        """`ensure_resident` short-circuits to ok=True when residency is off.
+
+        That is right for "is this role resident" - a device with no supervisor
+        must behave as it did before. But selecting a model is a different
+        question, and the supervisor is the only thing that can answer it.
+        """
+        from open_notebook.residency import client as residency
+
+        assert hasattr(residency, "select_model")
+        source = (REPO / "open_notebook" / "residency" / "client.py").read_text()
+        body = source[source.index("async def select_model(") :]
+        body = body[: body.index("\n\n\n")]
+        assert "if not enabled()" not in body, (
+            "select_model must not short-circuit on the residency flag; that is "
+            "the whole reason it is a separate entry point"
+        )

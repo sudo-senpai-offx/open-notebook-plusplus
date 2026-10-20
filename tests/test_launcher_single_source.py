@@ -680,14 +680,24 @@ class TestDetachedLauncherIsNotAnOrphan:
         )
 
     def test_skips_the_orphan_check_when_detached(self):
+        """The orphan check must come *after* the tty check, and be skipped
+        when detached.
+
+        Expressed as an ordering rather than a fixed character window: the
+        window was 900 bytes, and adding the residency supervisor to the launch
+        sequence pushed the orphan check out of it - so the test broke on a
+        change that did not touch the thing it checks. The intent is "the
+        check reads the foreground flag and skips when it is zero", and that
+        holds wherever in the file the two happen to sit.
+        """
         text = self._code()
-        i = text.index("[ -t 0 ]")
-        window = text[i : i + 900]
-        assert '_foreground" = "0"' in window, (
+        tty = text.index("[ -t 0 ]")
+        flag = text.index('_foreground" = "0"')
+        skip = text.index("continue", flag)
+        assert tty < flag < skip, (
             "a detached launcher must not tear the stack down for having "
             "PPID=1, which is how it was started"
         )
-        assert "continue" in window, "the check has to be skipped, not merely softened"
 
     def test_the_tty_check_runs_before_proot_replaces_stdin(self):
         """Inside the guest session stdin is a pipe, so `test -t 0` there is

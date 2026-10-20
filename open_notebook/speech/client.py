@@ -115,12 +115,37 @@ async def _ensure(role: str, variant: str = "") -> Optional[str]:
     """
     from open_notebook.residency import client as residency
 
-    if not residency.enabled():
-        return None
-    result = await residency.ensure_resident(role, variant)
-    if result.ok:
-        return None
-    return result.hold_reason()
+    # Full residency: the supervisor owns every role.
+    if residency.enabled():
+        result = await residency.ensure_resident(role, variant)
+        if result.ok:
+            return None
+        return result.hold_reason()
+
+    # Model selection only: the app may ask the phone for a *particular* model
+    # without the whole residency regime switching on. This is what the
+    # per-language speech tier needs - Mandarin has to be able to reach the
+    # 547 MB multilingual model while English stays on the 181 MB one.
+    #
+    # Opportunistic, and deliberately so: a device with no supervisor still
+    # transcribes, just with whatever model is loaded. The language still
+    # reaches the request either way, which is what stops the model
+    # transliterating Tamil into Latin script and scoring CER 1.0 against a
+    # Tamil-script reference.
+    if variant and residency.model_selection_enabled():
+        result = await residency.select_model(role, variant)
+        if not result.ok:
+            # A supervisor that refuses or is unreachable must not fail the
+            # job: the transcript would still be produced, just at a tier that
+            # may be wrong for the language. Holding the job for it would
+            # stall the queue behind a device-configuration problem.
+            logger.warning(
+                "residency could not select the model for %s (%s): %s",
+                role,
+                variant,
+                result.error,
+            )
+    return None
 
 
 async def available(role: str = "stt") -> tuple[bool, str]:

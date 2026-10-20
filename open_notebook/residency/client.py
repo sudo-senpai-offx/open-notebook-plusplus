@@ -34,6 +34,34 @@ DEFAULT_TIMEOUT = 60.0
 DEFAULT_LOAD_TIMEOUT = 90.0
 
 
+def supervisor_url() -> str:
+    """Where the residency supervisor listens, if it is configured.
+
+    The supervisor runs on the *phone* and the guest app reaches it over the
+    shared loopback - proot does not isolate the network namespace, so
+    127.0.0.1 inside the guest is the phone's. That is the same path the app
+    already uses to reach the speech servers.
+    """
+    return os.getenv("OPEN_NOTEBOOK_RESIDENCY_URL", DEFAULT_URL) or DEFAULT_URL
+
+
+def model_selection_enabled() -> bool:
+    """Should the app ask the supervisor for a *particular* model?
+
+    Separate from `enabled()`, which is the full residency regime: the
+    admission gate, the reaper, and the app asking for every role.
+
+    This one is narrower and is what the per-language speech tier needs. The
+    app has to be able to say "I need the Mandarin model" and have the phone
+    load it; nothing else about residency has to change. Keeping them apart
+    means the tier can be switched on without the reaper starting to unload
+    the chat and embedding servers between uses, which would be a real
+    behaviour change on a device where those currently survive until reboot.
+    """
+    raw = os.getenv("OPEN_NOTEBOOK_RESIDENCY_MODEL_SELECTION", "false")
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def enabled() -> bool:
     """Is residency control switched on for this device?
 
@@ -130,6 +158,67 @@ class ResidencyResult:
             return ""
         detail = (self.error or "unknown failure").splitlines()[0][:120]
         return f"residency:{self.role}:{detail}"
+
+
+async def select_model(role: str, variant: str) -> ResidencyResult:
+    """Ask the supervisor to load `role` with a particular model.
+
+    Unlike `ensure_resident`, this talks to the supervisor even when the full
+    residency regime is off. The difference matters: `ensure_resident` answers
+    "is this role resident" and short-circuits to `ok=True` when residency is
+    disabled, because a device with no supervisor must behave exactly as it did
+    before. But *selecting a model* is not a residency-regime decision - it is
+    one specific request, and the supervisor is the only thing that can answer
+    it, because the model files are on the phone.
+
+    The supervisor reloads the role when the running model is not the one the
+    variant calls for, so this is also how a tier change happens.
+    """
+    if not variant:
+        return ResidencyResult(ok=True, role=role)
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=timeout()) as client:
+            response = await client.post(
+                f"{supervisor_url()}/resident",
+                json={"role": role, "variant": variant},
+            )
+    except Exception as exc:  # noqa: BLE001 - unreachable supervisor is a hold
+        logger.debug("residency supervisor unreachable for %s: %s", role, exc)
+        return ResidencyResult(
+            ok=False,
+            role=role,
+            error=f"supervisor unreachable: {type(exc).__name__}",
+        )
+
+    if response.status_code == 409:
+        try:
+            payload: Dict[str, Any] = response.json()
+        except ValueError:
+            payload = {}
+        return ResidencyResult(
+            ok=False,
+            role=role,
+            error=str(payload.get("error") or "supervisor refused the load"),
+        )
+    if response.status_code != 200:
+        return ResidencyResult(
+            ok=False, role=role, error=f"supervisor returned {response.status_code}"
+        )
+    try:
+        payload = response.json()
+    except ValueError:
+        return ResidencyResult(ok=False, role=role, error="supervisor sent non-JSON")
+    return ResidencyResult(
+        ok=bool(payload.get("ok")),
+        role=str(payload.get("role") or role),
+        loaded=bool(payload.get("loaded")),
+        resident=bool(payload.get("resident")),
+        pid=str(payload.get("pid") or "-"),
+        model=str(payload.get("model") or "-"),
+        error=None if payload.get("ok") else str(payload.get("error") or "load failed"),
+    )
 
 
 async def ensure_resident(role: str, variant: str = "") -> ResidencyResult:
