@@ -105,7 +105,7 @@ stack_is_up() {
   # Runs as the same UID, so /proc is readable, and avoids proot-distro login
   # entirely - that can hang when the guest session is gone.
   for _d in /proc/[0-9]*; do
-    _cl=$(tr '\0' ' ' <"$_d/cmdline" 2>/dev/null) || continue
+    _cl=$({ tr '\0' ' ' <"$_d/cmdline"; } 2>/dev/null) || continue
     case "$_cl" in *"uvicorn api.main:app"*) return 0 ;; esac
   done
   return 1
@@ -172,7 +172,7 @@ kill_guest_services() {
   while [ "$_n" -lt 2 ]; do
     _pids=""
     for _d in /proc/[0-9]*; do
-      _cl=$(tr '\0' ' ' <"$_d/cmdline" 2>/dev/null) || continue
+      _cl=$({ tr '\0' ' ' <"$_d/cmdline"; } 2>/dev/null) || continue
       case "$_cl" in
         *"surreal start"*) _pids="$_pids ${_d#/proc/}" ;;
         *"uvicorn api.main:app"*) _pids="$_pids ${_d#/proc/}" ;;
@@ -188,7 +188,7 @@ kill_guest_services() {
   done
   # Final check: anything still matching?
   for _d in /proc/[0-9]*; do
-    _cl=$(tr '\0' ' ' <"$_d/cmdline" 2>/dev/null) || continue
+    _cl=$({ tr '\0' ' ' <"$_d/cmdline"; } 2>/dev/null) || continue
     case "$_cl" in
       *"surreal start"*|*"uvicorn api.main:app"*|*"surreal-commands-worker"*|*"next-server"*)
         return 1 ;;
@@ -205,7 +205,11 @@ kill_guest_services() {
 # under-matching would leave an orphan holding the database.
 proot_pids() {
   for p in /proc/[0-9]*; do
-    _cl=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
+    # Braced: a pid can exit between the glob and the read, and POSIX applies
+    # redirections left to right, so `< "$p/cmdline"` is attempted before
+    # `2>/dev/null` takes effect and the shell's own redirection error lands on
+    # the terminal. It was printing five of them on every update.
+    _cl=$({ tr '\0' ' ' <"$p/cmdline"; } 2>/dev/null) || continue
     case "$_cl" in
       *"/containers/ubuntu/rootfs"*) echo "${p#/proc/}" ;;
     esac
@@ -243,7 +247,11 @@ kill_proot_sessions() {
 # the process still in state S. Only SIGKILL reaches it.
 launcher_pids() {
   for p in /proc/[0-9]*; do
-    _cl=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null) || continue
+    # Braced: a pid can exit between the glob and the read, and POSIX applies
+    # redirections left to right, so `< "$p/cmdline"` is attempted before
+    # `2>/dev/null` takes effect and the shell's own redirection error lands on
+    # the terminal. It was printing five of them on every update.
+    _cl=$({ tr '\0' ' ' <"$p/cmdline"; } 2>/dev/null) || continue
     case "$_cl" in
       *"$HOME/bin/onb "*) echo "${p#/proc/}" ;;
     esac

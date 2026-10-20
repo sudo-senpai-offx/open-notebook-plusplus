@@ -476,3 +476,43 @@ class TestDeviceScriptsArePosix:
                     f"{name}:{lineno} expands an array, which Termux's sh "
                     f"rejects as a parse error: {stripped!r}"
                 )
+
+
+class TestEveryProcReadIsGuarded:
+    """A pid can exit between the glob and the read.
+
+    POSIX applies redirections left to right, so `< "$p/cmdline"` is attempted
+    *before* `2>/dev/null` takes effect, and the shell's own redirection error
+    lands on the terminal. Five of them appeared on every update:
+
+        onb-update: 175: cannot open /proc/13546/cmdline: No such file
+
+    The fix is braces — `{ tr ... < "$p/cmdline"; } 2>/dev/null` — which put the
+    failing redirection inside the redirected command. The launcher, the speech
+    scripts and the stack script were fixed for this; the updater was not, and
+    nobody noticed because the message is easy to mistake for a harmless warning
+    from a teardown.
+
+    Checked across the whole family, because the fix is one line each and the
+    bug is invisible in review.
+    """
+
+    UNGUARDED = re.compile(
+        r"\$\(\s*tr\b[^|]*<\"?\$[a-zA-Z_]+/(?:cmdline|environ)\"?\s+2>/dev/null"
+    )
+
+    def test_no_script_redirects_a_proc_path_before_stderr(self):
+        offenders = []
+        for path in sorted(SCRIPTS.glob("*.sh")):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if self.UNGUARDED.search(stripped):
+                    offenders.append(f"{path.name}:{number}")
+        assert not offenders, (
+            "these read /proc without braces, so a pid that exits mid-scan "
+            "prints the shell's redirection error: " + ", ".join(offenders)
+        )
