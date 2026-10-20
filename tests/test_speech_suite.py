@@ -608,6 +608,72 @@ class TestTheSuiteTellsTheModelTheLanguage:
         assert "/v1/audio/transcriptions" in source
 
 
+class TestMalformedInputExpectation:
+    """A 500 is the server's contract for "this file is not audio".
+
+    The suite demanded 4xx, which was my assumption rather than anyone's
+    contract, so it failed a run for correct behaviour. The app's own client
+    documents the real one:
+
+        a 500 because the file is not audio - is reported as an error rather
+        than as empty text, because an empty transcript and a failed transcript
+        are different facts
+
+    and reports it as `stt server answered 500: <detail>`. What would genuinely
+    be a defect is a 200, a hang, or a crash - so those are what is asserted,
+    along with the speed: a malformed file must not occupy the model.
+    """
+
+    def test_a_500_counts_as_a_refusal(self):
+        source = SUITE.read_text()
+        body = source[source.index("def run_robustness(") :]
+        assert "400 <= status < 600" in body, (
+            "a 500 is the server's contract for non-audio input; the suite must "
+            "accept it rather than fail a correct behaviour"
+        )
+
+    def test_a_success_is_still_a_failure(self):
+        source = SUITE.read_text()
+        body = source[source.index("def run_robustness(") :]
+        assert "status != 200" in body, "a 200 on malformed audio is the real defect"
+
+    def test_a_refusal_must_be_fast(self):
+        """The hang was the actual bug. A malformed file must not occupy the
+        model — one such request took 74.7s behind a backlog."""
+        source = SUITE.read_text()
+        body = source[source.index("def run_robustness(") :]
+        assert "fast = elapsed < 30" in body
+        assert "must not occupy the model" in body
+
+
+class TestTheResumeMessageTellsTheTruth:
+    """It said "15 clips already scored" when all fifteen were about to be
+    re-measured.
+
+    A checkpoint whose entries were measured under a different budget or a
+    different model is worthless, and the count on disk is not the count that
+    will be reused. The one line an operator would look at to see what the run
+    was reusing was wrong.
+    """
+
+    def test_it_reports_how_many_are_reusable(self):
+        source = SUITE.read_text()
+        assert "_reusable" in source
+        assert "entries," in source and "reusable" in source
+
+    def test_it_does_not_claim_clips_were_already_scored(self):
+        # Code, not prose: the comment above the new message quotes the old
+        # wording in order to explain what it replaced.
+        source = "\n".join(
+            line
+            for line in SUITE.read_text().splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "already scored" not in source, (
+            "that count was the number on disk, not the number reusable"
+        )
+
+
 class TestFixtureBuilder:
     def test_it_parses_the_headerless_tsv(self):
         """FLEURS TSVs have no header row.
