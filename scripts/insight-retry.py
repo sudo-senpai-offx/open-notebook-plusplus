@@ -83,6 +83,25 @@ async def _insight_count() -> Tuple[int, int]:
     return len(have), want
 
 
+async def _pending_count() -> int:
+    """How much work is still in flight.
+
+    A pass is only idle if nothing is queued. Counting a pass as idle while
+    fifteen transformations are running is the difference between waiting for
+    them and giving up on them: a transformation takes about eleven minutes and
+    the window admits three at a time, so eighteen of them need roughly an
+    hour. The first version of this loop gave up after twenty-eight minutes of
+    no *completed* insight, with work in flight the whole time - and then the
+    work completed anyway, moments after it stopped.
+    """
+    from open_notebook.database.repository import repo_query
+
+    rows = await repo_query(
+        "SELECT count() AS n FROM command WHERE status IN ['held', 'running', 'new']"
+    )
+    return int(rows[0].get("n") or 0) if rows else 0
+
+
 async def _queue_missing() -> Dict[str, Any]:
     """Ask the real endpoint to queue the gaps. Never reimplements it."""
     import httpx
@@ -159,19 +178,31 @@ async def main() -> int:
         # eleven minutes at the measured rate - or every pass would look idle.
         time.sleep(max(60, args.interval))
         have, want = await _insight_count()
-        print(f"  insights {have}/{want}", flush=True)
+        pending = await _pending_count()
+        print(f"  insights {have}/{want}  in flight {pending}", flush=True)
         if have >= want:
             print("  complete", flush=True)
             return 0
         if have > best:
             best = have
             idle = 0
+        elif pending > 0:
+            # Work is in flight, so this pass says nothing about whether the
+            # corpus can advance. Waiting is the right move, and counting it as
+            # idle is what made the loop give up on a healthy queue.
+            idle = 0
+            print(
+                f"  {pending} job(s) in flight - waiting rather than counting "
+                "this as idle",
+                flush=True,
+            )
         else:
             idle += 1
             if idle >= args.max_idle_passes:
                 print(
-                    f"  no progress across {idle} passes - stopping rather "
-                    "than re-queueing work that cannot succeed",
+                    f"  no progress across {idle} passes with nothing in "
+                    "flight - stopping rather than re-queueing work that "
+                    "cannot succeed",
                     flush=True,
                 )
                 return 1

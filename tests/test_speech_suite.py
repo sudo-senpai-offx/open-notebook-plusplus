@@ -940,3 +940,37 @@ class TestTheSupervisorIsReachableWhenItSaysItIs:
         handler = text[text.index('elif path == "/health":') :]
         handler = handler[: handler.index("\n")]
         assert "probe" not in handler, "the health endpoint must not probe the roles"
+
+
+class TestTheRetryLoopWaitsForWorkInFlight:
+    """It gave up on a healthy queue.
+
+    The loop counted a pass as idle when the *insight count* had not changed.
+    But a transformation takes about eleven minutes and the window admits three
+    at a time, so eighteen of them need roughly an hour. Four passes at seven
+    minutes is twenty-eight - so the loop stopped on work that was progressing
+    fine, and the work completed moments after it stopped.
+
+    A pass is only idle when nothing is in flight.
+    """
+
+    def test_it_counts_in_flight_work(self):
+        source = (REPO / "scripts" / "insight-retry.py").read_text()
+        assert "def _pending_count" in source
+        assert "'held', 'running', 'new'" in source, (
+            "the pending count must cover the states the dispatcher admits"
+        )
+
+    def test_pending_work_resets_the_idle_count(self):
+        source = (REPO / "scripts" / "insight-retry.py").read_text()
+        body = source[source.index("pending = await _pending_count()") :]
+        assert "elif pending > 0:" in body
+        assert "idle = 0" in body, (
+            "work in flight means the pass says nothing about progress, so it "
+            "must not count towards the idle limit"
+        )
+
+    def test_it_reports_what_is_in_flight(self):
+        """The operator has to be able to tell "waiting" from "stuck"."""
+        source = (REPO / "scripts" / "insight-retry.py").read_text()
+        assert "in flight" in source
