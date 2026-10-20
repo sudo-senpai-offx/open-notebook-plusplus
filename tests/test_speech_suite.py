@@ -1224,3 +1224,37 @@ class TestTheSupervisorDoesNotDeadlock:
             "a plain Lock deadlocks"
         )
         assert "threading.Lock()" not in source
+
+
+class TestTheUpdateStopsTheResidencySupervisor:
+    """A stale supervisor is worse than none.
+
+    The updater stopped the guest services, the proot sessions and the
+    launchers - but not the residency supervisor, which is a phone-side process
+    that the update replaces. So after an update, a supervisor that had deadlocked
+    on its own lock kept port 8099, the newly installed launcher found something
+    already listening and deferred to it, and the update reported success while
+    the phone kept the old binary.
+
+    The symptom was a request that timed out against a supervisor that had
+    already been fixed - which reads as "the fix did not work" rather than "the
+    update never reached the process that mattered".
+    """
+
+    def test_the_updater_knows_about_the_supervisor(self):
+        source = _read_script("termux-update.sh")
+        assert "residency_pids()" in source
+        assert "stop_residency()" in source
+
+    def test_the_supervisor_is_stopped_with_the_rest(self):
+        source = _read_script("termux-update.sh")
+        assert "stop_residency || return 1" in source, (
+            "a supervisor left running keeps the port, and the new one refuses to start"
+        )
+
+    def test_it_reports_a_supervisor_that_survived(self):
+        """The launcher reports the same thing, and for the same reason: the
+        replacement would refuse to start, so the old binary would keep serving
+        and nobody would know."""
+        source = _read_script("termux-update.sh")
+        assert "residency supervisor survived SIGKILL" in source

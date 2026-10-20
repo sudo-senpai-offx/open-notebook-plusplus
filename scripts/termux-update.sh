@@ -120,6 +120,7 @@ stop_stack() {
   kill_guest_services || say "  WARNING: some guest services could not be stopped"
   kill_proot_sessions || say "  WARNING: some proot sessions could not be stopped"
   kill_launchers || return 1
+  stop_residency || return 1
 
   # Best-effort: ask the guest to tear itself down cleanly too, in case any
   # service name we don't match is still running. proot-distro login can hang
@@ -274,6 +275,44 @@ kill_launchers() {
   if launcher_alive; then
     say "  ERROR: a launcher survived SIGKILL (pid $(launcher_pids))."
     say "  Starting another would be refused, so this would be a no-op."
+    return 1
+  fi
+  return 0
+}
+
+# The residency supervisor is a phone-side process that the update replaces,
+# and it must be stopped with the rest.
+#
+# It was not, and the consequence was worse than a stale process: a supervisor
+# that had deadlocked on its own lock kept port 8099, so the newly installed
+# launcher found something already listening and deferred to it. The update
+# reported success, the phone kept the old binary, and every request to it
+# timed out - which looked like the fix had not worked rather than like the
+# update had not reached the process that mattered.
+residency_pids() {
+  for p in /proc/[0-9]*; do
+    _cl=$({ tr '\0' ' ' <"$p/cmdline"; } 2>/dev/null) || continue
+    case "$_cl" in
+      *onb-residency*) echo "${p#/proc/}" ;;
+    esac
+  done
+}
+
+stop_residency() {
+  _pids=$(residency_pids | grep -v "^$$$" || true)
+  [ -n "$_pids" ] || return 0
+  say "  stopping residency supervisor (pid $(echo "$_pids" | tr '\n' ' '))"
+  for _p in $_pids; do kill "$_p" 2>/dev/null; done
+  _j=0
+  while [ "$_j" -lt 8 ] && [ -n "$(residency_pids | grep -v "^$$$" || true)" ]; do
+    sleep 1
+    _j=$((_j + 1))
+  done
+  for _p in $_pids; do kill -9 "$_p" 2>/dev/null; done
+  sleep 1
+  if [ -n "$(residency_pids | grep -v "^$$$" || true)" ]; then
+    say "  ERROR: the residency supervisor survived SIGKILL."
+    say "  The new one would refuse to start, so the old binary would keep serving."
     return 1
   fi
   return 0
