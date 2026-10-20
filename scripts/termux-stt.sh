@@ -235,9 +235,17 @@ probe_stt() {
   # free RAM at start, so "which model" and "why that one" are the first two
   # questions when a transcript comes back wrong on a device that previously
   # worked - and neither is answerable from the process alone once it is running.
+  # The model reported is the one *served*, not the one selected. Those differ
+  # whenever the server was started with an explicit STT_MODEL and is still
+  # running while the launcher's own selection has moved on - which is exactly
+  # what a tier comparison does. Reporting the selection here made the probe
+  # say `small` while `large` was serving, and the suite keys its checkpoint on
+  # this line, so a re-measurement under one model could silently reuse
+  # another model's results.
   if [ -n "$MODEL" ] && [ -f "$MODEL" ]; then
+    _serving=$(served_model)
     printf '[stt] model=%s tier=%s budget_mb=%s available_mb=%s reserve_mb=%s\n' \
-      "$(basename "$MODEL")" "${STT_TIER_CHOSEN:-override}" \
+      "${_serving:-$(basename "$MODEL")}" "${STT_TIER_CHOSEN:-override}" \
       "${STT_BUDGET_MB:--}" "$(mem_available_mb)" "$STT_RESERVE_MB"
   fi
   if _pid=$(pid_of) && [ -n "$_pid" ]; then
