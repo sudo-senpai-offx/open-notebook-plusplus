@@ -225,6 +225,28 @@ async def select_model(role: str, variant: str) -> ResidencyResult:
     )
 
 
+async def touch(role: str, variant: str = "") -> None:
+    """Tell the supervisor a role is still in use.
+
+    The reaper unloads a role the supervisor loaded once it has been idle for
+    five minutes, and it measures idle from the last `ensure`. But a
+    transcription is one long request: a ten-minute lecture through the large
+    model runs for well over an hour, and the supervisor cannot see a request
+    in flight because the guest talks to the speech server directly.
+
+    So without this, the reaper kills the model *while it is being used*, and
+    the request fails with a connection error - the same symptom as the model
+    never being loaded, and just as hard to read.
+
+    A touch is the same request as `ensure`, which is idempotent when the role
+    is already serving the right model.
+    """
+    try:
+        await select_model(role, variant)
+    except Exception:  # noqa: BLE001 - a failed touch must not fail the job
+        logger.debug(f"could not touch the {role} role")
+
+
 async def ensure_resident(role: str, variant: str = "") -> ResidencyResult:
     """Ask the supervisor to make `role` loaded.
 

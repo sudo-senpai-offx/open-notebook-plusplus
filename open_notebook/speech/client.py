@@ -22,6 +22,8 @@ the phone's Termux build with no branching on which one answered.
 
 from __future__ import annotations
 
+import asyncio
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,6 +101,23 @@ class SynthesisResult:
     bytes_written: int = 0
     error: Optional[str] = None
     held: bool = False
+
+
+async def _keep_role_alive(role: str, variant: str) -> None:
+    """Tell the supervisor a role is in use, for as long as the request runs.
+
+    The supervisor unloads a role it loaded once it has been idle for five
+    minutes. It measures idle from the last `ensure`, and it cannot see a
+    request in flight - the guest talks to the speech server directly, not
+    through the supervisor. A long transcription would therefore have its model
+    unloaded underneath it, and fail with a connection error that looks exactly
+    like the model never having been loaded.
+    """
+    from open_notebook.residency import client as residency
+
+    while True:
+        await asyncio.sleep(60)
+        await residency.touch(role, variant)
 
 
 async def _ensure(role: str, variant: str = "") -> Optional[str]:
@@ -207,14 +226,33 @@ async def transcribe(
         async with httpx.AsyncClient(
             timeout=_timeout("OPEN_NOTEBOOK_STT_TIMEOUT", DEFAULT_STT_TIMEOUT)
         ) as client:
-            with path.open("rb") as handle:
-                response = await client.post(
-                    f"{stt_url()}/v1/audio/transcriptions",
-                    files={
-                        "file": (path.name + _TRANSCRIBE_SUFFIX, handle, "audio/wav")
-                    },
-                    data=data,
-                )
+            # Keep the role alive while the request runs.
+            #
+            # The supervisor reaps a role it loaded once it has been idle for
+            # five minutes, and it measures idle from the last `ensure`. A
+            # transcription is one long request - a ten-minute lecture through
+            # the large model runs for well over an hour - and the supervisor
+            # cannot see a request in flight, because the guest talks to the
+            # speech server directly rather than through the supervisor.
+            #
+            # So the reaper would unload the model *while it was being used*,
+            # and the request would fail with a connection error: the same
+            # symptom as the model never having been loaded, and just as hard to
+            # read.
+            _alive = asyncio.create_task(
+                _keep_role_alive("stt", language or "")
+            )
+            try:
+                with path.open("rb") as handle:
+                    response = await client.post(
+                        f"{stt_url()}/v1/audio/transcriptions",
+                        files={
+                            "file": (path.name + _TRANSCRIBE_SUFFIX, handle, "audio/wav")
+                        },
+                        data=data,
+                    )
+            finally:
+                _alive.cancel()
     except Exception as exc:  # noqa: BLE001 - transport failure is a value
         logger.warning(f"transcription request failed for {path}: {exc}")
         return TranscriptionResult(

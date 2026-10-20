@@ -1070,3 +1070,31 @@ class TestLoggerCallsAreFormatted:
             "loguru does not format %-style arguments; these log calls print "
             "their placeholders literally: " + ", ".join(offenders)
         )
+
+
+class TestTheModelIsKeptAliveDuringARequest:
+    """The reaper would unload the model *while it was being used*.
+
+    The supervisor unloads a role it loaded once it has been idle for five
+    minutes, measuring idle from the last `ensure`. It cannot see a request in
+    flight, because the guest talks to the speech server directly rather than
+    through the supervisor. A ten-minute lecture through the large model runs for
+    well over an hour - so the model would be unloaded underneath the request,
+    and the request would fail with a connection error that looks exactly like
+    the model never having been loaded.
+    """
+
+    def test_a_long_request_keeps_the_role_alive(self):
+        source = (REPO / "open_notebook" / "speech" / "client.py").read_text()
+        assert "_keep_role_alive" in source
+        assert "_alive.cancel()" in source, (
+            "the keep-alive must be cancelled when the request ends, or it "
+            "leaks a task per transcription"
+        )
+
+    def test_the_touch_exists_and_is_safe_to_fail(self):
+        source = (REPO / "open_notebook" / "residency" / "client.py").read_text()
+        assert "async def touch(" in source
+        assert "a failed touch must not fail the job" in source, (
+            "losing the supervisor must not lose the transcription"
+        )

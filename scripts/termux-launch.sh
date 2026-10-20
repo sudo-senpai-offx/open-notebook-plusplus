@@ -340,10 +340,15 @@ kill_stragglers() {
 # Started here, beside the other model servers, because the guest stack comes up
 # afterwards and its first request would otherwise find nobody to ask.
 #
-# Idle reaping is left off by default. The supervisor unloads idle roles after
-# five minutes, which is right for a RAM-starved phone but is a behaviour change
-# to chat and embedding, which currently survive until the device reboots. It is
-# one environment variable away and deliberately not switched on by this change.
+# Idle reaping is ON, and that is deliberate. The supervisor unloads the roles
+# *it* loaded once they have been idle for five minutes, and leaves the ones the
+# launcher started alone. So the 547 MB speech model is resident only while
+# something is being transcribed, which is the point on a phone.
+#
+# An earlier version of this comment claimed reaping was off. It was not: the
+# supervisor's default is 300 seconds and nothing set it to zero, so the comment
+# described a behaviour that did not exist. A comment that lies about the
+# default is worse than no comment, because the next reader believes it.
 start_residency() {
   _sup="$HOME/bin/onb-residency"
   [ -f "$_sup" ] || return 0
