@@ -23,7 +23,6 @@ the phone's Termux build with no branching on which one answered.
 from __future__ import annotations
 
 import asyncio
-
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -239,15 +238,17 @@ async def transcribe(
             # and the request would fail with a connection error: the same
             # symptom as the model never having been loaded, and just as hard to
             # read.
-            _alive = asyncio.create_task(
-                _keep_role_alive("stt", language or "")
-            )
+            _alive = asyncio.create_task(_keep_role_alive("stt", language or ""))
             try:
                 with path.open("rb") as handle:
                     response = await client.post(
                         f"{stt_url()}/v1/audio/transcriptions",
                         files={
-                            "file": (path.name + _TRANSCRIBE_SUFFIX, handle, "audio/wav")
+                            "file": (
+                                path.name + _TRANSCRIBE_SUFFIX,
+                                handle,
+                                "audio/wav",
+                            )
                         },
                         data=data,
                     )
