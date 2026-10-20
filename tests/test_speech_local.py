@@ -1394,7 +1394,9 @@ class TestTheTierOrderIsHonoured:
     def test_the_first_tier_that_fits_wins(self):
         text = _read_script("termux-stt.sh")
         lines = text.split("\n")
-        start = next(n for n, l in enumerate(lines) if l.startswith("pick_model()"))
+        start = next(
+            index for index, line in enumerate(lines) if line.startswith("pick_model()")
+        )
         # Closed by a brace at column 0; this function does not have an indented one.
         end = next(
             index for index in range(start + 1, len(lines)) if lines[index] == "}"
