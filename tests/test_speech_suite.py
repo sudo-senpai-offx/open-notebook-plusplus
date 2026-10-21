@@ -488,19 +488,19 @@ class TestTheSuiteIsInterruptible:
                 pool.shutdown(wait=False, cancel_futures=True)
             """
         )
-        proc = subprocess.Popen(
+        fixed_proc = subprocess.Popen(
             [sys.executable, "-c", fixed],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
         )
         time.sleep(1.0)
-        proc.send_signal(signal.SIGINT)
+        fixed_proc.send_signal(signal.SIGINT)
         try:
-            proc.communicate(timeout=8)
+            fixed_proc.communicate(timeout=8)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
+            fixed_proc.kill()
+            fixed_proc.communicate()
             pytest.fail("the fixed shape still ignores SIGINT")
 
 
@@ -1168,6 +1168,7 @@ class TestTheSupervisorDoesNotDeadlock:
         spec = importlib.util.spec_from_file_location(
             "onb_residency", REPO / "scripts" / "termux-supervisor.py"
         )
+        assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         # Registered before it is executed: a dataclass resolves its module
         # through sys.modules when it is defined, and a module that was never

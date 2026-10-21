@@ -53,6 +53,22 @@ services:
       # should raise it, because every extra part is another generation call and
       # generation is what costs.
       - OPEN_NOTEBOOK_TRANSFORMATION_CHUNK_TOKENS=${OPEN_NOTEBOOK_TRANSFORMATION_CHUNK_TOKENS:-3000}
+      # How long one LLM call may take.
+      #
+      # Sixty seconds is esperanto's default and it is not a *total* timeout -
+      # httpx applies it per read, so a streamed generation can run for many
+      # minutes without tripping it. What it does bound is the wait for the
+      # *first* token, which is the prompt evaluation. On this hardware a
+      # 6,750-token prompt takes about eighty seconds to evaluate, so the
+      # default expired before the model said anything and the failure was
+      # classified as a network error - "Could not connect to the AI provider" -
+      # which sent the investigation after connections that were working.
+      #
+      # It has to cover the prompt evaluation *and* the generation, so it is
+      # generous. A prompt that cannot be evaluated inside this window is a
+      # prompt the device cannot answer, and a timeout that says so is better
+      # than one that says the network is down.
+      - ESPERANTO_LLM_TIMEOUT=${ESPERANTO_LLM_TIMEOUT:-1800}
       # Without this the blob endpoints refuse everything: check_token
       # fails closed when no token is configured, so file bytes can
       # never move. The value comes from .env, where the sync token

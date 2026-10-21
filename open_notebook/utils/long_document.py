@@ -64,6 +64,15 @@ DEFAULT_OVERLAP_TOKENS = 250
 #: and the reduction step says so.
 DEFAULT_MAX_CHUNKS = 24
 
+#: The smallest chunk worth making.
+#:
+#: Below this, a chunk carries so little that the per-chunk overhead - the
+#: instructions, the model's answer - dominates what it actually says, and the
+#: number of generation calls needed to cover the document explodes. It is a
+#: floor for a pathological case (a model with a window too small for the
+#: work), not a target.
+MIN_USEFUL_BUDGET = 256
+
 _SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+|\n{2,}")
 
 
@@ -101,6 +110,44 @@ def _max_chunks() -> int:
         except ValueError:
             pass
     return DEFAULT_MAX_CHUNKS
+
+
+def chunk_budget() -> int:
+    """The configured budget, before any model's window is taken into account.
+
+    The configuration is a wish and the model's window is a fact; this is the
+    wish, so a caller that has to reconcile the two can say which one it gave
+    way.
+    """
+    return _chunk_budget()
+
+
+def budget_within_context(context_tokens: int | None, reserved_tokens: int) -> int:
+    """The chunk budget that fits inside the model's window.
+
+    The configured budget is a wish; the model's context is a fact. A chunk
+    larger than the window is truncated by the provider - silently, and with no
+    error - and a truncated chunk is precisely the failure this module exists
+    to prevent. So the window wins.
+
+    `reserved_tokens` is what the chunk does not get to use: the instructions
+    that precede it, the answer the model writes after it, and a margin for
+    the provider's own framing.
+
+    The difference between the wish and the fact is reported by the caller, so
+    a device that configured a budget its model cannot honour finds out
+    rather than quietly losing text.
+    """
+    budget = _chunk_budget()
+    if not context_tokens or context_tokens <= 0:
+        # The model's window is unknown - another provider, or an adapter that
+        # does not expose it. The configured budget is then the best guess
+        # there is, and the caller logs that it is a guess.
+        return budget
+    room = context_tokens - reserved_tokens
+    if room >= budget:
+        return budget
+    return max(MIN_USEFUL_BUDGET, room)
 
 
 def _split_long_paragraph(paragraph: str, budget: int) -> List[str]:

@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import Any, Callable, List
 
 from ai_prompter import Prompter
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -18,7 +18,11 @@ from open_notebook.exceptions import (
 )
 from open_notebook.utils import clean_thinking_content
 from open_notebook.utils.error_classifier import classify_error
-from open_notebook.utils.long_document import split_for_context
+from open_notebook.utils.long_document import (
+    budget_within_context,
+    chunk_budget,
+    split_for_context,
+)
 from open_notebook.utils.text_utils import extract_text_content
 from open_notebook.utils.token_utils import token_count
 
@@ -43,6 +47,147 @@ def _map_output_tokens() -> int:
         return value if value > 0 else 500
     except ValueError:
         return 500
+
+
+def _answer_output_tokens() -> int:
+    """How many tokens the final answer may write.
+
+    Generous, because the answer is the thing the reader gets. What it
+    actually writes is decided by the transformation's instructions - a dense
+    summary is a few hundred tokens - so the real limit is the room left in
+    the model's window once the document has been read, which is computed
+    where the document is known.
+    """
+    raw = os.getenv("OPEN_NOTEBOOK_TRANSFORMATION_ANSWER_TOKENS", "8192")
+    try:
+        value = int(raw)
+        return value if value > 0 else 8192
+    except ValueError:
+        return 8192
+
+
+#: Tokens held back for the provider's own framing of a request - the chat
+#: template it wraps the messages in, and the stop tokens it reserves.
+SAFETY_TOKENS = 256
+
+#: The smallest answer worth leaving room for.
+#:
+#: A part of a long document only has to write a short analysis, but a
+#: document that fits in one pass has to write the whole answer, and the room
+#: left for it is what the split budget has to keep clear. 1024 tokens is
+#: roughly a full paragraph of dense summary - more than the insights this
+#: produces, and comfortably more than nothing.
+MIN_ANSWER_RESERVE = 1024
+
+
+def _context_tokens(chain: Any) -> int | None:
+    """The model's context window, if it exposes one.
+
+    `num_ctx` is the field every adapter that has a window uses, and it is the
+    one that decides how large a part may be. A provider that does not expose
+    it returns None, and the caller falls back to the configured budget.
+    """
+    value = getattr(chain, "num_ctx", None)
+    try:
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _fit_batches(partials: List[str], limit: int) -> List[List[str]]:
+    """Group the partials into batches whose combined text fits `limit` tokens.
+
+    A batch that is over the limit would have its combine prompt truncated by
+    the provider, so the last partials in it would be lost - which is the same
+    silent loss this whole path exists to avoid, one level up.
+    """
+    batches: List[List[str]] = []
+    current: List[str] = []
+    current_tokens = 0
+    for partial in partials:
+        tokens = token_count(partial)
+        if current and current_tokens + tokens > limit:
+            batches.append(current)
+            current = [partial]
+            current_tokens = tokens
+        else:
+            current.append(partial)
+            current_tokens += tokens
+    if current:
+        batches.append(current)
+    return batches
+
+
+async def _reduce_to_fit(
+    provision: Callable[[int], Any],
+    state: dict,
+    instructions: str,
+    partials: List[str],
+    context_tokens: int | None,
+    answer_tokens: int,
+) -> List[str]:
+    """Reduce the partials until the ones left can be combined in one pass.
+
+    The partial analyses of a long document can add up to more than the
+    model's window - twenty-four parts at five hundred tokens each is more than
+    an 8k window takes - and a combine prompt that does not fit is truncated
+    by the provider, which would drop the last parts and leave an answer that
+    claims to cover the document while covering most of it.
+
+    So the partials are combined in batches that do fit, and the results of
+    those are combined again, until a single pass remains.
+
+    The reduction stops short of losing anything: if the partials cannot be
+    made to fit, they are returned as they are and the loss is reported.
+    """
+    if not context_tokens or len(partials) <= 1:
+        return partials
+
+    overhead = token_count(
+        Prompter(prompt_template="transformation/combine").render(
+            data={**state, "instructions": instructions, "partials": ""}
+        )
+    )
+    limit = max(1, context_tokens - overhead - SAFETY_TOKENS - MIN_ANSWER_RESERVE)
+
+    while True:
+        joined = "\n\n---\n\n".join(partials)
+        needed = overhead + token_count(joined) + SAFETY_TOKENS + MIN_ANSWER_RESERVE
+        if needed <= context_tokens:
+            return partials
+
+        batches = _fit_batches(partials, limit)
+        if len(batches) <= 1 or len(batches) >= len(partials):
+            # Either there is nothing smaller to reduce to, or every batch holds
+            # a single partial - so reducing again would not make progress.
+            # Combining anyway is better than not answering, and the loss is
+            # reported rather than hidden.
+            logger.warning(
+                f"the {len(partials)} partial analyses do not fit the model's "
+                f"window of {context_tokens} tokens and cannot be reduced "
+                f"further, so the last of them may be lost"
+            )
+            return partials
+
+        reduced: List[str] = []
+        for batch in batches:
+            prompt = Prompter(prompt_template="transformation/combine").render(
+                data={
+                    **state,
+                    "instructions": instructions,
+                    "partials": "\n\n---\n\n".join(batch),
+                }
+            )
+            chain = await provision(answer_tokens)
+            response = await chain.ainvoke(
+                [SystemMessage(content=prompt), HumanMessage(content="")]
+            )
+            reduced.append(extract_text_content(response))
+        logger.info(
+            f"reduced {len(partials)} partial analyses to {len(reduced)} to fit "
+            f"the model's window"
+        )
+        partials = reduced
 
 
 async def run_transformation(state: dict, config: RunnableConfig) -> dict:
@@ -76,19 +221,20 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
         system_prompt = Prompter(prompt_template="transformation/execute").render(
             data={**state, "instructions": instructions}
         )
+        # The part instructions are rendered once, without a part, and the part
+        # itself travels as the user message.
+        #
+        # Putting the part into the instructions as well would send it twice,
+        # and a part can run to thousands of tokens - so the provider would
+        # truncate the pair and the model would analyse only the start of the
+        # part it was given. The two templates therefore have to agree on this:
+        # `execute.jinja` has always put the document in the user message, and
+        # `execute_part.jinja` now does the same.
+        part_prompt = Prompter(prompt_template="transformation/execute_part").render(
+            data={**state, "instructions": instructions}
+        )
         content_str = str(content) if content else ""
 
-        # A document longer than the context is split, analysed in parts, and
-        # the parts combined. See open_notebook/utils/long_document.py for why
-        # this is not optional: the provider truncates silently, and the insight
-        # is then presented as covering the whole document when it covers only
-        # the first few thousand tokens of it.
-        chunks = split_for_context(content_str)
-        if len(chunks) > 1:
-            logger.info(
-                f"source is {token_count(content_str)} tokens, which does not fit "
-                f"the context: analysing in {len(chunks)} parts and combining"
-            )
         from open_notebook.utils.job_control import (
             get_current_command_id,
             report_progress_record,
@@ -97,21 +243,70 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
         cmd_id = get_current_command_id()
         await report_progress_record(cmd_id, progress=30, stage="loading_model")
 
-        # The payload is what the model is provisioned against. In the
-        # multi-part path it is the first part; the single-part path is the
-        # whole document, which is the same thing it has always been.
-        payload = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=chunks[0] if len(chunks) > 1 else content_str),
-        ]
+        model_id = config.get("configurable", {}).get("model_id")
+        answer_tokens = _answer_output_tokens()
+        map_tokens = _map_output_tokens()
 
+        async def provision(max_output_tokens: int) -> Any:
+            return await provision_langchain_model(
+                str([SystemMessage(content=system_prompt)]),
+                model_id,
+                "transformation",
+                max_tokens=max_output_tokens,
+            )
+
+        # The model is provisioned before the document is split, because the
+        # window it was given decides how large a part may be. Splitting first
+        # and hoping the parts fit is how a part ends up truncated by the
+        # provider, silently, with the answer still presented as covering the
+        # whole document.
+        #
+        # The selection payload is the whole document rather than a part, so
+        # that a document long enough to warrant a larger model still gets one
+        # - the same rule the transformation used before it was split.
         chain = await provision_langchain_model(
-            str(payload),
-            config.get("configurable", {}).get("model_id"),
+            str(
+                [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=content_str),
+                ]
+            ),
+            model_id,
             "transformation",
-            max_tokens=8192,
+            max_tokens=answer_tokens,
         )
         await report_progress_record(cmd_id, progress=50, stage="model_ready")
+
+        context_tokens = _context_tokens(chain)
+        # What a part does not get to use: the instructions in front of it, the
+        # answer written after it, and a margin for the provider's framing.
+        reserved = (
+            token_count(part_prompt)
+            + max(map_tokens, MIN_ANSWER_RESERVE)
+            + SAFETY_TOKENS
+        )
+        budget = budget_within_context(context_tokens, reserved)
+        wanted = chunk_budget()
+        if budget < wanted:
+            logger.warning(
+                f"the configured chunk budget of {wanted} tokens does not fit the "
+                f"model's window of {context_tokens} tokens once the "
+                f"instructions and the answer are allowed for, so the parts will "
+                f"be {budget} tokens each; a part larger than the window would be "
+                f"truncated by the provider"
+            )
+
+        # A document longer than the context is split, analysed in parts, and
+        # the parts combined. See open_notebook/utils/long_document.py for why
+        # this is not optional: the provider truncates silently, and the insight
+        # is then presented as covering the whole document when it covers only
+        # the first few thousand tokens of it.
+        chunks = split_for_context(content_str, budget_tokens=budget)
+        if len(chunks) > 1:
+            logger.info(
+                f"source is {token_count(content_str)} tokens, which does not fit "
+                f"the context: analysing in {len(chunks)} parts and combining"
+            )
 
         await report_progress_record(cmd_id, progress=60, stage="generating")
 
@@ -127,12 +322,7 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
             #
             # The parts are then combined into one answer of the length the
             # transformation actually calls for, by the reduce step below.
-            map_chain = await provision_langchain_model(
-                str(payload),
-                config.get("configurable", {}).get("model_id"),
-                "transformation",
-                max_tokens=_map_output_tokens(),
-            )
+            map_chain = await provision(map_tokens)
             partials: List[str] = []
             for index, chunk in enumerate(chunks):
                 await report_progress_record(
@@ -140,9 +330,6 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
                     progress=60 + int(25 * index / len(chunks)),
                     stage=f"analysing_part_{index + 1}_of_{len(chunks)}",
                 )
-                part_prompt = Prompter(
-                    prompt_template="transformation/execute_part"
-                ).render(data={**state, "instructions": instructions, "content": chunk})
                 part = await map_chain.ainvoke(
                     [
                         SystemMessage(content=part_prompt),
@@ -155,8 +342,11 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
                     f"{len(partials[-1])} characters"
                 )
 
-            # Reduce: one pass over the partials.
+            # Reduce: one pass over the partials, or several if they do not fit.
             await report_progress_record(cmd_id, progress=88, stage="combining_parts")
+            partials = await _reduce_to_fit(
+                provision, state, instructions, partials, context_tokens, answer_tokens
+            )
             combine_prompt = Prompter(prompt_template="transformation/combine").render(
                 data={
                     **state,
@@ -164,14 +354,48 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
                     "partials": "\n\n---\n\n".join(partials),
                 }
             )
-            response = await chain.ainvoke(
+            # The answer gets the room that is left after the partials have
+            # been read. Asking for more would not give it more: the provider
+            # would stop the generation at the window, and the answer would be
+            # cut off mid-sentence.
+            room = answer_tokens
+            if context_tokens:
+                room = max(
+                    MIN_ANSWER_RESERVE,
+                    min(
+                        answer_tokens,
+                        context_tokens - token_count(combine_prompt) - SAFETY_TOKENS,
+                    ),
+                )
+            combine_chain = await provision(room)
+            response = await combine_chain.ainvoke(
                 [
                     SystemMessage(content=combine_prompt),
                     HumanMessage(content=""),
                 ]
             )
         else:
-            response = await chain.ainvoke(payload)
+            # The whole document fits, so it is read in one pass - and the
+            # answer gets whatever room is left after it.
+            room = answer_tokens
+            if context_tokens:
+                room = max(
+                    MIN_ANSWER_RESERVE,
+                    min(
+                        answer_tokens,
+                        context_tokens
+                        - token_count(system_prompt)
+                        - token_count(content_str)
+                        - SAFETY_TOKENS,
+                    ),
+                )
+            single_chain = await provision(room)
+            response = await single_chain.ainvoke(
+                [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=content_str),
+                ]
+            )
 
         # Provider adapters use different keys for the termination reason.
         # Check before saving: a nonempty answer can still be incomplete.

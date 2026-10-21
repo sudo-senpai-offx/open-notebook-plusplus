@@ -1341,11 +1341,12 @@ class TestThreadCountIsMeasured:
         the whole budget rather than half of it."""
         text = _read_script("termux-cpu.sh")
         body = text[text.index("cpu_threads()") :]
-        stt = body[
-            body.index("    stt)") : body.index("    tts)")
-            if "    tts)" in body
-            else body
-        ]
+        # The end of the STT section is where the TTS section starts - or the
+        # end of the function, if there is no TTS section. Using the text
+        # itself as the end would be a slice with a string for a stop, which
+        # is a runtime error rather than an empty section.
+        stop = body.index("    tts)") if "    tts)" in body else len(body)
+        stt = body[body.index("    stt)") : stop]
         assert "_t=$_budget" in stt, (
             "STT should take the whole inference budget; it is the queued job "
             "whose throughput decides whether a lecture is searchable in a "
