@@ -117,13 +117,24 @@ async def _insights(source_id: str) -> List[Dict[str, Any]]:
 
 
 async def report(
-    source_title: str, transformation_title: str | None, context_tokens: int
+    source_title: str,
+    transformation_title: str | None,
+    context_tokens: int,
+    answer_path: str | None = None,
 ) -> int:
     source = await _fetch(source_title)
     document = source.get("full_text") or ""
     insights = await _insights(str(source["id"]))
 
-    if transformation_title:
+    if answer_path:
+        # Scoring a file rather than a stored insight, so that two answers to
+        # the same question can be put side by side - the one the old path
+        # would have produced, and the one this one produces.
+        with open(answer_path, encoding="utf-8") as handle:
+            insights = [
+                {"insight_type": f"answer from {answer_path}", "content": handle.read()}
+            ]
+    elif transformation_title:
         insights = [
             i for i in insights if i.get("insight_type") == transformation_title
         ]
@@ -198,8 +209,17 @@ def main() -> int:
         default=8192,
         help="the model's context window in tokens (default: 8192)",
     )
+    parser.add_argument(
+        "--answer",
+        help=(
+            "score this file instead of the stored insights - used to put two "
+            "answers to the same question side by side"
+        ),
+    )
     args = parser.parse_args()
-    return asyncio.run(report(args.source, args.transformation, args.context))
+    return asyncio.run(
+        report(args.source, args.transformation, args.context, args.answer)
+    )
 
 
 if __name__ == "__main__":
