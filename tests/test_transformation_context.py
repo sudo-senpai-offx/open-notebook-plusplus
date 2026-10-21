@@ -25,6 +25,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage
+from loguru import logger
 
 from open_notebook.utils.long_document import budget_within_context, chunk_budget
 from open_notebook.utils.token_utils import token_count
@@ -47,9 +49,7 @@ class _FakeChain:
 
     async def ainvoke(self, messages):
         self.requests.append(list(messages))
-        response = MagicMock()
-        response.content = self.answer
-        response.response_metadata = {}
+        response = AIMessage(content=self.answer)
         return response
 
     @property
@@ -60,12 +60,12 @@ class _FakeChain:
         ]
 
 
-def _fake_provisioner(num_ctx: int | None):
+def _fake_provisioner(num_ctx: int | None, answer: str = "an answer"):
     """A stand-in for `provision_langchain_model` that records each chain."""
     made: list[_FakeChain] = []
 
     async def _provision(content, model_id, default_type, **kwargs):
-        chain = _FakeChain(num_ctx)
+        chain = _FakeChain(num_ctx, answer)
         chain.max_tokens = kwargs.get("max_tokens")
         made.append(chain)
         return chain
@@ -88,8 +88,8 @@ def _state(text: str):
     }
 
 
-async def _run(text: str, num_ctx: int | None):
-    provision, made = _fake_provisioner(num_ctx)
+async def _run(text: str, num_ctx: int | None, answer: str = "an answer"):
+    provision, made = _fake_provisioner(num_ctx, answer)
     with patch(
         "open_notebook.graphs.transformation.provision_langchain_model",
         new=provision,
@@ -98,6 +98,12 @@ async def _run(text: str, num_ctx: int | None):
 
         await run_transformation(_state(text), config={"configurable": {}})
     return made
+
+
+def _is_combine(messages) -> bool:
+    """A combine request has nothing in the user turn - the partials are in
+    the instructions - while a map request carries the part."""
+    return str(messages[-1].content).strip() == ""
 
 
 class TestTheWindowIsRespected:
@@ -204,6 +210,108 @@ class TestTheWindowIsRespected:
                 f"output in a window of 4096, which leaves no room for the "
                 f"document"
             )
+
+
+class TestTheReductionFitsTheWindow:
+    """The partial analyses of a long document can add up to more than the
+    model's window, and a combine prompt that does not fit is truncated by the
+    provider - which would drop the last parts and leave an answer that claims
+    to cover the document while covering most of it."""
+
+    @pytest.mark.asyncio
+    async def test_partials_that_do_not_fit_are_combined_in_batches(self):
+        """Each part writes a long analysis, so the partials add up.
+
+        The partials of a long document can add up to more than the model's
+        window, and a combine prompt that does not fit is truncated by the
+        provider - which would drop the last parts and leave an answer that
+        claims to cover the document while covering most of it. So they are
+        combined in batches that do fit, and the results of those are combined
+        again.
+        """
+        logged: list[str] = []
+        sink = logger.add(logged.append, level="INFO")
+        try:
+            made = await _run(_document(paragraphs=600), 4096, answer="word " * 300)
+        finally:
+            logger.remove(sink)
+
+        reductions = [m for m in logged if "partial analyses to" in m]
+        assert reductions, (
+            "the partial analyses did not fit the window, so they should have "
+            f"been reduced in batches; the log said: {logged}"
+        )
+
+        for messages in [
+            messages
+            for chain in made
+            for messages in chain.requests
+            if _is_combine(messages)
+        ]:
+            tokens = sum(token_count(str(m.content)) for m in messages)
+            assert tokens <= 4096, (
+                f"a combine prompt of {tokens} tokens was sent to a model whose "
+                f"window is 4096"
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_window_too_small_to_reduce_reports_the_loss(self):
+        """When even one partial does not fit, there is nothing smaller to
+        reduce to - and the loss is reported rather than hidden.
+
+        A window of 1024 cannot hold a part, the instructions and an answer
+        together. The transformation cannot fix that; it can only say so.
+        """
+        logged: list[str] = []
+        sink = logger.add(logged.append, level="WARNING")
+        try:
+            await _run(_document(paragraphs=60), 1024, answer="word " * 300)
+        finally:
+            logger.remove(sink)
+
+        assert any("cannot be reduced further" in message for message in logged), (
+            f"the loss should have been reported; the log said: {logged}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_partials_are_the_text_and_not_the_message(self):
+        """The partial analyses go into the combine prompt verbatim.
+
+        They used to be the message's *repr* - "content='...' additional_
+        kwargs={} response_metadata={}" - because the extractor was handed
+        the message instead of its content. The combine step then spent its
+        input budget on that wrapper, and read the text with its newlines
+        escaped.
+        """
+        made = await _run(_document(), 4096, answer="The listening habit matters.")
+
+        combines = [
+            messages
+            for chain in made
+            for messages in chain.requests
+            if _is_combine(messages)
+        ]
+        assert combines, "the parts were never combined"
+        prompt = str(combines[-1][0].content)
+        assert "The listening habit matters." in prompt
+        for noise in ("additional_kwargs", "response_metadata", "tool_calls"):
+            assert noise not in prompt, (
+                f"the combine prompt contains {noise!r}, so the partial was "
+                f"the message's repr rather than its text"
+            )
+
+    @pytest.mark.asyncio
+    async def test_partials_that_fit_are_combined_once(self):
+        """The ordinary case: one combine, no batching."""
+        made = await _run(_document(), 4096)
+
+        combines = [
+            messages
+            for chain in made
+            for messages in chain.requests
+            if _is_combine(messages)
+        ]
+        assert len(combines) == 1, "the partials fitted, so one combine is enough"
 
 
 class TestTheBudgetFitsTheWindow:

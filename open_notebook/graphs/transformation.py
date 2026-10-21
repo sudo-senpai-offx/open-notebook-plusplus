@@ -182,7 +182,7 @@ async def _reduce_to_fit(
             response = await chain.ainvoke(
                 [SystemMessage(content=prompt), HumanMessage(content="")]
             )
-            reduced.append(extract_text_content(response))
+            reduced.append(extract_text_content(response.content))
         logger.info(
             f"reduced {len(partials)} partial analyses to {len(reduced)} to fit "
             f"the model's window"
@@ -336,12 +336,20 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
                         HumanMessage(content=chunk),
                     ]
                 )
-                partials.append(extract_text_content(part))
+                # `.content`, not the message itself.
+                #
+                # `extract_text_content` handles a plain string and a list of
+                # content blocks; a message is neither, so it falls through to
+                # `str(message)` - which is the message's *repr*. The partial
+                # would then reach the combine step wrapped in
+                # "content='...' additional_kwargs={} response_metadata={}", with
+                # its newlines escaped, and every one of those characters would
+                # be spending the combine step's input budget.
+                partials.append(extract_text_content(part.content))
                 logger.info(
                     f"part {index + 1}/{len(chunks)} analysed: "
                     f"{len(partials[-1])} characters"
                 )
-
             # Reduce: one pass over the partials, or several if they do not fit.
             await report_progress_record(cmd_id, progress=88, stage="combining_parts")
             partials = await _reduce_to_fit(
