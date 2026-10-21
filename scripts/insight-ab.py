@@ -76,12 +76,42 @@ def _old_module(ref: str, path: Path, old_code: str | None = None) -> Any:
     return module
 
 
+def _truncate_to_prompt(document: str, transformation: Any, prompt_tokens: int) -> str:
+    """The document as the provider left it, cut to the window.
+
+    The provider kept the beginning of the prompt and dropped the rest, so
+    the model saw the first words of the document and nothing after them.
+    Reproducing that by cutting the document to the same number of tokens
+    gives the model the same prompt - the same instructions, the same opening
+    of the document - and so the same answer.
+    """
+    from ai_prompter import Prompter
+
+    from open_notebook.utils.token_utils import token_count
+
+    system = Prompter(prompt_template="transformation/execute").render(
+        data={"transformation": transformation, "instructions": transformation.prompt}
+    )
+    room = max(0, prompt_tokens - token_count(system))
+
+    words = document.split()
+    low, high = 0, len(words)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if token_count(" ".join(words[:mid])) <= room:
+            low = mid
+        else:
+            high = mid - 1
+    return " ".join(words[:low])
+
+
 async def run(
     source_title: str,
     transformation_title: str,
     out_path: str,
     ref: str,
     old_code: str | None = None,
+    prompt_tokens: int | None = None,
 ) -> int:
     with tempfile.TemporaryDirectory() as directory:
         old = _old_module(ref, Path(directory) / "old_transformation.py", old_code)
@@ -117,6 +147,24 @@ async def run(
             "input_text": source["full_text"],
             "transformation": transformation,
         }
+
+        if prompt_tokens:
+            # The provider truncated the document to what fitted the window.
+            # Truncating it here instead gives the model the identical
+            # prompt - the same first words, the same last words of the kept
+            # part - and the same output budget, so the answer is the answer
+            # the old path gave. It just does not take hours to get there:
+            # the prompt is evaluated once either way, and the old path's
+            # prompt was evaluated with a hundred thousand tokens of
+            # overflow in it.
+            state["input_text"] = _truncate_to_prompt(
+                state["input_text"], transformation, prompt_tokens
+            )
+            print(
+                f"  the model will see {prompt_tokens} prompt tokens, which is "
+                f"what the provider left of it"
+            )
+
         result = await old.run_transformation(state, config={"configurable": {}})
 
     text = result["output"]
@@ -143,9 +191,25 @@ def main() -> int:
             "from - the container, for one"
         ),
     )
+    parser.add_argument(
+        "--prompt-tokens",
+        type=int,
+        help=(
+            "cut the document to this many prompt tokens before running - the "
+            "same cut the provider made when it truncated the prompt to fit "
+            "the window"
+        ),
+    )
     args = parser.parse_args()
     return asyncio.run(
-        run(args.source, args.transformation, args.out, args.ref, args.old_code)
+        run(
+            args.source,
+            args.transformation,
+            args.out,
+            args.ref,
+            args.old_code,
+            args.prompt_tokens,
+        )
     )
 
 
