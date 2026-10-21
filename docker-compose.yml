@@ -48,6 +48,11 @@ services:
       # raise per device in .env where cores and RAM allow - the PC runs
       # 3 (12 cores, CPU-bound inference, measured against thrashing).
       - OPEN_NOTEBOOK_WORKER_MAX_TASKS=${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-1}
+      # How much of the model's context one part of a long document may occupy.
+      # The default suits a 4096-token window; a device that gives the model more
+      # should raise it, because every extra part is another generation call and
+      # generation is what costs.
+      - OPEN_NOTEBOOK_TRANSFORMATION_CHUNK_TOKENS=${OPEN_NOTEBOOK_TRANSFORMATION_CHUNK_TOKENS:-3000}
       # Without this the blob endpoints refuse everything: check_token
       # fails closed when no token is configured, so file bytes can
       # never move. The value comes from .env, where the sync token
