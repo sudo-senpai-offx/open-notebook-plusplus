@@ -94,6 +94,23 @@ def _context_tokens(chain: Any) -> int | None:
         return None
 
 
+def _without_reasoning(chain: Any) -> None:
+    """Turn the model's reasoning off, for a call that does not need it.
+
+    The map step is mechanical: analyse this part of the document, in this
+    shape. The reasoning a thinking model does about it is not part of the
+    answer - and at the map step's small output budget it is *all* there is.
+    The model thinks, the budget runs out, and the part comes back empty.
+    Measured: five hundred tokens of reasoning and no analysis at all.
+
+    It is a field on the model rather than a request parameter, because the
+    adapter builds the request from the model's own settings and passes
+    nothing else through.
+    """
+    if hasattr(chain, "reasoning"):
+        chain.reasoning = False
+
+
 def _fit_batches(partials: List[str], limit: int) -> List[List[str]]:
     """Group the partials into batches whose combined text fits `limit` tokens.
 
@@ -323,6 +340,7 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
             # The parts are then combined into one answer of the length the
             # transformation actually calls for, by the reduce step below.
             map_chain = await provision(map_tokens)
+            _without_reasoning(map_chain)
             partials: List[str] = []
             for index, chunk in enumerate(chunks):
                 await report_progress_record(
@@ -345,7 +363,28 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
                 # "content='...' additional_kwargs={} response_metadata={}", with
                 # its newlines escaped, and every one of those characters would
                 # be spending the combine step's input budget.
-                partials.append(extract_text_content(part.content))
+                text = extract_text_content(part.content)
+                if not text.strip():
+                    # The model spent its whole budget thinking and had nothing
+                    # left to say. The reasoning is better than nothing, and
+                    # saying so is better than a hole in the coverage that
+                    # nothing reports.
+                    reasoning = (getattr(part, "additional_kwargs", {}) or {}).get(
+                        "reasoning_content", ""
+                    )
+                    if reasoning.strip():
+                        logger.warning(
+                            f"part {index + 1}/{len(chunks)} produced no analysis, "
+                            f"only reasoning; the reasoning is being used as the "
+                            f"analysis"
+                        )
+                        text = reasoning
+                    else:
+                        raise IncompleteGenerationError(
+                            f"The model returned nothing for part {index + 1} of "
+                            f"{len(chunks)} of the document."
+                        )
+                partials.append(text)
                 logger.info(
                     f"part {index + 1}/{len(chunks)} analysed: "
                     f"{len(partials[-1])} characters"

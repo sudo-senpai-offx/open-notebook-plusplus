@@ -46,6 +46,8 @@ class _FakeChain:
         self.answer = answer
         self.max_tokens: int | None = None
         self.requests: list[list] = []
+        #: Set by the transformation, and the point of the map step's chain.
+        self.reasoning: bool | str | None = None
 
     async def ainvoke(self, messages):
         self.requests.append(list(messages))
@@ -312,6 +314,49 @@ class TestTheReductionFitsTheWindow:
             if _is_combine(messages)
         ]
         assert len(combines) == 1, "the partials fitted, so one combine is enough"
+
+
+class TestTheMapStepDoesNotThink:
+    """A thinking model spends the map step's whole budget thinking.
+
+    Measured on qwen3:4b: five hundred tokens of reasoning and no analysis at
+    all, so the part came back empty. Ten parts, ten holes, and an answer
+    that covered the document in the same way it always had - by not covering
+    it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_map_step_turns_the_reasoning_off(self):
+        made = await _run(_document(), 4096)
+
+        map_chains = [
+            chain
+            for chain in made
+            if any(not _is_combine(messages) for messages in chain.requests)
+        ]
+        assert map_chains, "the map step never ran"
+        for chain in map_chains:
+            assert chain.reasoning is False, (
+                "the map step should not be reasoning: at its output budget the "
+                "reasoning is all the model has room for"
+            )
+
+    @pytest.mark.asyncio
+    async def test_the_final_answer_is_left_to_reason(self):
+        """Only the map step is mechanical. The reduce step is a synthesis, and
+        the budget for it is not small."""
+        made = await _run(_document(), 4096)
+
+        combine_chains = [
+            chain
+            for chain in made
+            if chain.requests and all(_is_combine(m) for m in chain.requests)
+        ]
+        assert combine_chains, "the parts were never combined"
+        for chain in combine_chains:
+            assert chain.reasoning is not False, (
+                "the reduce step should keep the model's reasoning"
+            )
 
 
 class TestTheBudgetFitsTheWindow:
