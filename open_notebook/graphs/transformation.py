@@ -16,7 +16,7 @@ from open_notebook.exceptions import (
     InvalidInputError,
     OpenNotebookError,
 )
-from open_notebook.utils import clean_thinking_content
+from open_notebook.utils import clean_thinking_content, partials
 from open_notebook.utils.error_classifier import classify_error
 from open_notebook.utils.long_document import (
     budget_within_context,
@@ -251,6 +251,10 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
             data={**state, "instructions": instructions}
         )
         content_str = str(content) if content else ""
+        # Whether the parts of a long document can be kept between runs. A
+        # transformation with no source - a measurement, say - has nowhere to
+        # keep them.
+        resumable = source is not None and bool(getattr(transformation, "id", None))
 
         from open_notebook.utils.job_control import (
             get_current_command_id,
@@ -341,13 +345,34 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
             # transformation actually calls for, by the reduce step below.
             map_chain = await provision(map_tokens)
             _without_reasoning(map_chain)
-            partials: List[str] = []
+
+            # A long transformation is a long series of generation calls, and
+            # an interruption in the middle of it - the device restarting, the
+            # battery giving out - would throw all of it away. So the parts
+            # that are done are kept, and a restarted transformation picks up
+            # where it left off.
+            resume: dict[int, str] = {}
+            if resumable:
+                resume = await partials.load(
+                    str(source.id), str(transformation.id), content_str
+                )
+                if resume:
+                    logger.info(
+                        f"resuming: {len(resume)} of {len(chunks)} parts were "
+                        f"already analysed"
+                    )
+
+            partials_list: List[str] = []
             for index, chunk in enumerate(chunks):
                 await report_progress_record(
                     cmd_id,
                     progress=60 + int(25 * index / len(chunks)),
                     stage=f"analysing_part_{index + 1}_of_{len(chunks)}",
                 )
+                if index in resume:
+                    partials_list.append(resume[index])
+                    logger.info(f"part {index + 1}/{len(chunks)} was already analysed")
+                    continue
                 part = await map_chain.ainvoke(
                     [
                         SystemMessage(content=part_prompt),
@@ -384,21 +409,34 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
                             f"The model returned nothing for part {index + 1} of "
                             f"{len(chunks)} of the document."
                         )
-                partials.append(text)
+                partials_list.append(text)
                 logger.info(
                     f"part {index + 1}/{len(chunks)} analysed: "
-                    f"{len(partials[-1])} characters"
+                    f"{len(partials_list[-1])} characters"
                 )
+                if resumable:
+                    await partials.store(
+                        str(source.id),
+                        str(transformation.id),
+                        content_str,
+                        index,
+                        text,
+                    )
             # Reduce: one pass over the partials, or several if they do not fit.
             await report_progress_record(cmd_id, progress=88, stage="combining_parts")
-            partials = await _reduce_to_fit(
-                provision, state, instructions, partials, context_tokens, answer_tokens
+            partials_list = await _reduce_to_fit(
+                provision,
+                state,
+                instructions,
+                partials_list,
+                context_tokens,
+                answer_tokens,
             )
             combine_prompt = Prompter(prompt_template="transformation/combine").render(
                 data={
                     **state,
                     "instructions": instructions,
-                    "partials": "\n\n---\n\n".join(partials),
+                    "partials": "\n\n---\n\n".join(partials_list),
                 }
             )
             # The answer gets the room that is left after the partials have
@@ -469,6 +507,11 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
 
         if source:
             await source.add_insight(transformation.title, cleaned_content)
+            # The answer is written, so the parts it was made from are no
+            # longer needed. If they were kept, a later transformation of the
+            # same source would resume onto them.
+            if resumable:
+                await partials.clear(str(source.id), str(transformation.id))
 
         await report_progress_record(cmd_id, progress=95, stage="insight_saved")
 
