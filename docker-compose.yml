@@ -53,6 +53,15 @@ services:
       # should raise it, because every extra part is another generation call and
       # generation is what costs.
       - OPEN_NOTEBOOK_TRANSFORMATION_CHUNK_TOKENS=${OPEN_NOTEBOOK_TRANSFORMATION_CHUNK_TOKENS:-3000}
+      # How many tokens one *part* of a long document may write.
+      #
+      # A part is an intermediate, not the answer: the reduce step writes the
+      # real one. The budget is small on purpose, because a part that wrote a
+      # full-length summary would cost as much as the final answer, once per
+      # part. It also has to be small enough that a part *finishes* - a part
+      # that takes longer than the device can be interrupted for is a part
+      # whose work is thrown away.
+      - OPEN_NOTEBOOK_TRANSFORMATION_MAP_TOKENS=${OPEN_NOTEBOOK_TRANSFORMATION_MAP_TOKENS:-250}
       # How long one LLM call may take.
       #
       # Sixty seconds is esperanto's default and it is not a *total* timeout -
