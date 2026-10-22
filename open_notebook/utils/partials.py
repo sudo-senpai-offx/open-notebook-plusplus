@@ -59,17 +59,25 @@ def _record_id(source_id: str, transformation_id: str) -> str:
     return f"{TABLE}:{digest}"
 
 
-async def load(source_id: str, transformation_id: str, text: str) -> Dict[int, str]:
+async def load(
+    source_id: str, transformation_id: str, text: str, split_key: str
+) -> Dict[int, str]:
     """The parts already analysed, by their position in the document.
 
     Empty when the document has changed since the parts were analysed - the
     analyses are of the text that was there, and a different text needs
     different analyses.
+
+    Empty also when the *split* has changed. The parts are the document cut
+    up, and a different cut is a different set of parts: the first part of a
+    document cut into ten is not the first part of the same document cut into
+    eighteen, and resuming across that would analyse one piece of the
+    document and call it another.
     """
     record_id = _record_id(source_id, transformation_id)
     try:
         rows = await repo_query(
-            "SELECT partials, content_hash FROM $id",
+            "SELECT partials, content_hash, split_key FROM $id",
             {"id": ensure_record_id(record_id)},
         )
     except Exception as e:  # noqa: BLE001 - a missing record is not an error
@@ -84,6 +92,12 @@ async def load(source_id: str, transformation_id: str, text: str) -> Dict[int, s
             "the analyses are not resumed"
         )
         return {}
+    if row.get("split_key") != split_key:
+        logger.info(
+            "the document is being split differently than it was when the parts "
+            "were analysed, so the analyses are not resumed"
+        )
+        return {}
     stored = row.get("partials") or {}
     result: Dict[int, str] = {}
     for key, value in stored.items():
@@ -95,11 +109,16 @@ async def load(source_id: str, transformation_id: str, text: str) -> Dict[int, s
 
 
 async def store(
-    source_id: str, transformation_id: str, text: str, index: int, partial: str
+    source_id: str,
+    transformation_id: str,
+    text: str,
+    split_key: str,
+    index: int,
+    partial: str,
 ) -> None:
     """Keep one part's analysis, so a restart does not throw it away."""
     record_id = _record_id(source_id, transformation_id)
-    existing = await load(source_id, transformation_id, text)
+    existing = await load(source_id, transformation_id, text, split_key)
     existing[index] = partial
     await repo_upsert(
         TABLE,
@@ -108,6 +127,7 @@ async def store(
             "source": source_id,
             "transformation": transformation_id,
             "content_hash": content_hash(text),
+            "split_key": split_key,
             "partials": {str(k): v for k, v in existing.items()},
         },
     )

@@ -17,6 +17,7 @@ to have.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -101,10 +102,12 @@ async def _run(
         chains.append(chain)
         return chain
 
-    async def _default_load(source_id, transformation_id, content):
+    async def _default_load(source_id, transformation_id, content, split_key):
         return {}
 
-    async def _default_store(source_id, transformation_id, content, index, partial):
+    async def _default_store(
+        source_id, transformation_id, content, split_key, index, partial
+    ):
         return None
 
     async def _default_clear(source_id, transformation_id):
@@ -143,7 +146,9 @@ class TestThePartialsAreKept:
         text = _document()
         stored: list[int] = []
 
-        async def _store(source_id, transformation_id, content, index, partial):
+        async def _store(
+            source_id, transformation_id, content, split_key, index, partial
+        ):
             stored.append(index)
 
         await _run(text, store=_store)
@@ -183,7 +188,7 @@ class TestTheTransformationResumes:
 
         done = {0: "the analysis of part one", 1: "the analysis of part two"}
 
-        async def _load(source_id, transformation_id, content):
+        async def _load(source_id, transformation_id, content, split_key):
             return dict(done)
 
         _state, _result, chains, _add = await _run(text, load=_load)
@@ -215,7 +220,7 @@ class TestTheTransformationResumes:
         """
         text = _document()
 
-        async def _load(source_id, transformation_id, content):
+        async def _load(source_id, transformation_id, content, split_key):
             # The loader itself decides this: it compares the hash. Here the
             # wiring is what matters - the transformation asks the loader
             # with the text it is working on.
@@ -242,3 +247,51 @@ class TestThePartialsModule:
     def test_the_content_hash_changes_with_the_text(self):
         assert partials.content_hash("one") != partials.content_hash("two")
         assert partials.content_hash("one") == partials.content_hash("one")
+
+    @pytest.mark.asyncio
+    async def test_a_different_split_is_not_resumed(self):
+        """The parts are the document cut up.
+
+        The first part of a document cut into ten is not the first part of the
+        same document cut into eighteen. Resuming across that would analyse
+        one piece of the document and call it another - and the answer would
+        be made of parts of two different documents, cut differently.
+        """
+        stored: dict[str, Any] = {
+            "partials": {"0": "an analysis of the first tenth of the document"},
+            "content_hash": partials.content_hash("the document"),
+            "split_key": "10:6000:8192",
+        }
+
+        async def _query(query, vars=None):
+            assert "split_key" in query, "the split has to be checked"
+            return [stored]
+
+        with patch.object(partials, "repo_query", new=_query):
+            same = await partials.load(
+                "source:a", "transformation:b", "the document", "10:6000:8192"
+            )
+            assert same == {0: stored["partials"]["0"]}
+
+            different = await partials.load(
+                "source:a", "transformation:b", "the document", "18:3000:8192"
+            )
+            assert different == {}, "a different cut is a different set of parts"
+
+    @pytest.mark.asyncio
+    async def test_changed_text_is_not_resumed(self):
+        """The analyses are of the text that was there."""
+        stored: dict[str, Any] = {
+            "partials": {"0": "an analysis of the old text"},
+            "content_hash": partials.content_hash("the old text"),
+            "split_key": "10:6000:8192",
+        }
+
+        async def _query(query, vars=None):
+            return [stored]
+
+        with patch.object(partials, "repo_query", new=_query):
+            resumed = await partials.load(
+                "source:a", "transformation:b", "a new text", "10:6000:8192"
+            )
+            assert resumed == {}

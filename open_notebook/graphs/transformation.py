@@ -352,9 +352,12 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
             # that are done are kept, and a restarted transformation picks up
             # where it left off.
             resume: dict[int, str] = {}
+            # The parts are the document cut up, so the resume is only valid
+            # for the same cut: the same number of parts, made the same way.
+            split_key = f"{len(chunks)}:{budget}:{context_tokens}"
             if resumable:
                 resume = await partials.load(
-                    str(source.id), str(transformation.id), content_str
+                    str(source.id), str(transformation.id), content_str, split_key
                 )
                 if resume:
                     logger.info(
@@ -419,6 +422,7 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
                         str(source.id),
                         str(transformation.id),
                         content_str,
+                        split_key,
                         index,
                         text,
                     )
