@@ -43,18 +43,37 @@ _CLASSIFICATION_RULES: list[tuple[list[str], type[OpenNotebookError], str | None
         ConfigurationError,
         None,
     ),
-    # Network errors
+    # Network errors: the provider could not be reached at all.
     (
         [
             "connecterror",
-            "timeoutexception",
             "connection refused",
             "connection error",
-            "timed out",
-            "timeout",
+            "name or service not known",
         ],
         NetworkError,
         "Could not connect to the AI provider. Please check your network connection and provider URL.",
+    ),
+    # Timeouts: the provider was reached, and did not answer in time.
+    #
+    # These were classified with the connection failures above, and the
+    # message said the network was down. It was not: the provider answered
+    # every request it was sent, and simply took longer than the timeout
+    # allowed - which on a slow device is a different problem with a
+    # different answer. A message that points at the network sends the
+    # reader after a fault that is not there.
+    (
+        [
+            "timeoutexception",
+            "timed out",
+            "readtimeout",
+            "connecttimeout",
+            "timeout",
+        ],
+        NetworkError,
+        "The AI provider did not answer in time. It may be too busy, or the "
+        "request may be too long for the model's context - try a shorter "
+        "transformation, or a model with a larger context window.",
     ),
     # Context length errors
     (
