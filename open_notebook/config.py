@@ -65,11 +65,24 @@ os.makedirs(TIKTOKEN_CACHE_DIR, exist_ok=True)
 # LLM TIMEOUT
 # Since esperanto 2.28, to_langchain() enforces ESPERANTO_LLM_TIMEOUT on every
 # provider (default 60 s; before, most providers used their SDK default and
-# Ollama waited forever). 60 s cuts off long answers and slow local models, so
-# Open Notebook defaults it to 180 s. It stays below the default
-# API_CLIENT_TIMEOUT (300 s). An explicit value always wins. Both the API and
-# the worker import this module before any model is created.
-DEFAULT_LLM_TIMEOUT_SECONDS = 180
+# Ollama waited forever). 60 s cuts off long answers, so Open Notebook used to
+# default it to 180 s - which is right for a cloud API answering a chat reply,
+# and three times too short for the hardware this is meant to run on.
+#
+# Measured on the floor this supports: a phone, qwen2.5-1.5b at two threads,
+# one 2,221-token part of a book. Evaluating the prompt took 264 s; writing
+# 250 tokens took 152 s. One part of one document, 417 s, against a 180 s
+# budget - so every part of every long document failed, and the failure said
+# the provider could not be reached. On the floor's own floor - a slower phone
+# still - the reduce step alone is twice that.
+#
+# A generous timeout does not slow down the failure that matters. A server
+# that is not there refuses the connection at once, and the classifier says
+# so; the timeout bounds a request that was accepted and has not answered,
+# which on this hardware is the normal case rather than the exceptional one.
+# An explicit value always wins. Both the API and the worker import this
+# module before any model is created.
+DEFAULT_LLM_TIMEOUT_SECONDS = 1800
 
 
 def ensure_llm_timeout_default(environ: MutableMapping[str, str] = os.environ) -> None:
