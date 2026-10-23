@@ -40,14 +40,18 @@ def _map_output_tokens() -> int:
 
     Small on purpose. A part is an intermediate, not the answer: the reduce
     step writes the real one. Too generous and the map step costs as much as the
-    whole transformation, repeated once per part.
+    whole transformation, repeated once per part - and, more to the point, a
+    part that does not finish is a part that is thrown away. The measurement
+    that sets the default is on DEFAULT_MAP_OUTPUT_TOKENS.
     """
-    raw = os.getenv("OPEN_NOTEBOOK_TRANSFORMATION_MAP_TOKENS", "500")
+    raw = os.getenv(
+        "OPEN_NOTEBOOK_TRANSFORMATION_MAP_TOKENS", str(DEFAULT_MAP_OUTPUT_TOKENS)
+    )
     try:
         value = int(raw)
-        return value if value > 0 else 500
+        return value if value > 0 else DEFAULT_MAP_OUTPUT_TOKENS
     except ValueError:
-        return 500
+        return DEFAULT_MAP_OUTPUT_TOKENS
 
 
 def _answer_output_tokens() -> int:
@@ -79,6 +83,22 @@ SAFETY_TOKENS = 256
 #: roughly a full paragraph of dense summary - more than the insights this
 #: produces, and comfortably more than nothing.
 MIN_ANSWER_RESERVE = 1024
+
+#: How much a *part* of a long document may write, when nothing says otherwise.
+#:
+#: The number that decides whether a long document can be analysed at all on
+#: the hardware this supports. A part is an intermediate: it is analysed, kept,
+#: and combined with the others, and it has to *finish* to be kept - a part that
+#: is interrupted is a part whose work is thrown away, and the parts are what
+#: the resume is made of.
+#:
+#: Measured on the floor this supports - a phone, qwen2.5-1.5b at two threads -
+#: 250 tokens of generation is about 152 s, and 500 is about twice that on top
+#: of the prompt evaluation every part pays anyway. At 500 a part outlives the
+#: interruptions such a device hands out, so no part ever completed to be kept.
+#: DEFAULT_LLM_TIMEOUT_SECONDS in open_notebook.config is the matching timeout,
+#: which 500 tokens of writing would have outlasted too.
+DEFAULT_MAP_OUTPUT_TOKENS = 250
 
 
 def _context_tokens(chain: Any) -> int | None:
