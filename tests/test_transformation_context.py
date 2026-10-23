@@ -29,6 +29,8 @@ from langchain_core.messages import AIMessage
 from loguru import logger
 
 from open_notebook.utils.long_document import (
+    ASSUMED_CONTEXT_TOKENS,
+    assumed_context_tokens,
     budget_message,
     budget_within_context,
     chunk_budget,
@@ -83,6 +85,13 @@ def _document(paragraphs: int = 60, words: int = 120) -> str:
     body = " ".join(["word"] * words) + "."
     text = "\n\n".join(f"Paragraph {i}. {body}" for i in range(paragraphs))
     return f"{text}\n\n{END_MARKER}"
+
+
+def _analysis(words: int = 300) -> str:
+    """A stand-in for what one part's analysis writes, at a size the map step
+    really produces - the fake chain answers every request with this, so every
+    partial ends up this long."""
+    return " ".join(["analysis"] * words)
 
 
 def _state(text: str):
@@ -216,6 +225,50 @@ class TestTheWindowIsRespected:
                 f"output in a window of 4096, which leaves no room for the "
                 f"document"
             )
+
+    @pytest.mark.asyncio
+    async def test_an_unreported_window_is_treated_as_the_floor(self):
+        """The same invariant, for a model that does not say what it has.
+
+        A provider that does not advertise a window - llama.cpp served over
+        its OpenAI-compatible API, which is what the phone runs - used to have
+        both guards switched off: the parts were sized against nothing, so a
+        part plus its instructions could outgrow the window and be rejected.
+        Measured on that phone the window is 4,096 tokens, and every part of a
+        long document was rejected against it.
+        """
+        made = await _run(_document(paragraphs=240), num_ctx=None)
+
+        requests = [tokens for chain in made for tokens in chain.request_tokens]
+        assert requests, "the model was never asked anything"
+        for tokens in requests:
+            assert tokens <= ASSUMED_CONTEXT_TOKENS, (
+                f"a request of {tokens} tokens was sent to a model whose "
+                f"window was never reported and is assumed to be "
+                f"{ASSUMED_CONTEXT_TOKENS}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_the_reduce_batches_when_the_window_was_never_reported(self):
+        """The second guard, for the same provider.
+
+        Enough partials of a few hundred tokens each do not fit a 4,096-token
+        window once the combine prompt and the answer are allowed for.
+        Batching is the only thing between that window and a truncated combine
+        prompt - which drops the last parts and keeps the claim to have
+        covered the whole document.
+        """
+        made = await _run(_document(paragraphs=240), num_ctx=None, answer=_analysis())
+
+        combines = [
+            chain
+            for chain in made
+            if chain.requests and all(_is_combine(m) for m in chain.requests)
+        ]
+        assert len(combines) > 1, (
+            "the partials were combined in a single pass against a window "
+            "that cannot hold them"
+        )
 
 
 class TestTheReductionFitsTheWindow:
@@ -440,3 +493,42 @@ class TestWhatTheBudgetReports:
             budget = budget_within_context(8192, reserved_tokens=500)
 
         assert budget_message(8192, budget, wanted, reserved_tokens=500) is None
+
+
+class TestTheWindowThatIsNotReported:
+    """A provider that does not advertise a window still has one, and on the
+    hardware this supports that one is small."""
+
+    def test_the_floor_is_the_window_measured_on_the_phone(self):
+        """Not a round number chosen for tidiness. An assumption larger than
+        the smallest window in the supported floor would be no assumption at
+        all: the parts would be sized for a window the device does not have."""
+        assert ASSUMED_CONTEXT_TOKENS == 4096
+
+    def test_nothing_declared_means_the_floor(self):
+        """A device that says nothing gets the floor - which is the state of
+        every phone until it declares otherwise."""
+        for undeclared in ("", "   "):
+            with patch.dict(
+                "os.environ",
+                {"OPEN_NOTEBOOK_ASSUMED_CONTEXT_TOKENS": undeclared},
+            ):
+                assert assumed_context_tokens() == ASSUMED_CONTEXT_TOKENS
+
+    def test_a_device_can_declare_a_larger_window(self):
+        """The assumption is a fallback, not a ceiling: a server with far more
+        room than the floor should not be cut into the floor's parts."""
+        with patch.dict(
+            "os.environ", {"OPEN_NOTEBOOK_ASSUMED_CONTEXT_TOKENS": "16384"}
+        ):
+            assert assumed_context_tokens() == 16384
+
+    @pytest.mark.parametrize("unusable", ["none", "0", "-1", "16k"])
+    def test_an_unusable_declaration_is_not_obeyed(self, unusable):
+        """A window of zero or minus one would make every part impossible, and
+        a window of '16k' is not a window. Both fall back to the floor rather
+        than being believed."""
+        with patch.dict(
+            "os.environ", {"OPEN_NOTEBOOK_ASSUMED_CONTEXT_TOKENS": unusable}
+        ):
+            assert assumed_context_tokens() == ASSUMED_CONTEXT_TOKENS

@@ -19,6 +19,7 @@ from open_notebook.exceptions import (
 from open_notebook.utils import clean_thinking_content, partials
 from open_notebook.utils.error_classifier import classify_error
 from open_notebook.utils.long_document import (
+    assumed_context_tokens,
     budget_message,
     budget_within_context,
     chunk_budget,
@@ -101,18 +102,27 @@ MIN_ANSWER_RESERVE = 1024
 DEFAULT_MAP_OUTPUT_TOKENS = 250
 
 
-def _context_tokens(chain: Any) -> int | None:
-    """The model's context window, if it exposes one.
+def _context_tokens(chain: Any) -> int:
+    """The model's context window, or the floor assumed for one that hides it.
 
     `num_ctx` is the field every adapter that has a window uses, and it is the
-    one that decides how large a part may be. A provider that does not expose
-    it returns None, and the caller falls back to the configured budget.
+    one that decides how large a part may be.
+
+    A provider that does not expose it is not a provider without a window: it
+    is a provider that did not say, and the window is the fact the whole
+    splitting path is built on. Returning nothing here let the configured
+    budget through unchallenged *and* switched off the reduce's batching, which
+    is how a phone serving through llama.cpp came to have every part of a long
+    document rejected against its 4,096-token window, with the one guard that
+    would have caught it silent about it. So the floor is assumed - see
+    ASSUMED_CONTEXT_TOKENS for the measurement and what it costs.
     """
     value = getattr(chain, "num_ctx", None)
     try:
-        return int(value) if value else None
+        reported = int(value) if value else 0
     except (TypeError, ValueError):
-        return None
+        reported = 0
+    return reported if reported > 0 else assumed_context_tokens()
 
 
 def _without_reasoning(chain: Any) -> None:
@@ -161,7 +171,7 @@ async def _reduce_to_fit(
     state: dict,
     instructions: str,
     partials: List[str],
-    context_tokens: int | None,
+    context_tokens: int,
     answer_tokens: int,
 ) -> List[str]:
     """Reduce the partials until the ones left can be combined in one pass.
@@ -175,10 +185,16 @@ async def _reduce_to_fit(
     So the partials are combined in batches that do fit, and the results of
     those are combined again, until a single pass remains.
 
+    The window is always a number by the time it gets here. It used to be
+    optional, and an absent one returned the partials unchanged - so on a
+    provider that did not advertise a window this batching never ran, and the
+    one pass it skipped was the one that truncated. _context_tokens assumes
+    the floor instead, for exactly this reason.
+
     The reduction stops short of losing anything: if the partials cannot be
     made to fit, they are returned as they are and the loss is reported.
     """
-    if not context_tokens or len(partials) <= 1:
+    if len(partials) <= 1:
         return partials
 
     overhead = token_count(

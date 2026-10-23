@@ -48,6 +48,43 @@ from .token_utils import token_count
 #: afford far fewer chunks, and each chunk is a generation call.
 DEFAULT_CHUNK_TOKENS = 3000
 
+#: The context window assumed for a model that does not report one.
+#:
+#: Not reported is not the same as non-existent. Every adapter that has a
+#: window uses `num_ctx`, and the ones that do not advertise it - llama.cpp
+#: served over its OpenAI-compatible API, for instance - still have one, and on
+#: the hardware this supports that one is small: measured at 4,096 tokens on
+#: the phone this project is built to run on.
+#:
+#: Assuming the configured budget instead - which is what this did - turned
+#: both guards off at once. The parts were sized against nothing, so a part
+#: plus its instructions could outgrow the window and be rejected; and the
+#: reduce step saw no window either, so it combined every partial in one pass,
+#: which on a small window is truncated with the tail of the document inside
+#: it. The answer would then cover most of the document while claiming all of
+#: it - the exact failure the splitting path exists to prevent.
+#:
+#: The floor is assumed instead. A provider with a large window that does not
+#: advertise one pays for it in extra parts - the budget is configured, not the
+#: window, so the difference is a few thousand tokens either way - and every
+#: other device gets guards that work. A device that knows its own window says
+#: so here.
+ASSUMED_CONTEXT_TOKENS = 4096
+
+
+def assumed_context_tokens() -> int:
+    """The window to assume for a model that does not report one."""
+    raw = os.getenv("OPEN_NOTEBOOK_ASSUMED_CONTEXT_TOKENS")
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return ASSUMED_CONTEXT_TOKENS
+
+
 #: How much of the previous chunk to repeat at the start of the next one.
 #:
 #: Without it, a sentence that straddles a boundary is cut in half and the
