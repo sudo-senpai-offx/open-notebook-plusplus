@@ -28,7 +28,11 @@ import pytest
 from langchain_core.messages import AIMessage
 from loguru import logger
 
-from open_notebook.utils.long_document import budget_within_context, chunk_budget
+from open_notebook.utils.long_document import (
+    budget_message,
+    budget_within_context,
+    chunk_budget,
+)
 from open_notebook.utils.token_utils import token_count
 
 #: A marker at the very end of the document. It cannot be carried into another
@@ -386,3 +390,53 @@ class TestTheBudgetFitsTheWindow:
         ):
             assert budget_within_context(None, reserved_tokens=500) == 1234
             assert chunk_budget() == 1234
+
+
+class TestWhatTheBudgetReports:
+    """budget_within_context says the difference between the wish and the fact
+    is reported by the caller. These are the reports it has to produce."""
+
+    def test_a_clamped_budget_says_what_it_was_clamped_to(self):
+        """A device that configured a budget its model cannot honour must find
+        out, rather than quietly losing text."""
+        with patch.dict(
+            "os.environ", {"OPEN_NOTEBOOK_TRANSFORMATION_CHUNK_TOKENS": "3000"}
+        ):
+            wanted = chunk_budget()
+            budget = budget_within_context(4096, reserved_tokens=1500)
+
+        message = budget_message(4096, budget, wanted, reserved_tokens=1500)
+
+        assert message is not None
+        assert str(wanted) in message, "the configured budget must be named"
+        assert "4096" in message, "the window must be named"
+        assert str(budget) in message, "the size actually used must be named"
+        assert budget < wanted
+
+    def test_an_unknown_window_is_reported_as_a_guess(self):
+        """This is the case that arrives later as an opaque rejection: the
+        parts are sized by assumption, and nothing else records that."""
+        with patch.dict(
+            "os.environ", {"OPEN_NOTEBOOK_TRANSFORMATION_CHUNK_TOKENS": "3000"}
+        ):
+            wanted = chunk_budget()
+            budget = budget_within_context(None, reserved_tokens=701)
+
+        message = budget_message(None, budget, wanted, reserved_tokens=701)
+
+        assert message is not None
+        assert "does not report a context window" in message
+        # The number that decides whether the request survives: everything the
+        # provider must hold at once, not just the part.
+        assert str(wanted + 701) in message
+
+    def test_a_budget_that_fits_says_nothing(self):
+        """The common case must stay quiet, or the report stops meaning
+        anything when there is one."""
+        with patch.dict(
+            "os.environ", {"OPEN_NOTEBOOK_TRANSFORMATION_CHUNK_TOKENS": "1000"}
+        ):
+            wanted = chunk_budget()
+            budget = budget_within_context(8192, reserved_tokens=500)
+
+        assert budget_message(8192, budget, wanted, reserved_tokens=500) is None

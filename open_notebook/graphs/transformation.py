@@ -19,6 +19,7 @@ from open_notebook.exceptions import (
 from open_notebook.utils import clean_thinking_content, partials
 from open_notebook.utils.error_classifier import classify_error
 from open_notebook.utils.long_document import (
+    budget_message,
     budget_within_context,
     chunk_budget,
     split_for_context,
@@ -308,14 +309,9 @@ async def run_transformation(state: dict, config: RunnableConfig) -> dict:
         )
         budget = budget_within_context(context_tokens, reserved)
         wanted = chunk_budget()
-        if budget < wanted:
-            logger.warning(
-                f"the configured chunk budget of {wanted} tokens does not fit the "
-                f"model's window of {context_tokens} tokens once the "
-                f"instructions and the answer are allowed for, so the parts will "
-                f"be {budget} tokens each; a part larger than the window would be "
-                f"truncated by the provider"
-            )
+        message = budget_message(context_tokens, budget, wanted, reserved)
+        if message:
+            logger.warning(message)
 
         # A document longer than the context is split, analysed in parts, and
         # the parts combined. See open_notebook/utils/long_document.py for why

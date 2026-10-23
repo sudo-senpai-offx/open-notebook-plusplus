@@ -142,12 +142,49 @@ def budget_within_context(context_tokens: int | None, reserved_tokens: int) -> i
     if not context_tokens or context_tokens <= 0:
         # The model's window is unknown - another provider, or an adapter that
         # does not expose it. The configured budget is then the best guess
-        # there is, and the caller logs that it is a guess.
+        # there is, and budget_message says so on the caller's behalf.
         return budget
     room = context_tokens - reserved_tokens
     if room >= budget:
         return budget
     return max(MIN_USEFUL_BUDGET, room)
+
+
+def budget_message(
+    context_tokens: int | None, budget: int, wanted: int, reserved_tokens: int
+) -> str | None:
+    """What to report about the budget that was finally used.
+
+    Nothing, when the wish and the fact agree. There are two ways they
+    disagree, and both are worth saying out loud:
+
+    the window is known and leaves less room than the wish, so the parts were
+    cut down to fit it; or the window is not known at all, in which case the
+    wish was accepted unchallenged and is only a guess. The second is the case
+    that arrives later as an opaque rejection from the provider, with nothing
+    in the log to show that the size was assumed rather than decided - so it is
+    reported here rather than being allowed to look like a decision.
+
+    `wanted` is the configured budget and `budget` what was actually used;
+    they differ only in the first case.
+    """
+    if budget < wanted:
+        return (
+            f"the configured chunk budget of {wanted} tokens does not fit the "
+            f"model's window of {context_tokens} tokens once the instructions "
+            f"and the answer are allowed for, so the parts will be {budget} "
+            f"tokens each; a part larger than the window would be truncated by "
+            f"the provider"
+        )
+    if not context_tokens or context_tokens <= 0:
+        return (
+            f"the model does not report a context window, so parts are cut to "
+            f"the configured {wanted} tokens, and a whole request is "
+            f"{wanted + reserved_tokens} tokens with the instructions and the "
+            f"answer; a model whose real window is smaller will reject or "
+            f"truncate it"
+        )
+    return None
 
 
 def _split_long_paragraph(paragraph: str, budget: int) -> List[str]:
