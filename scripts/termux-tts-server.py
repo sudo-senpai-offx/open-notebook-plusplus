@@ -23,6 +23,18 @@ the standard library. It is deliberately *not* a second implementation of
 anything the supervisor does — the supervisor still owns start, stop and probe,
 and `termux-tts.sh` remains the only place a piper process is identified.
 
+One voice lives elsewhere
+-------------------------
+The tsukuyomi voice needs piper-plus, which needs onnxruntime - and
+onnxruntime's aarch64 wheel needs glibc, so it cannot install in Termux
+(bionic), while stock piper cannot run the voice at all ("'espeak' is
+not a valid PhonemeType", reproduced with the identical binary on the
+PC). So that one voice runs on piper-plus in the proot Ubuntu guest on
+:8092, and this server forwards requests for it there, passing the
+request body through unchanged. The forward keys on the exact voice
+stem, so every other voice keeps resolving to local piper, and the guest
+voice is offered in /v1/models only while its backend answers.
+
 What it guarantees
 ------------------
 - Binds 127.0.0.1 unless explicitly told otherwise, and says so on startup.
@@ -41,6 +53,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOST = os.getenv("TTS_HOST", "127.0.0.1")
@@ -54,14 +70,65 @@ DEFAULT_VOICE = os.getenv("TTS_MODEL", "en_US-amy-medium")
 #: is a real possibility, so this is generous rather than tight.
 TIMEOUT = int(os.getenv("TTS_TIMEOUT", "900"))
 
+#: The piper-plus server in the proot guest. proot shares Termux's network
+#: namespace, so the guest's loopback is this process's loopback.
+GUEST_TTS_URL = os.getenv("TTS_GUEST_URL", "http://127.0.0.1:8092")
+GUEST_TTS_VOICE = os.getenv("TTS_GUEST_VOICE", "tsukuyomi-chan-6lang-fp16")
+#: How long a guest-reachability answer may be reused. Never probing would
+#: let /v1/models offer a voice whose backend died minutes ago; probing on
+#: every request would put a 2-second floor on each turn while the guest
+#: is down. Ten seconds is the middle: the list is fresh enough to trust
+#: and the common down-case costs nothing per request.
+GUEST_PROBE_TTL = float(os.getenv("TTS_GUEST_PROBE_TTL", "10"))
+_probe_at = 0.0
+_probe_up = False
+
+
+def is_guest_voice(name: str | None) -> bool:
+    """Whether `name` names the one voice the guest backend serves.
+
+    Matched as the exact stem - with piper's own ``piper-`` prefix
+    stripped - never as a prefix, because a prefix match would swallow
+    any future local voice whose name starts the same way.
+    """
+    wanted = (name or "").strip()
+    if wanted.startswith("piper-"):
+        wanted = wanted[len("piper-") :]
+    return os.path.splitext(os.path.basename(wanted))[0] == GUEST_TTS_VOICE
+
+
+def guest_up() -> bool:
+    """Is the guest server answering? Cached for GUEST_PROBE_TTL seconds."""
+    global _probe_at, _probe_up
+    now = time.monotonic()
+    if now - _probe_at < GUEST_PROBE_TTL:
+        return _probe_up
+    try:
+        with closing(
+            urllib.request.urlopen(f"{GUEST_TTS_URL}/health", timeout=2)
+        ) as response:
+            _probe_up = response.status == 200
+    except OSError:
+        _probe_up = False
+    _probe_at = now
+    return _probe_up
+
 
 def voices() -> list[str]:
-    if not os.path.isdir(MODELS_DIR):
-        return []
-    return sorted(
-        os.path.splitext(os.path.basename(p))[0]
-        for p in glob.glob(os.path.join(MODELS_DIR, "*.onnx"))
-    )
+    local: list[str] = []
+    if os.path.isdir(MODELS_DIR):
+        local = [
+            os.path.splitext(os.path.basename(p))[0]
+            for p in glob.glob(os.path.join(MODELS_DIR, "*.onnx"))
+        ]
+    # The guest voice is dropped from the local list even if someone
+    # copied its .onnx into MODELS_DIR: stock piper cannot run it, so a
+    # local path would be handed out for a synthesis that dies writing a
+    # zero-byte WAV - precisely the failure this split exists to end.
+    local = [name for name in local if name != GUEST_TTS_VOICE]
+    if guest_up() and GUEST_TTS_VOICE not in local:
+        local.append(GUEST_TTS_VOICE)
+    return sorted(local)
 
 
 def resolve_voice(name: str | None) -> str | None:
@@ -78,6 +145,11 @@ def resolve_voice(name: str | None) -> str | None:
     wanted = (name or DEFAULT_VOICE).strip()
     if wanted.startswith("piper-"):
         wanted = wanted[len("piper-") :]
+    # do_POST forwards guest voices before reaching here, but a local
+    # path for one would still be the wrong answer if a future caller
+    # asks directly - so it never resolves.
+    if os.path.splitext(os.path.basename(wanted))[0] == GUEST_TTS_VOICE:
+        return None
     for stem in available:
         if stem == wanted:
             return os.path.join(MODELS_DIR, f"{stem}.onnx")
@@ -156,6 +228,42 @@ class Handler(BaseHTTPRequestHandler):
             "application/json",
         )
 
+    def _forward(self, raw: bytes) -> None:
+        """Pass the request to the guest piper-plus server, verbatim.
+
+        The guest's own answers pass through with their status and body,
+        so a caller sees "model not present" rather than a generic proxy
+        failure. Only an unreachable guest is this server's error to
+        report - the voice is listed only while the guest answers, but
+        the two are ten seconds apart by design, so a race lands here.
+        """
+        request = urllib.request.Request(
+            f"{GUEST_TTS_URL}/v1/audio/speech",
+            data=raw,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with closing(urllib.request.urlopen(request, timeout=TIMEOUT)) as response:
+                content_type = response.headers.get("Content-Type") or "audio/wav"
+                self._send(response.status, response.read(), content_type)
+        except urllib.error.HTTPError as exc:
+            # Ordered before OSError below: HTTPError is an OSError, and
+            # its body is the guest's explanation, which must survive.
+            self._send(exc.code, exc.read(), "application/json")
+        except OSError as exc:
+            self._json(
+                503,
+                {
+                    "error": {
+                        "message": (
+                            f"guest TTS at {GUEST_TTS_URL} did not answer ({exc}); "
+                            "start it with: onb-stack up"
+                        )
+                    }
+                },
+            )
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's contract
         if self.path.rstrip("/") in ("/v1/models", "/models"):
             self._json(
@@ -170,7 +278,17 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if self.path.rstrip("/") in ("/health", ""):
-            self._json(200, {"status": "ok", "voices": len(voices())})
+            # guest_tts lets a single probe show whether the second
+            # runtime is beside this one - `onb-stack status` and the PC
+            # panel both read it rather than guessing from a dead voice.
+            self._json(
+                200,
+                {
+                    "status": "ok",
+                    "voices": len(voices()),
+                    "guest_tts": "up" if guest_up() else "down",
+                },
+            )
             return
         self._json(404, {"error": {"message": f"no route {self.path}"}})
 
@@ -206,6 +324,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         requested = str(payload.get("voice") or payload.get("model") or "")
+        if is_guest_voice(requested):
+            # The body passes through unchanged - the same OpenAI shape
+            # both servers speak - so the two contracts cannot drift.
+            self._forward(raw)
+            return
         voice_path = resolve_voice(requested or None)
         if voice_path is None:
             # Named, so the caller can see which voice it asked for. A generic

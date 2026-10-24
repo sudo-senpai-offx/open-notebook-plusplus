@@ -136,6 +136,11 @@ install_one termux-tts.sh     onb-tts      || rc=1
 # endpoint and a filesystem arrangement that does not exist, so the server is
 # ours and depends only on the standard library.
 install_one termux-tts-server.py onb-tts-server || rc=1
+# onb-tts-ja-install: the piper-plus guest backend (:8092). Delegates into
+# the proot guest, which is the only place onnxruntime's aarch64 wheel can
+# install (glibc, not bionic) - so it sits beside onb-tts-server as the
+# other half of the two-runtime split the forwarding rule implements.
+install_one termux-tts-ja-install.sh onb-tts-ja-install || rc=1
 # onb-build-piper: Termux packages no piper, no espeak-ng and no
 # piper-phonemize, so the only route is building it. Not a wrapper the stack
 # runs - it is here so the file the operator needs is in ~/bin with the rest,

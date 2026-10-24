@@ -21,6 +21,8 @@ FRONTEND=/root/frontend
 DATA=/root/snb-data
 LOG=/root/stack.log
 NODE="$APP/.venv/lib/python3.12/site-packages/nodejs_wheel/bin/node"
+# The piper-plus TTS venv (:8092) - optional, created by onb-tts-ja-install.
+TTS_VENV="$APP/.venv-tts"
 
 # Process lookup by executable, with arguments matched separately.
 # `ss`/`fuser`/`pkill` are not installed in this guest, so /proc is the
@@ -360,6 +362,25 @@ PY
     echo "web      started"
   fi
 
+  # The guest TTS server (:8092) - piper-plus voices the Termux piper
+  # cannot run (espeak-type models; "not a valid PhonemeType"). Optional
+  # by design: `onb-stack up` must still work on a phone that never
+  # installed it, so the absence is reported rather than failed. The
+  # process boots cheap and the model loads on the first request
+  # (ADR-014), so a phone that never speaks pays one Python process.
+  if [ -x "$TTS_VENV/bin/python" ]; then
+    if is_up "termux-guest-tts.py"; then
+      echo "tts-ja   already running"
+    else
+      GUEST_TTS_THREADS="${GUEST_TTS_THREADS:-2}" \
+        nohup "$TTS_VENV/bin/python" "$APP/scripts/termux-guest-tts.py" \
+        >>"$LOG" 2>&1 &
+      echo "tts-ja   started on 8092 (threads ${GUEST_TTS_THREADS:-2}; model loads on first use)"
+    fi
+  else
+    echo "tts-ja   not installed - run onb-tts-ja-install from Termux"
+  fi
+
   sleep 5
   cmd_status
 }
@@ -412,6 +433,33 @@ cmd_status() {
     else
       printf '%-8s DOWN\n' "embed"
     fi
+
+    # The guest TTS (:8092), same rule as llama/embed: report what it is
+    # doing, not whether a process exists. Its /health also carries
+    # model_present, which separates the three real states - serving,
+    # process up but model absent, never installed - because each has a
+    # different fix and one DOWN line cannot say which.
+    _tts_health=$(curl -sf -m 2 http://127.0.0.1:8092/health 2>/dev/null || true)
+    if [ -n "$_tts_health" ]; then
+      pid=$(pid_of "termux-guest-tts.py")
+      rss=$(awk '/VmRSS/{print $2}' "/proc/${pid:-0}/status" 2>/dev/null)
+      case "$_tts_health" in
+        *'"model_present": false'*)
+          printf '%-8s up    pid %-7s %s kB - MODEL MISSING, run onb-tts-ja-install\n' \
+            "tts-ja" "${pid:-?}" "${rss:-?}"
+          ;;
+        *)
+          printf '%-8s up    pid %-7s %s kB\n' "tts-ja" "${pid:-?}" "${rss:-?}"
+          ;;
+      esac
+    elif pid=$(pid_of "termux-guest-tts.py"); then
+      printf '%-8s STUCK pid %-7s - process present, nothing on :8092\n' \
+        "tts-ja" "$pid"
+    elif [ ! -x "$TTS_VENV/bin/python" ]; then
+      printf '%-8s not installed (onb-tts-ja-install from Termux)\n' "tts-ja"
+    else
+      printf '%-8s DOWN\n' "tts-ja"
+    fi
 }
 
 cmd_down() {
@@ -433,6 +481,12 @@ cmd_down() {
     # server is always wrong, so a full stop clears them by name.
     kill_of "llama-server"
     wait_gone "llama-server"
+    # The guest TTS by script name: its argv[0] is the venv python, so
+    # the script is the only stable match - the same interpreter-hosted
+    # problem the pids_of comment describes. Left behind, it would keep
+    # :8092 and a stale model loaded across restarts.
+    kill_of "termux-guest-tts.py"
+    wait_gone "termux-guest-tts.py"
 }
 
 case "${1:-up}" in
