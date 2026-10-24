@@ -61,8 +61,17 @@ APP=/root/app/open-notebook-plusplus
 VENV="$APP/.venv-tts"
 MODELS=/root/piper_models
 NLTK_DIR=/root/nltk_data
-CONFIG="$MODELS/${MODEL}.onnx.json"
 MODEL_PATH="$MODELS/${MODEL}.onnx"
+# Two paths, two names, on purpose. REPO_CONFIG is the proven json the
+# repository ships; CONFIG is where it lands beside the model, which is
+# where piper-plus looks for it by naming convention (model + ".json").
+# The first install attempt gave one variable two jobs: it checked the
+# destination existed before copying into it - a test that can only fail
+# - while the message claimed the repository copy was missing. Source and
+# destination are never the same file here, so neither can be confused
+# for the other again.
+REPO_CONFIG="$APP/scripts/voice-configs/${MODEL}.onnx.json"
+CONFIG="$MODELS/${MODEL}.onnx.json"
 
 [ -d "$APP" ] || die "repository not found at $APP (is the stack installed?)"
 
@@ -194,13 +203,15 @@ else
 fi
 
 # --- 4. model + config -----------------------------------------------------
+# Checked before the download: a repository that predates the voice
+# should fail in a second, not after 38 MB.
+[ -f "$REPO_CONFIG" ] || die "config missing in repo: scripts/voice-configs/${MODEL}.onnx.json"
 mkdir -p "$MODELS"
 fetch_exact "$MODEL_URL" "$MODEL_PATH" "$MODEL_BYTES" "${MODEL}.onnx" ||
   die "model download failed"
-# The config is ours, not upstream's - copied from the repository on
-# every run so a repo update reaches the model dir without a re-download.
-[ -f "$CONFIG" ] || die "config missing in repo: scripts/voice-configs/${MODEL}.onnx.json"
-cp "$CONFIG" "$MODELS/" || die "config copy failed"
+# Copied from the repository on every run, so a repo update reaches the
+# model dir without a re-download. The config is ours, not upstream's.
+cp "$REPO_CONFIG" "$CONFIG" || die "config copy failed"
 printf 'config:   %s bytes (phoneme_type=%s, the proven copy)\n' \
   "$(file_bytes "$CONFIG")" \
   "$("$VENV/bin/python" -c "import json,sys;print(json.load(open(sys.argv[1]))['phoneme_type'])" "$CONFIG")"
@@ -211,7 +222,7 @@ printf 'config:   %s bytes (phoneme_type=%s, the proven copy)\n' \
 # server's /v1/audio/speech takes, so a pass here means the guest
 # runtime is proven before the operator ever curls it.
 printf 'smoke:    synthesizing (first load reads the model, ~10-30s on the phone)...\n'
-MODEL_PATH="$MODEL_PATH" CONFIG_PATH="$MODELS/${MODEL}.onnx.json" \
+MODEL_PATH="$MODEL_PATH" CONFIG_PATH="$CONFIG" \
   NLTK_DATA="$NLTK_DIR" PIPER_INTRA_THREADS=2 \
   "$VENV/bin/python" - <<'PY' || die "smoke synthesis failed"
 import io
