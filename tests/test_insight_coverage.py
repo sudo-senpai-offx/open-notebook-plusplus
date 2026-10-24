@@ -99,3 +99,82 @@ class TestTheReport:
         document = "alpha bravo charlie delta echo foxtrot golf hotel india"
         late = cov._trigrams(document)
         assert "bravo charlie delta" in late
+
+
+class TestLandmarks:
+    """What survives the phrase count's coincidence problem.
+
+    In the first A/B the phrase count ranked a failed answer above a good one:
+    the head is small, so ordinary English the model writes anyway ("it is
+    not") lands in the tail-only set, and a good summary that paraphrases
+    scores zero on the phrases it does not quote. A landmark is stricter -
+    rare in the whole document, long enough to be a real term, absent from
+    the head - and a citation marker is stricter still, because a number
+    cannot be paraphrased into existence. `[18]` and `[19]` are exactly what
+    separated the two answers the phrase count could not.
+    """
+
+    def test_a_rare_tail_word_is_a_landmark(self):
+        head = "the opening describes active listening in general terms"
+        document = head + ", and the body teaches negotiation and patience"
+        assert "negotiation" in cov._landmarks(document, head)
+
+    def test_a_word_the_head_already_saw_is_not(self):
+        """Having it proves nothing - the old path could have quoted it too."""
+        head = "active listening opens the document twice over"
+        document = head + ", yet active listening never becomes rare"
+        assert "active" not in cov._landmarks(document, head)
+
+    def test_a_common_tail_word_is_not(self):
+        """Rarity is the anti-coincidence rule; length alone is not enough."""
+        head = "an opening paragraph about attention"
+        document = head + " " + " ".join(["deliberation"] * 6)
+        assert "deliberation" not in cov._landmarks(document, head)
+
+    def test_rarity_is_counted_over_the_whole_document(self):
+        """The boundary is pinned: five uses is a term, six is a habit."""
+        head = "an opening paragraph about attention"
+        document = head + " " + " ".join(["deliberation"] * 5)
+        assert "deliberation" in cov._landmarks(document, head)
+
+    def test_a_short_tail_word_is_not(self):
+        """A five-letter word is easy to write without having read anything."""
+        head = "an opening paragraph about attention"
+        document = head + ", and email never appears before the cut"
+        assert "email" not in cov._landmarks(document, head)
+
+    def test_a_citation_marker_is_a_landmark(self):
+        """The A/B turned on [18] and [19]: numbers cannot be paraphrased."""
+        head = "an opening paragraph that cites [1] and nothing else"
+        document = head + ", and the body cites [18] twice: [18]"
+        landmarks = cov._landmarks(document, head)
+        assert "[18]" in landmarks
+        assert "[1]" not in landmarks
+
+    def test_hits_are_what_the_answer_contains(self):
+        head = "an opening paragraph about attention"
+        document = head + ", and the body teaches negotiation [18]"
+        landmarks = cov._landmarks(document, head)
+        answer = "It cites [18] and negotiation begins"
+        assert cov._landmark_hits(answer, landmarks) == {"[18]", "negotiation"}
+        assert cov._landmark_hits("ordinary words only", landmarks) == set()
+
+    def test_a_number_separates_an_answer_from_generic_prose(self):
+        """The real A/B, in miniature: the number is the tell.
+
+        Both answers scored landmark hits - the failed one on generic English
+        ("document", "evidence", "clinical") that any summary produces, the
+        good one including the citation markers [18] and [19] that exist only
+        past the cut. A number cannot be paraphrased, so it cannot be reached
+        by habit the way a common word can.
+        """
+        head = "the opening defines communication and cites [1]"
+        document = (
+            head + "; the body discusses emphasis and document emphasis, "
+            "then cites [18] in the later chapters"
+        )
+        landmarks = cov._landmarks(document, head)
+        generic = "a detailed document about behavioral emphasis"
+        assert cov._landmark_hits(generic, landmarks), "generic words fill the set"
+        numbered = "the summary of the whole cites [18] and nothing else"
+        assert cov._landmark_hits(numbered, landmarks) == {"[18]"}
