@@ -37,6 +37,14 @@ DEVICE_SCRIPTS = [
     "termux-sync.sh",
     "termux-update.sh",
     "termux-config.sh",
+    "termux-tts.sh",
+    "termux-tts-ja-install.sh",
+    "termux-fetch-models.sh",
+    "termux-stt.sh",
+    "termux-stt-benchmark.sh",
+    "termux-cpu.sh",
+    "termux-build-piper.sh",
+    "termux-chat-setup.sh",
     "install-bin.sh",
 ]
 
@@ -407,6 +415,25 @@ def shellcheck() -> str:
 
 
 class TestDeviceScriptsArePosix:
+    def test_the_list_covers_the_directory(self) -> None:
+        """Checked against the directory rather than remembered.
+
+        The same failure as the installer roster, one level down: the
+        tts scripts were written, bundled and run on the phone while
+        this list still held the original eight, so shellcheck - the
+        only check that sees what Termux's `sh` actually parses - never
+        ran on them through pytest. The manual battery covered them by
+        hand, once, which is exactly the kind of coverage that lapses.
+        """
+        on_disk = {path.name for path in SCRIPTS.glob("termux-*.sh")}
+        on_disk.add("install-bin.sh")
+        assert set(DEVICE_SCRIPTS) == on_disk, (
+            "DEVICE_SCRIPTS and scripts/ disagree; every device script is "
+            "POSIX-checked here or excluded with a reason: "
+            f"unlisted={sorted(on_disk - set(DEVICE_SCRIPTS))} "
+            f"stale={sorted(set(DEVICE_SCRIPTS) - on_disk)}"
+        )
+
     @pytest.mark.parametrize("name", DEVICE_SCRIPTS)
     def test_script_exists(self, name):
         assert (SCRIPTS / name).is_file(), f"{name} is installed onto the device"

@@ -17,14 +17,23 @@
 #   1. a private venv (the app's venv stays untouched - ADR-014's
 #      separation of concerns, and pip installs are not the app's problem)
 #   2. piper-plus==1.13.0, the version proven against this model on the PC
-#   3. the NLTK data English G2P needs (byte-verified, no runtime download
-#      at first synthesis)
+#   3. the NLTK data English G2P needs - byte-verified, and laid out the
+#      way nltk.data.find looks for it: the zip kept beside its extracted
+#      directory, under the category directory. g2p_en checks for the zip
+#      file itself, so extracting the archives anywhere else makes them
+#      invisible and the first English synthesis quietly reaches for the
+#      network instead - which offline-first must not do
 #   4. the tsukuyomi model itself - 39,652,717 bytes from Hugging Face,
 #      byte-verified, never resumed from a partial
-#   5. its config, shipped in this repository: the upstream config.json
-#      differs in phoneme_type and was never the copy proven here
-#   6. a real synthesis, so "installed" means audio came out, not files
-#      landed
+#   5. its config, shipped in this repository: piper-plus's PhonemeType
+#      enum accepts only openjtalk/bilingual/multilingual, and the model
+#      directory's own json says "text", which piper-plus refuses outright
+#      with ValueError (reproduced on the PC with the identical version).
+#      The PC server patches text -> multilingual at load time
+#      (piper-ja/server_ja.py); the phone ships the patched content, so
+#      there is no load-time patch to forget
+#   6. a real synthesis in Japanese and English, so "installed" means
+#      both phonemizers produced audio, not files landed
 #
 # Idempotent: every step checks before acting. Re-run freely.
 set -u
@@ -176,51 +185,120 @@ fi
 
 # --- 3. NLTK data ----------------------------------------------------------
 # English G2P reads cmudict and the tagger at first English synthesis.
-# Fetched here with byte verification instead: NLTK's own downloader
-# fetches without verifying, and first-synthesis is the worst moment to
+# Fetched with byte verification instead of NLTK's own downloader, which
+# fetches without verifying - first synthesis is the worst moment to
 # discover a truncated zip on a phone.
-mkdir -p "$NLTK_DIR"
-nltk_item() {
-  # nltk_item sub zip want_bytes - the gh-pages package layout
-  _nltk_fetch="https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/$1/$2"
-  fetch_exact "$_nltk_fetch" "/root/$2" "$3" "$2"
-  _rc=$?
-  if [ "$_rc" -eq 0 ]; then
-    "$VENV/bin/python" - "$NLTK_DIR" "/root/$2" <<'PY' || return 1
-import sys, zipfile
-zipfile.ZipFile(sys.argv[2]).extractall(sys.argv[1])
-PY
-    rm -f "/root/$2"
+#
+# The layout is copied from what NLTK's downloader leaves behind on the
+# PC, because two different consumers read it: g2p_en does
+# nltk.data.find('taggers/averaged_perceptron_tagger.zip') - the zip
+# file itself, not the directory - and PerceptronTagger loads the
+# extracted directory beside it. An archive extracted anywhere else is
+# invisible to both, and the runtime papers over it by downloading at
+# first synthesis, which fails offline. The first install extracted into
+# the nltk root instead of the category directory, so this layout is
+# re-checked on every run rather than assumed.
+#
+# nltk_get category zip want_bytes - done when the extracted directory
+# exists AND the zip beside it is byte-exact; either half alone is a
+# half-install.
+nltk_get() {
+  _cat="$1" _zip="$2" _want="$3"
+  _name="${_zip%.zip}"
+  _dir="$NLTK_DIR/$_cat/$_name"
+  _path="$NLTK_DIR/$_cat/$_zip"
+  if [ -d "$_dir" ] && [ "$(file_bytes "$_path")" = "$_want" ]; then
+    printf '  %-38s present\n' "$_cat/$_zip"
+    return 0
   fi
-  return "$_rc"
+  mkdir -p "$NLTK_DIR/$_cat"
+  fetch_exact \
+    "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/$_cat/$_zip" \
+    "$_path" "$_want" "$_zip" || return 1
+  # Zip roots differ by category: corpora/* and taggers/* archives are
+  # rooted at the resource name, with no category prefix - so a prefix
+  # is stripped when present and the archive is extracted into the
+  # category directory either way. Either root lands at
+  # <nltk>/<category>/<resource>/..., which is what nltk.data.find
+  # resolves.
+  "$VENV/bin/python" - "$NLTK_DIR" "$_cat" "$_path" <<'PY' || return 1
+import os
+import shutil
+import sys
+import zipfile
+
+dest, cat, zpath = sys.argv[1], sys.argv[2], sys.argv[3]
+prefix = cat + "/"
+with zipfile.ZipFile(zpath) as archive:
+    for member in archive.infolist():
+        name = member.filename
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        if not name:
+            continue
+        if name.startswith("/") or ".." in name.split("/"):
+            raise SystemExit(f"refusing unsafe member: {member.filename!r}")
+        target = os.path.join(dest, cat, name)
+        if member.is_dir():
+            os.makedirs(target, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with archive.open(member) as source, open(target, "wb") as sink:
+            shutil.copyfileobj(source, sink)
+print(f"  extracted under {dest}/{cat}/")
+PY
 }
-if [ -d "$NLTK_DIR/corpora/cmudict" ] &&
-  [ -d "$NLTK_DIR/taggers/averaged_perceptron_tagger" ]; then
-  printf 'nltk:     cmudict + tagger already extracted\n'
-else
-  nltk_item corpora cmudict.zip 896069 || die "cmudict fetch failed"
-  nltk_item taggers averaged_perceptron_tagger.zip 2526731 || die "tagger fetch failed"
-fi
+
+nltk_get corpora cmudict.zip 896069 || die "cmudict fetch failed"
+nltk_get taggers averaged_perceptron_tagger.zip 2526731 ||
+  die "tagger fetch failed"
+# The english tagger: nltk >= 3.9 loads taggers/averaged_perceptron_tagger_eng/
+# for pos_tag, and without it pos_tag raises or downloads at first use.
+nltk_get taggers averaged_perceptron_tagger_eng.zip 1539115 ||
+  die "eng tagger fetch failed"
 
 # --- 4. model + config -----------------------------------------------------
 # Checked before the download: a repository that predates the voice
 # should fail in a second, not after 38 MB.
 [ -f "$REPO_CONFIG" ] || die "config missing in repo: scripts/voice-configs/${MODEL}.onnx.json"
+# And validated against the installed runtime before the download, too:
+# piper-plus is the only authority on which values its config parser
+# accepts, and the first device install proved why that matters - it
+# refused phoneme_type "text" with a ValueError the old ordering
+# surfaced only after the model had fetched. PiperConfig.from_dict is
+# piper's own parser, so a mismatch fails here in a second, with the
+# runtime's real complaint instead of a smoke-test mystery.
+NLTK_DATA="$NLTK_DIR" "$VENV/bin/python" - "$REPO_CONFIG" <<'PY' ||
+  die "config rejected by piper-plus"
+import json
+import sys
+
+from piper.config import PiperConfig
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    raw = json.load(handle)
+cfg = PiperConfig.from_dict(raw)
+print(
+    f"config:   accepted by piper-plus "
+    f"(phoneme_type={cfg.phoneme_type.value}, {cfg.num_languages} languages)"
+)
+PY
 mkdir -p "$MODELS"
 fetch_exact "$MODEL_URL" "$MODEL_PATH" "$MODEL_BYTES" "${MODEL}.onnx" ||
   die "model download failed"
 # Copied from the repository on every run, so a repo update reaches the
 # model dir without a re-download. The config is ours, not upstream's.
 cp "$REPO_CONFIG" "$CONFIG" || die "config copy failed"
-printf 'config:   %s bytes (phoneme_type=%s, the proven copy)\n' \
-  "$(file_bytes "$CONFIG")" \
-  "$("$VENV/bin/python" -c "import json,sys;print(json.load(open(sys.argv[1]))['phoneme_type'])" "$CONFIG")"
+printf 'config:   copied to %s (%s bytes)\n' "$CONFIG" "$(file_bytes "$CONFIG")"
 
 # --- 5. smoke synthesis ----------------------------------------------------
 # "Installed" means audio, not files: load the model exactly as the
-# server will and render Japanese. This is the same call path the
-# server's /v1/audio/speech takes, so a pass here means the guest
-# runtime is proven before the operator ever curls it.
+# server will and render through both phonemizers - Japanese through
+# pyopenjtalk (the job this script exists for) and English through
+# g2p_en, which is what puts step 3's NLTK layout to the test without a
+# network. Same call path as the server's /v1/audio/speech, so a pass
+# here means the guest runtime is proven before the operator ever curls
+# it.
 printf 'smoke:    synthesizing (first load reads the model, ~10-30s on the phone)...\n'
 MODEL_PATH="$MODEL_PATH" CONFIG_PATH="$CONFIG" \
   NLTK_DATA="$NLTK_DIR" PIPER_INTRA_THREADS=2 \
@@ -235,15 +313,29 @@ from piper.voice import PiperVoice
 
 started = time.monotonic()
 voice = PiperVoice.load(os.environ["MODEL_PATH"], os.environ["CONFIG_PATH"])
-buffer = io.BytesIO()
-with wave.open(buffer, "wb") as wav_file:
-    voice.synthesize("こんにちは、テストです。", wav_file, language_id=0)
-data = buffer.getvalue()
-took = time.monotonic() - started
-if len(data) <= 1000:
-    print(f"  smoke:  only {len(data)} bytes of WAV - not real audio", file=sys.stderr)
-    sys.exit(1)
-print(f"  smoke:  {len(data)} WAV bytes in {took:.1f}s (intra-threads=2)")
+loaded = time.monotonic() - started
+
+
+def synth(text: str, language_id: int) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        voice.synthesize(text, wav_file, language_id=language_id)
+    data = buffer.getvalue()
+    if len(data) <= 1000:
+        print(
+            f"  smoke:  only {len(data)} bytes of WAV for {text!r} - not real audio",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return data
+
+
+ja = synth("こんにちは、テストです。", 0)
+en = synth("This is an English robustness test.", 1)
+print(
+    f"  smoke:  loaded in {loaded:.1f}s; ja {len(ja)} + en {len(en)} WAV bytes "
+    "(intra-threads=2)"
+)
 PY
 
 printf '\nguest TTS installed. Start it with: onb-stack up  (service tts-ja, port 8092)\n'
