@@ -415,6 +415,65 @@ def shellcheck() -> str:
 
 
 class TestDeviceScriptsArePosix:
+    def test_no_heredoc_leaves_its_handler_on_the_body_line(self) -> None:
+        """`|| handler` must share the line with `<<'EOF'`.
+
+        The first device run of the config validation printed:
+
+            File "<stdin>", line 1
+              die "config rejected by piper-plus"
+            IndentationError: unexpected indent
+
+        because the `||` sat at the end of the heredoc's opening line
+        and the shell swallowed the NEXT physical line as heredoc
+        body: python read `die ...` as its stdin, the handler never
+        armed, and the check it guarded ran gated by nothing while
+        looking (to a skimmer) like it had fired.
+        """
+        dangling = []
+        for name in DEVICE_SCRIPTS:
+            for lineno, line in enumerate((SCRIPTS / name).read_text().splitlines(), 1):
+                stripped = line.rstrip()
+                if "<<'" in stripped and stripped.endswith("||"):
+                    dangling.append(f"{name}:{lineno}")
+        assert not dangling, (
+            "a `||` at the end of a heredoc's opening line makes the next "
+            f"line its body, not its handler: {dangling}"
+        )
+
+    def test_a_dangling_or_really_does_swallow_the_next_line(self) -> None:
+        """The premise, checked rather than assumed.
+
+        The rule above is only worth enforcing if the shell really
+        behaves this way - so reproduce it: the handler line becomes
+        python's stdin (IndentationError) and execution continues past
+        it as if the guard had passed.
+        """
+        import subprocess
+        import sys
+
+        snippet = "\n".join(
+            [
+                f"{sys.executable} - <<'PY' ||",
+                "  echo DIED-HANDLER",
+                'print("body")',
+                "PY",
+                "echo continued",
+                "",
+            ]
+        )
+        done = subprocess.run(
+            ["/bin/sh", "-c", snippet],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert "IndentationError" in done.stderr, (
+            "the handler line should have arrived as python's stdin"
+        )
+        assert "DIED-HANDLER" not in done.stdout, "the handler never runs"
+        assert "continued" in done.stdout, "execution sails past the guard"
+
     def test_the_list_covers_the_directory(self) -> None:
         """Checked against the directory rather than remembered.
 

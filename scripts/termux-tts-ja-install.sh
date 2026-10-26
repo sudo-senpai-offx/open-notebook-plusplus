@@ -268,8 +268,12 @@ nltk_get taggers averaged_perceptron_tagger_eng.zip 1539115 ||
 # surfaced only after the model had fetched. PiperConfig.from_dict is
 # piper's own parser, so a mismatch fails here in a second, with the
 # runtime's real complaint instead of a smoke-test mystery.
-NLTK_DATA="$NLTK_DIR" "$VENV/bin/python" - "$REPO_CONFIG" <<'PY' ||
-  die "config rejected by piper-plus"
+# The `|| die` must share the line with `<<'PY'`: a `||` at the end of
+# the heredoc's opening line makes the shell swallow the NEXT physical
+# line as heredoc body, so python reads `die ...` as its stdin
+# (IndentationError) and the handler never arms - the first device run
+# of this check failed exactly that way, gated by nothing.
+NLTK_DATA="$NLTK_DIR" "$VENV/bin/python" - "$REPO_CONFIG" <<'PY' || die "config rejected by piper-plus"
 import json
 import sys
 
