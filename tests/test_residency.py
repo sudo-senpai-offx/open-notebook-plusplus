@@ -654,6 +654,33 @@ class TestLauncherCanActuallyBeStopped:
             "proot-distro login, so stopping it needs more than a signal"
         )
 
+    def test_stop_all_stops_the_residency_supervisor(self):
+        """`up` runs `onb stop` for its clean slate, so whatever stop leaves
+        alive meets the next launch's guard.
+
+        Observed: nothing but the Ctrl+C trap ever stopped the supervisor,
+        so a warm down->up found `python3 ~/bin/onb-residency` alive, the
+        guard's loose pattern matched it, and two consecutive starts
+        refused with `already running (pid 25925)` while the stack was
+        down both times. The update script already stops it with the rest;
+        stop has to as well.
+        """
+        code = self._launcher()
+        start = code.index("stop_all() {")
+        body = code[start : code.index("\n}", start)]
+        calls = [
+            line.strip()
+            for line in body.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        assert "stop_residency" in calls, (
+            "stop must free every local processing resource, not only the "
+            "ones the status table shows"
+        )
+        # Before the straggler sweep, which is stop_all's last statement: a
+        # failure there must not be able to skip the supervisor.
+        assert calls.index("stop_residency") < calls.index("kill_stragglers")
+
     def test_escalates_to_sigkill(self):
         code = self._launcher()
         start = code.index("kill_stragglers() {")

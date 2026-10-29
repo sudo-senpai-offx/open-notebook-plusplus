@@ -216,6 +216,15 @@ stop_all() {
   # The rootfs path is what identifies them. There is no `proot-distro ps` to
   # ask, so the command line is the only available answer.
   kill_proot_sessions
+  # The residency supervisor - Termux-side, like the embedder above, and
+  # for the same reason: until now only the Ctrl+C trap ever stopped it.
+  # `onb stop` and `onb-stack down` left it holding :8099, and its cmdline
+  # names `bin/onb-residency`, which the launch guard took for a second
+  # launcher and refused every start against (the 25925 refusal: a warm
+  # down->up could not come back up at all). The update script already
+  # stops it with the rest; stop has to mean every local processing
+  # resource is freed, not only the ones the status table shows.
+  stop_residency
   # Finally, the launcher itself - which SIGTERM cannot reach.
   #
   # `onb stop` runs in its own shell, so it can signal the launcher that is
@@ -422,11 +431,21 @@ start_residency() {
 }
 
 stop_residency() {
+  # Report before killing: `onb stop` is the path `up` runs for its clean
+  # slate, and the operator needs evidence the supervisor is gone, not an
+  # absence that could equally mean the scan missed it. An empty scan says
+  # nothing and prints nothing.
+  _rpids=""
   for p in /proc/[0-9]*; do
     _cl=$({ tr '\0' ' ' <"$p/cmdline"; } 2>/dev/null) || continue
     case "$_cl" in
-      *onb-residency*) kill "${p#/proc/}" 2>/dev/null ;;
+      *onb-residency*) _rpids="$_rpids ${p#/proc/}" ;;
     esac
+  done
+  [ -n "$_rpids" ] || return 0
+  echo "[onb] stopping residency supervisor (pid$_rpids)"
+  for _r in $_rpids; do
+    kill "$_r" 2>/dev/null
   done
 }
 
@@ -562,7 +581,17 @@ already_running() {
     _pid=${p#/proc/}
     cmd=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
     case "$cmd" in
-      *"$HOME/bin/onb"*) ;;
+      # `onb ` with the trailing space: a launcher, not a helper. The loose
+      # `onb` also matched `python3 ~/bin/onb-residency`, and neither
+      # `onb-stack down` nor this script's own teardown stops the
+      # supervisor, so after any down->up cycle the next start met it and
+      # refused - observed on the device as `already running (pid 25925)`,
+      # twice, with the stack down both times. The space rules out the
+      # helpers, which are all named `onb-*`, while a parked `sh ~/bin/onb`
+      # with no arguments still matches: /proc/pid/cmdline ends with a NUL,
+      # which the `tr` above turns into that space - the same convention
+      # `launcher_pids` already relies on.
+      *"$HOME/bin/onb "*) ;;
       *) continue ;;
     esac
     _is_ours "$_pid" && continue

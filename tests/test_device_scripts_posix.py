@@ -393,6 +393,173 @@ class TestLauncherDoesNotKillItsOwnSubshells:
         )
 
 
+class TestTheSupervisorNeitherBlocksNorLingers:
+    """The residency supervisor is a helper: `stop` must free it, and the
+    launch guard must not count it.
+
+    Neither was true. `stop_all` - the path `onb-stack up` runs for its
+    clean slate - stopped llama, the embedder, the guest and the proot
+    sessions, but not the supervisor; only the Ctrl+C trap did. So a warm
+    `down` left `python3 ~/bin/onb-residency` alive on :8099, and the next
+    `up` met it with a guard whose loose `*bin/onb*` matches every helper
+    named `onb-*`:
+
+        [onb] already running (pid 25925) - not starting a second launcher.
+
+    Observed twice in one drill with the stack down both times: the whole
+    down->up cycle could not come back up, refused against a process that
+    starts nothing and races nothing.
+
+    Two independent defenses, each exercised below: `stop_all` now stops
+    the supervisor with the rest (and says which pid), and the guard's
+    pattern now requires `onb ` - a space - which keeps every `onb-*`
+    helper out while a parked `sh ~/bin/onb` still matches, because
+    /proc/pid/cmdline ends with a NUL that the scan's `tr` turns into that
+    space.
+    """
+
+    @staticmethod
+    def _extract(*names: str) -> str:
+        """The named definitions whole, comments included - nothing more."""
+        text = (SCRIPTS / "termux-launch.sh").read_text()
+        parts = []
+        for name in names:
+            m = re.search(rf"^{name}\(\) \{{", text, re.M)
+            assert m, f"{name} must be defined at column 0 to be extractable"
+            parts.append(text[m.start() : text.index("\n}", m.start()) + 2])
+        return "\n".join(parts)
+
+    @staticmethod
+    def _supervisor(home: Path) -> Path:
+        """The helper where production lays it out: `$HOME/bin/onb-residency`.
+
+        Production runs it via python3; what both scans discriminate on is
+        the path text in the cmdline, identical under sh.
+        """
+        (home / "bin").mkdir(parents=True, exist_ok=True)
+        sup = home / "bin" / "onb-residency"
+        sup.write_text("#!/bin/sh\nsleep 60; :\n")
+        sup.chmod(0o755)
+        return sup
+
+    def test_the_guard_counts_launchers_not_helpers(self, tmp_path):
+        """The refusal itself, reproduced: a live supervisor must not look
+        like a second launcher, and a real one must still be seen.
+
+        The middle assertion is the regression - it fails against the loose
+        pattern, reporting the supervisor's pid exactly as the phone did.
+        """
+        text = (SCRIPTS / "termux-launch.sh").read_text()
+        # The production call site the harness below replicates.
+        assert "if other=$(already_running); then" in text
+        functions = self._extract("_is_ours", "already_running")
+        assert '_is_ours "$_pid"' in functions, (
+            "extraction pulled the wrong text; the guard must call the walk"
+        )
+
+        home = tmp_path / "home"
+        (home / "bin").mkdir(parents=True)
+        onb = home / "bin" / "onb"
+        onb.write_text(
+            "#!/bin/sh\n" + functions + "\n"
+            'case "${1:-scan}" in\n'
+            # `; :` after the sleep: without a following command some shells
+            # exec-replace themselves with sleep, losing this cmdline.
+            "  park) sleep 60; : ;;\n"
+            "  *) if other=$(already_running); then"
+            ' printf "%s\\n" "$other"; else exit 1; fi ;;\n'
+            "esac\n"
+        )
+        onb.chmod(0o755)
+        env = {**os.environ, "HOME": str(home)}
+        sup = self._supervisor(home)
+
+        def scan() -> tuple[int, list[str]]:
+            done = subprocess.run(
+                ["sh", str(onb)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert "not found" not in done.stderr, (
+                "the harness calls a function it does not define: " + done.stderr
+            )
+            return done.returncode, done.stdout.split()
+
+        # Idle: nothing to report - in particular not its own
+        # command-substitution subshell, which carries the identical cmdline.
+        rc, found = scan()
+        assert (rc, found) == (1, []), "the guard refused on an idle machine"
+
+        helper = subprocess.Popen(["sh", str(sup)], env=env, start_new_session=True)
+        park = None
+        try:
+            rc, found = scan()
+            assert (rc, found) == (1, []), (
+                f"the guard counted the residency supervisor ({helper.pid}) "
+                "as a second launcher - the 25925 refusal"
+            )
+            park = subprocess.Popen([str(onb), "park"], env=env, start_new_session=True)
+            rc, found = scan()
+            assert rc == 0, (
+                "the guard no longer refuses a real second launcher: the "
+                "tightened pattern must not have turned it off"
+            )
+            assert found == [str(park.pid)], (
+                f"expected exactly the parked launcher ({park.pid}), got {found}"
+            )
+        finally:
+            for proc in (park, helper):
+                if proc is None:
+                    continue
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                proc.wait(timeout=10)
+
+    def test_stop_frees_the_supervisor_and_names_the_pid(self, tmp_path):
+        """`stop_residency` through the real production call: the supervisor
+        dies, and the stop says which pid went - an absent line could
+        equally mean the scan missed it.
+        """
+        home = tmp_path / "home"
+        sup = self._supervisor(home)
+        env = {**os.environ, "HOME": str(home)}
+        runner = tmp_path / "stop.sh"
+        runner.write_text(
+            "#!/bin/sh\n" + self._extract("stop_residency") + "\nstop_residency\n"
+        )
+
+        helper = subprocess.Popen(["sh", str(sup)], env=env, start_new_session=True)
+        try:
+            done = subprocess.run(
+                ["sh", str(runner)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert "not found" not in done.stderr, done.stderr
+            assert done.returncode == 0, done.stderr
+            assert f"stopping residency supervisor (pid {helper.pid})" in (
+                done.stdout
+            ), (
+                "the stop reported nothing, so the operator cannot tell a "
+                "killed supervisor from a missed scan: " + done.stdout
+            )
+            assert helper.wait(timeout=10) == -signal.SIGTERM, (
+                "the supervisor outlived stop_residency"
+            )
+        finally:
+            try:
+                os.killpg(helper.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            helper.wait(timeout=10)
+
+
 class TestInstalledScriptsAreRunCorrectly:
     """A Python entry point must be invoked by its shebang, never through `sh`.
 

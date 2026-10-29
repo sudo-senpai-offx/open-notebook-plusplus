@@ -556,6 +556,26 @@ class TestOnlyOneLauncher:
             "a real second instance is still ours=false and must be reported"
         )
 
+    def test_guard_matches_launchers_not_helpers(self):
+        """A loose `*bin/onb*` also matched `python3 ~/bin/onb-residency`.
+
+        Nothing but the Ctrl+C trap ever stopped the supervisor, so every
+        warm down->up met it and refused - observed on the device as
+        `already running (pid 25925)`, twice, with the stack down both
+        times. The trailing space keeps the `onb-*` helpers out while a
+        parked `sh ~/bin/onb` still matches: /proc/pid/cmdline ends with a
+        NUL, which the scan's `tr` turns into that space (the same
+        convention `launcher_pids` relies on).
+        """
+        text = self._code()
+        i = text.index("_is_ours")
+        j = text.index('case "$cmd" in', i)
+        arm = text[j : text.index("esac", j)]
+        assert '*"$HOME/bin/onb "*)' in arm, (
+            "the guard must require `onb ` - a launcher, not any helper "
+            "whose name starts with onb"
+        )
+
     def test_stop_is_still_reachable(self):
         """The guard must not stop someone cleaning up."""
         text = self._code()
