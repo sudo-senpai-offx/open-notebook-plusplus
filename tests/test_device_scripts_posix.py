@@ -657,9 +657,37 @@ class TestStackFromTermux:
             "forever and is not a bound"
         )
         assert "ONB_GUEST_TIMEOUT" in block, "the bound must be adjustable"
-        # The two verbs that run in the guest, explicitly.
-        assert 'in_guest sh "$APP" status' in text
-        assert 'in_guest sh "$APP" down' in text
+        # The two verbs that run in the guest, explicitly - and naming the
+        # script file, since $APP is the repository directory: `sh <dir>`
+        # reads nothing and exits 0.
+        assert 'in_guest sh "$APP/scripts/termux-stack.sh" status' in text
+        assert 'in_guest sh "$APP/scripts/termux-stack.sh" down' in text
+
+    def test_delegation_never_hands_sh_the_repository_directory(self):
+        """`sh <directory>` reads nothing and exits 0 - a silent no-op.
+
+        Observed on the device: `onb-stack status` returned at rc 0 with
+        an empty terminal while the stack was up, twice in a row. The
+        transport was fine - an `echo` through the same bounded wrapper
+        printed - so what failed was the arm: it passed `$APP`, the
+        repository directory, to sh, which ran no dispatch and reported
+        nothing. `down` from the same place would have stopped nothing
+        while claiming success, which is why the path is asserted here
+        rather than left to the eye.
+        """
+        text = (SCRIPTS / "termux-stack.sh").read_text()
+        termux = text[text.index('if [ ! -d "$APP" ]') :]
+        calls = re.findall(r'in_guest sh "([^"]+)" (\S+)', termux)
+        assert calls, "the Termux branch must delegate its guest verbs"
+        for path, verb in calls:
+            assert path.endswith("/scripts/termux-stack.sh"), (
+                f"in_guest sh {path} {verb}: $APP is the directory, and "
+                "`sh <dir>` exits 0 having run nothing"
+            )
+        assert [verb for _, verb in calls] == ["status", "down", "status"], (
+            "status is delegated by its own arm and by up's short-circuit, "
+            "down by its own"
+        )
 
     def test_termux_up_never_logs_in_and_goes_through_the_launcher(self):
         text = (SCRIPTS / "termux-stack.sh").read_text()

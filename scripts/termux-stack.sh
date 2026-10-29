@@ -553,12 +553,17 @@ if [ ! -d "$APP" ]; then
     return 1
   }
 
+  # Every delegation names the script file, not $APP. $APP is the
+  # repository directory, and `sh <directory>` reads nothing and exits 0:
+  # the guest ran no dispatch at all while Termux saw rc 0 and an empty
+  # terminal - status showed no table, and down would have stopped
+  # nothing, both while reporting success.
   case "${1:-up}" in
     status)
       # In the guest the venv paths exist, so tts-ja's "down" versus "not
       # installed" is decided against reality instead of against Termux,
       # where no path under /root is visible at all.
-      in_guest sh "$APP" status
+      in_guest sh "$APP/scripts/termux-stack.sh" status
       exit $?
       ;;
     down)
@@ -567,14 +572,14 @@ if [ ! -d "$APP" ]; then
       # start is not a service, so this verb leaves it in place; the next
       # `up` clears it first, because that launcher's already_running
       # guard would otherwise refuse the start outright.
-      in_guest sh "$APP" down
+      in_guest sh "$APP/scripts/termux-stack.sh" down
       exit $?
       ;;
     up)
       # A healthy stack is reported, never restarted.
       if api_up; then
         echo "onb-stack: already up (5055 answering) - not restarting."
-        in_guest sh "$APP" status
+        in_guest sh "$APP/scripts/termux-stack.sh" status
         exit $?
       fi
       if [ ! -f "$HOME/bin/onb" ]; then
