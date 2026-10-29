@@ -602,3 +602,122 @@ class TestEveryProcReadIsGuarded:
             "these read /proc without braces, so a pid that exits mid-scan "
             "prints the shell's redirection error: " + ", ".join(offenders)
         )
+
+
+class TestStackFromTermux:
+    """`onb-stack` from Termux used to start nothing and say nothing.
+
+    Every path in the script is under /root, which does not exist in
+    Termux: one attempt sailed into `cd "$APP"` and exited there, after the
+    steps before it had already printed along the way — so the stack stayed
+    down while the output looked like a run. `status` from the same place
+    was a different lie: a table read against Termux's /proc, where the
+    guest's venv paths are invisible, so tts-ja reported "not installed"
+    against a device that had it.
+
+    The Termux side now delegates. status/down go through a *bounded*
+    login running the guest copy; `up` cannot be a login at all — a login
+    exits with its command and proot's --kill-on-exit reaps every service
+    it just started, a green table and then nothing — so it goes through
+    the launcher, which is the keep-alive session.
+    """
+
+    def test_outside_termux_and_outside_the_guest_it_refuses(self):
+        """The premise of the whole block: no context, no answer.
+
+        Pre-fix, this exact invocation printed a status table read from the
+        dev box's /proc — plausible, and about nothing on the phone.
+        """
+        result = subprocess.run(
+            ["sh", str(SCRIPTS / "termux-stack.sh"), "status"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 1
+        assert "not in Termux" in result.stderr
+        assert "surreal" not in result.stdout, (
+            "a status table printed where the guest paths do not exist is "
+            "a table about the wrong machine"
+        )
+
+    def test_every_login_goes_through_the_bounded_wrapper(self):
+        text = (SCRIPTS / "termux-stack.sh").read_text()
+        for number, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "proot-distro login" in stripped:
+                assert 'proot-distro login ubuntu -- "$@"' in stripped, (
+                    f"termux-stack.sh:{number} bypasses the bounded wrapper: {stripped}"
+                )
+        block = text[text.index('if [ ! -d "$APP" ]') :]
+        assert "timeout -k" in block, (
+            "proot discards SIGTERM (SigIgn 15) - timeout without -k waits "
+            "forever and is not a bound"
+        )
+        assert "ONB_GUEST_TIMEOUT" in block, "the bound must be adjustable"
+        # The two verbs that run in the guest, explicitly.
+        assert 'in_guest sh "$APP" status' in text
+        assert 'in_guest sh "$APP" down' in text
+
+    def test_termux_up_never_logs_in_and_goes_through_the_launcher(self):
+        text = (SCRIPTS / "termux-stack.sh").read_text()
+        termux = text[text.index('if [ ! -d "$APP" ]') :]
+        dispatch = termux.index('case "${1:-up}" in')
+        up_arm = termux[termux.index("    up)", dispatch) :]
+        up_arm = up_arm[: up_arm.index("    *)")]
+        up_arm_code = "\n".join(
+            line for line in up_arm.splitlines() if not line.strip().startswith("#")
+        )
+
+        assert "proot-distro login" not in up_arm_code, (
+            "a login for `up` exits with its command, and --kill-on-exit "
+            "reaps every service it started: a green table, then nothing"
+        )
+        # A healthy stack is reported, never restarted.
+        assert "if api_up; then" in up_arm_code
+        # The canonical down -> up cycle leaves a parked launcher whose
+        # already_running guard would refuse a second start; the clean
+        # slate is what makes that cycle work.
+        assert 'sh "$HOME/bin/onb" stop' in up_arm_code
+        # setsid's refusal must come BEFORE anything is stopped: after the
+        # clean slate it would leave the device with everything down and
+        # no way back up in the same command.
+        assert up_arm_code.index("command -v setsid") < up_arm_code.index(
+            'sh "$HOME/bin/onb" stop'
+        )
+        # The detached form onb-update uses, with stdin released and a
+        # setsid guard — nohup alone leaves the launcher in this shell's
+        # process group, where Ctrl+C reaches it and takes the stack down.
+        match = re.search(r'setsid nohup sh "\$HOME/bin/onb"[^\n]*', up_arm_code)
+        assert match, "the start must be the detached setsid form"
+        assert "</dev/null" in match.group(0), (
+            "a background process holding stdin makes the next interactive "
+            "command read from the wrong place"
+        )
+
+    def test_the_ready_line_only_prints_when_surreal_is_ready(self):
+        """The call site echoed `surreal  ready` unconditionally, so a real
+        timeout printed the WARNING and then "ready" — two contradicting
+        lines from one check, and the false one was the one that got read.
+        """
+        lines = (SCRIPTS / "termux-stack.sh").read_text().splitlines()
+        ready = [
+            i
+            for i, line in enumerate(lines)
+            if 'echo "surreal  ready"' in line and not line.strip().startswith("#")
+        ]
+        assert len(ready) == 1, "exactly one ready line"
+        definition = next(
+            i
+            for i, line in enumerate(lines)
+            if line.strip().endswith("wait_for_surreal() {")
+        )
+        call = next(
+            i for i, line in enumerate(lines) if line.strip() == "wait_for_surreal"
+        )
+        assert definition < ready[0] < call, (
+            "the ready line must sit inside wait_for_surreal's success "
+            "branch, not at the call site where it printed regardless"
+        )

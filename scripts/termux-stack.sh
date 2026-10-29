@@ -1,5 +1,7 @@
 #!/bin/sh
-# Vehicle 2 stack launcher — run INSIDE the proot Ubuntu guest.
+# Vehicle 2 stack launcher — run INSIDE the proot Ubuntu guest, or from a
+# plain Termux session as `sh ~/bin/onb-stack up|down|status` (the Termux
+# side delegates; see the block above the dispatch).
 #
 # Why this exists: proot is started with --kill-on-exit, so every guest
 # process dies when the proot session that spawned it closes. That is how
@@ -8,7 +10,8 @@
 # enough to re-run after any restart, instead of four hand-typed commands
 # with a dozen env vars between them.
 #
-# Usage: sh /root/termux-stack.sh up|down|status
+# Usage: sh /root/termux-stack.sh up|down|status      (inside the guest)
+#    or: sh ~/bin/onb-stack up|down|status            (Termux - delegates)
 #
 # Not a supervisor. It does not restart on crash and does not survive the
 # proot session. Keeping the session alive (tmux) is the durable answer;
@@ -282,13 +285,17 @@ while time.time() < deadline:
 sys.exit(1)
 PY
     then
+      # Here, and nowhere else. The call site used to echo "surreal  ready"
+      # unconditionally, so a real timeout printed the WARNING and then
+      # "ready" - two contradicting lines from one check, and the false one
+      # was the one that got read.
+      echo "surreal  ready"
       return 0
     fi
     echo "[stack] WARNING: surreal not ready after ${SURREAL_READY_TIMEOUT:-180}s - starting anyway"
   }
 
   wait_for_surreal
-  echo "surreal  ready"
 
   cd "$APP" || exit 1
 
@@ -488,6 +495,137 @@ cmd_down() {
     kill_of "termux-guest-tts.py"
     wait_gone "termux-guest-tts.py"
 }
+
+# --- Termux side: delegate; every path above lives inside the guest ---------
+#
+# Run from ~/bin/onb-stack on the phone, this file used to sail straight
+# into guest paths that do not exist in Termux - `cd "$APP"` was where one
+# attempt stopped dead - while its earlier steps had already printed along
+# the way. An `onb-stack up` from Termux therefore started zero processes
+# and reported nothing, which is the failure shape this block exists to
+# remove. The guest copy keeps owning all logic; from Termux each verb goes
+# where it can actually work.
+#
+# The gate is the repository's own path, not an argument marker: the
+# launcher's `sh .../termux-stack.sh up` and onb-update's `... down` run in
+# the guest without one, and a marker they do not pass would turn both into
+# a delegation back out of the guest they are already in.
+if [ ! -d "$APP" ]; then
+  if [ ! -d /data/data/com.termux ]; then
+    echo "onb-stack: not in Termux and $APP does not exist here." >&2
+    echo "  Run it in Termux as: sh ~/bin/onb-stack up|down|status" >&2
+    exit 1
+  fi
+  if ! command -v proot-distro >/dev/null 2>&1; then
+    echo "onb-stack: proot-distro is not installed" >&2
+    exit 1
+  fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "onb-stack: timeout (coreutils) not found - refusing an unbounded login" >&2
+    exit 1
+  fi
+
+  # Bounded the way onb-update's in_guest is, for the reason measured
+  # there: proot sets SigIgn bit 15 and discards SIGTERM outright, so a
+  # plain `timeout N` sends TERM at N and then waits forever - the bound
+  # only terminates with -k. An unbounded login presents as a frozen
+  # terminal with no indication of where it is stuck.
+  in_guest() {
+    if [ "${ONB_GUEST_TIMEOUT:-120}" = "0" ]; then
+      proot-distro login ubuntu -- "$@"
+      return $?
+    fi
+    timeout -k "${ONB_GUEST_KILL_GRACE:-5}" "${ONB_GUEST_TIMEOUT:-120}" \
+      proot-distro login ubuntu -- "$@"
+  }
+
+  # Does the API answer? curl when there is one, otherwise the same /proc
+  # scan onb-update's stack_is_up falls back to - this runs in Termux,
+  # where the guest's processes sit in our own /proc.
+  api_up() {
+    if command -v curl >/dev/null 2>&1; then
+      curl -s -m 3 -o /dev/null http://127.0.0.1:5055/health 2>/dev/null && return 0
+    fi
+    for _d in /proc/[0-9]*; do
+      _cl=$({ tr '\0' ' ' <"$_d/cmdline"; } 2>/dev/null) || continue
+      case "$_cl" in *"uvicorn api.main:app"*) return 0 ;; esac
+    done
+    return 1
+  }
+
+  case "${1:-up}" in
+    status)
+      # In the guest the venv paths exist, so tts-ja's "down" versus "not
+      # installed" is decided against reality instead of against Termux,
+      # where no path under /root is visible at all.
+      in_guest sh "$APP" status
+      exit $?
+      ;;
+    down)
+      # The guest copy kills the services - both model servers included -
+      # and prints the table. A launcher parked by an earlier detached
+      # start is not a service, so this verb leaves it in place; the next
+      # `up` clears it first, because that launcher's already_running
+      # guard would otherwise refuse the start outright.
+      in_guest sh "$APP" down
+      exit $?
+      ;;
+    up)
+      # A healthy stack is reported, never restarted.
+      if api_up; then
+        echo "onb-stack: already up (5055 answering) - not restarting."
+        in_guest sh "$APP" status
+        exit $?
+      fi
+      if [ ! -f "$HOME/bin/onb" ]; then
+        echo "onb-stack: launcher ~/bin/onb missing - run termux-install-bin first" >&2
+        exit 1
+      fi
+      # Checked before anything is stopped: discovering it only after the
+      # clean slate would leave the device with everything down and no way
+      # back up in this same command.
+      if ! command -v setsid >/dev/null 2>&1; then
+        echo "onb-stack: setsid not found - refusing a start that would stay in" >&2
+        echo "  your terminal's process group, where Ctrl+C would take the" >&2
+        echo "  stack down with it (proot runs --kill-on-exit)." >&2
+        exit 1
+      fi
+      # Clean slate first, for two measured reasons: a launcher parked by
+      # an earlier detached start refuses to start a second time
+      # (already_running), and a half-up state - a model server without an
+      # API - keeps a port the new start needs. `onb stop` is idempotent
+      # against processes that are already dead and sweeps its own stale
+      # sessions. Not gating the start on its exit code: a wedged-session
+      # timeout there would turn a best-effort cleanup into a false
+      # refusal, and the launcher's own guards report what truly cannot
+      # be taken - honestly, in the log below.
+      if ! sh "$HOME/bin/onb" stop; then
+        echo "onb-stack: note: onb stop reported errors clearing the old state;" >&2
+        echo "  starting anyway - the launcher's guards report what it cannot take." >&2
+      fi
+      # Not a direct `proot-distro login ... up`: the login would exit with
+      # its command, and --kill-on-exit would reap every service it had just
+      # started - a green table, then nothing. And not nohup alone: that
+      # only ignores SIGHUP, leaving the launcher in this shell's process
+      # group, where Ctrl+C reaches it (onb-update's own lesson). The
+      # launcher IS the keep-alive session: it runs this script's `up`
+      # inside a guest session that parks forever, and restores the model
+      # servers `down` cleared on the way.
+      _startlog="$HOME/onb-start.log"
+      : > "$_startlog"
+      setsid nohup sh "$HOME/bin/onb" >>"$_startlog" 2>&1 </dev/null &
+      echo "onb-stack: starting - llama, embed, then the guest stack"
+      echo "           detached; about a minute on this device."
+      echo "           watch: sh ~/bin/onb-stack status"
+      echo "           log:   $_startlog"
+      exit 0
+      ;;
+    *)
+      echo "usage: $0 up|down|status" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 case "${1:-up}" in
   up) cmd_up ;;
