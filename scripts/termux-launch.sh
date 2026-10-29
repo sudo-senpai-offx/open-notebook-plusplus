@@ -232,6 +232,40 @@ stop_all() {
   kill_stragglers
 }
 
+# Is this pid one of ours - the candidate a cmdline pattern just matched?
+#
+# Our own process tree, not just $$.
+#
+# `$(already_running)` runs inside a subshell whose cmdline is identical to
+# ours and whose pid differs, so a guard that only excludes `$$` matches the
+# subshell it is running in and refuses every start. Reproduced on the
+# device as three refusals naming three different pids, which reads as three
+# stale launchers rather than one self-match. `launcher_pids` self-matches
+# the same way - see its comment - so both scans share this check.
+#
+# A genuine second launcher has the same cmdline as ours too, so cmdline
+# equality cannot tell the two apart. What separates them is the process
+# tree: our own subshells hang off $$, a second launcher does not.
+#
+# Excludes both directions - ancestors (a wrapper that exec'd into us) and
+# descendants (our subshells) - because either one is us.
+_is_ours() {
+  [ "$1" = "$$" ] && return 0
+  _q=$1
+  while [ -n "$_q" ] && [ "$_q" -gt 1 ] 2>/dev/null; do
+    [ "$_q" = "$$" ] && return 0
+    _q=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$_q/status" 2>/dev/null)
+  done
+  # Not under us. Now check whether we are under *it* - a wrapper that
+  # exec'd into this script leaves its own cmdline naming bin/onb.
+  _q=$$
+  while [ -n "$_q" ] && [ "$_q" -gt 1 ] 2>/dev/null; do
+    [ "$_q" = "$1" ] && return 0
+    _q=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$_q/status" 2>/dev/null)
+  done
+  return 1
+}
+
 # Any `~/bin/onb` launcher other than this one.
 launcher_pids() {
   for p in /proc/[0-9]*; do
@@ -254,9 +288,21 @@ launcher_pids() {
         #
         # which is alarming, unachievable advice (SIGKILL cannot be ignored),
         # and referred to processes that had already exited by the time the
-        # operator acted on it. Excluded by parent instead.
-        _ppid=$(sed -n 's/^PPid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$p/status" 2>/dev/null)
-        [ "$_ppid" = "$$" ] && continue
+        # operator acted on it.
+        #
+        # "Excluded by parent instead" fixed the first order of the bug and
+        # left the second. The pipeline forks a child *inside* the command
+        # substitution, and the `{ tr ...; }` reading each cmdline forks
+        # inside that child, so neither is a direct child of $$: every scan
+        # saw the two fresh, adjacent pids it had just created, the wait
+        # loop could never empty, and `kill_stragglers` printed the WARNING
+        # above on the cold-boot drill - phone freshly rebooted, nothing
+        # running at all, first pair (13430 13431) and second pair
+        # (13597 13598) both fictional. One exclusion cannot be one level
+        # deep when the scanner itself forks to scan.
+        # `_is_ours` (above) walks the whole tree in both directions, which
+        # every depth of subshell fails.
+        _is_ours "${p#/proc/}" && continue
         echo "${p#/proc/}" ;;
     esac
   done
@@ -510,37 +556,8 @@ probe_chat() {
 # stop_llama and onb-embed down and takes the other's servers with it. Same
 # failure as the EOF bug, reached by a different route.
 already_running() {
-  # Our own process tree, not just $$.
-  #
-  # `$(already_running)` runs inside a subshell whose cmdline is identical to
-  # ours and whose pid differs, so a guard that only excludes `$$` matches the
-  # subshell it is running in and refuses every start. Reproduced on the
-  # device as three refusals naming three different pids, which reads as three
-  # stale launchers rather than one self-match.
-  #
-  # A genuine second launcher has the same cmdline as us too, so cmdline
-  # equality cannot tell the two apart. What separates them is the process
-  # tree: our own subshells hang off $$, a second launcher does not.
-  #
-  # Excludes both directions - ancestors (a wrapper that exec'd into us) and
-  # descendants (our subshells) - because either one is us.
-  _is_ours() {
-    [ "$1" = "$$" ] && return 0
-    _q=$1
-    while [ -n "$_q" ] && [ "$_q" -gt 1 ] 2>/dev/null; do
-      [ "$_q" = "$$" ] && return 0
-      _q=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$_q/status" 2>/dev/null)
-    done
-    # Not under us. Now check whether we are under *it* - a wrapper that
-    # exec'd into this script leaves its own cmdline naming bin/onb.
-    _q=$$
-    while [ -n "$_q" ] && [ "$_q" -gt 1 ] 2>/dev/null; do
-      [ "$_q" = "$1" ] && return 0
-      _q=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$_q/status" 2>/dev/null)
-    done
-    return 1
-  }
-
+  # `_is_ours` (above) drops our own subshells and wrappers, which carry our
+  # exact cmdline; a genuine second launcher is not in our tree and stays.
   for p in /proc/[0-9]*; do
     _pid=${p#/proc/}
     cmd=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue

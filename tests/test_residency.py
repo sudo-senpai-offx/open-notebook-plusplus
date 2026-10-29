@@ -666,8 +666,9 @@ class TestLauncherCanActuallyBeStopped:
     def test_does_not_kill_itself(self):
         """`onb stop` runs inside a launcher; that one must survive the sweep."""
         code = self._launcher()
-        # The exclusion lives in the caller, not in the scan: `launcher_pids`
-        # reports every match honestly and each caller filters out `$$`.
+        # Belt behind the scan's own tree walk: `launcher_pids` already drops
+        # our subshells via `_is_ours`, and each caller still filters `$$`
+        # off the pid list before signalling anything.
         sweep = code[
             code.index("kill_stragglers() {") : code.index(
                 "\n}\n", code.index("kill_stragglers() {")

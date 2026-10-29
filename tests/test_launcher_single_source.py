@@ -510,7 +510,13 @@ class TestOnlyOneLauncher:
         text = self._code()
         i = text.index("already_running()")
         body = text[i : text.index("\n}\n", i)]
-        assert '"$$"' in body, (
+        assert "_is_ours" in body, (
+            "the guard has to reach the process-tree walk; without it the "
+            "scan matches itself"
+        )
+        j = text.index("_is_ours()")
+        walk = text[j : text.index("\n}", j)]
+        assert '"$$"' in walk, (
             "without excluding its own pid the guard always matches itself and "
             "the launcher can never start"
         )

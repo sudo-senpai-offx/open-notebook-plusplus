@@ -18,8 +18,10 @@ POSIX. Dev-box scripts are excluded - they run under bash, where `local`
 and `[[ ]]` are perfectly fine.
 """
 
+import os
 import re
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -239,18 +241,128 @@ class TestLauncherDoesNotKillItsOwnSubshells:
     resolved itself.
 
     `$$` does not exclude a subshell — it is the *parent* shell's pid. The
-    exclusion has to be by parent.
+    first fix excluded by parent, and the cold-boot drill showed that to be
+    one level too shallow: a freshly rebooted phone with nothing running
+    printed
+
+        [onb] stopping launcher(s) (pid 13430 13431 )
+        [onb] WARNING: launcher(s) survived SIGKILL (pid 13597 13598 )
+                 reboot, or: kill -9 13597 13598
+
+    Two fresh, adjacent pairs seconds apart, both fictional — the scanner's
+    own grandchildren. The pipeline forks a child *inside* the command
+    substitution, and the `{ tr ...; }` reading each cmdline forks inside
+    that child; neither is a direct child of $$, so the one-level check saw
+    every scan as launchers that had survived. The exclusion has to walk the
+    whole tree in both directions — which is exactly what `_is_ours`,
+    already inside `already_running` for this same reason, now does for both
+    scans.
+
+    The first test below pins the shape; the second runs the real extracted
+    functions through the real production call instead of trusting prose.
     """
 
-    def test_the_launcher_scan_excludes_our_own_children(self):
+    def test_the_launcher_scan_excludes_our_whole_tree(self):
+        """One level of parent is the bug, not the fix.
+
+        The direct-child exclusion let the pipeline fork and the
+        `{ tr ...; }` fork through, and both inherit the script's own
+        cmdline — so each scan reported the pids it had just created. Assert
+        the tree walk is in place, and that the shallow check stays gone.
+        """
         text = (SCRIPTS / "termux-launch.sh").read_text()
+        assert re.search(r"^_is_ours\(\) \{", text, re.M), (
+            "_is_ours must be defined at the top level so launcher_pids and "
+            "already_running share the one walk"
+        )
         body = text[text.index("launcher_pids()") :]
         body = body[: body.index("\n}")]
-        assert "PPid:" in body, (
-            "launcher_pids must exclude the script's own subshells by parent; "
-            "`$$` cannot do it"
+        assert '_is_ours "${p#/proc/}" && continue' in body, (
+            "launcher_pids must exclude by the whole process tree; the "
+            "scanner's own subshells are grandchildren, not children"
         )
-        assert '[ "$_ppid" = "$$" ] && continue' in body
+        assert '[ "$_ppid" = "$$" ] && continue' not in body, (
+            "the one-level parent check is what the cold-boot drill caught; "
+            "it must not come back"
+        )
+
+    def test_the_real_scan_reports_only_real_launchers(self, tmp_path):
+        """Run the extracted functions through the real production call.
+
+        The harness is planted at `$HOME/bin/onb`, so its command-substitution
+        and pipeline subshells inherit a cmdline matching the very pattern
+        `launcher_pids` scans for — reproducing the production self-match
+        instead of describing it. Both cases were observed on the phone:
+
+        nothing running → no output (the drill got two phantom pids);
+        one parked launcher → exactly that pid, nothing else.
+        """
+        text = (SCRIPTS / "termux-launch.sh").read_text()
+
+        # The harness replicates this call verbatim; if the call site changes
+        # shape, the harness has to change with it or it tests a path the
+        # phone never runs.
+        assert 'pids=$(launcher_pids | grep -v "^$$\\$" || true)' in text
+
+        extracted = []
+        for name in ("_is_ours", "launcher_pids"):
+            m = re.search(rf"^{name}\(\) \{{", text, re.M)
+            assert m, f"{name} must be defined at column 0 to be extractable"
+            extracted.append(text[m.start() : text.index("\n}", m.start()) + 2])
+        functions = "\n".join(extracted)
+        assert '_is_ours "${p#/proc/}"' in functions, (
+            "extraction pulled the wrong text; the scan must call the walk"
+        )
+
+        home = tmp_path / "home"
+        (home / "bin").mkdir(parents=True)
+        onb = home / "bin" / "onb"
+        onb.write_text(
+            "#!/bin/sh\n" + functions + '\ncase "${1:-scan}" in\n'
+            # `; :` after the sleep: with no following command some shells
+            # exec-replace themselves with sleep, and the process would then
+            # carry `sleep 60` instead of the cmdline this test matches on.
+            "  park) sleep 60; : ;;\n"
+            '  *) pids=$(launcher_pids | grep -v "^$$\\$" || true)\n'
+            '     printf "%s\\n" "$pids" ;;\n'
+            "esac\n"
+        )
+        onb.chmod(0o755)
+        env = {**os.environ, "HOME": str(home)}
+
+        def scan() -> list[str]:
+            done = subprocess.run(
+                ["sh", str(onb)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert "not found" not in done.stderr, (
+                "the harness calls a function it does not define: " + done.stderr
+            )
+            assert done.returncode == 0, done.stderr
+            return done.stdout.split()
+
+        # The drill's case: a freshly rebooted phone with nothing running,
+        # where the scan still produced two fresh pids to report.
+        assert scan() == [], "the scan invented launchers on an idle machine"
+
+        park = subprocess.Popen([str(onb), "park"], env=env, start_new_session=True)
+        try:
+            found = scan()
+        finally:
+            # One signal takes the park shell and its sleep, so the suite
+            # leaves nothing running behind it.
+            try:
+                os.killpg(park.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            park.wait(timeout=10)
+        assert found == [str(park.pid)], (
+            f"expected exactly the parked launcher ({park.pid}), got {found} "
+            "- any other pid means the scan is still counting itself"
+        )
 
     def test_a_subshell_really_does_inherit_its_parents_cmdline(self):
         """The premise, checked rather than assumed.
