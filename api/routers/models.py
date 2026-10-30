@@ -1,5 +1,6 @@
 import os
 import traceback
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from esperanto import AIFactory
@@ -21,7 +22,7 @@ from open_notebook.ai.model_discovery import (
     sync_all_providers,
     sync_provider_models,
 )
-from open_notebook.ai.models import DefaultModels, Model, ProcessingFlags
+from open_notebook.ai.models import DefaultModels, Model, ProcessingFlags, SessionState
 from open_notebook.domain.credential import Credential
 from open_notebook.exceptions import (
     InvalidInputError,
@@ -421,6 +422,68 @@ async def update_processing_flags(flags_data: dict):
         logger.error(f"Error updating default models: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Error updating default models: {str(e)}"
+        )
+
+
+@router.get("/session/status", response_model=dict)
+async def get_session_status():
+    """Return current session state and rate limit status."""
+    try:
+        session = await SessionState.get_instance()
+        flags = await ProcessingFlags.get_instance()
+
+        return {
+            "session_id": session.session_id,
+            "local_processing_enabled": session.local_processing_enabled,
+            "cloud_processing_enabled": session.cloud_processing_enabled,
+            "browser_session_active": session.browser_session_active,
+            "last_refresh_at": session.last_refresh_at,
+            "allow_local_processing": flags.allow_local_processing,
+            "rate_limits": session.rate_limits or {},
+        }
+    except Exception as e:
+        logger.error(f"Error fetching session status: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching session status: {str(e)}"
+        )
+
+
+@router.post("/session/refresh", response_model=dict)
+async def refresh_session():
+    """Refresh the browser/Playwright session and rate limit counters."""
+    try:
+        session = await SessionState.get_instance()
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        session.session_id = session.session_id or f"onb-{int(datetime.now(timezone.utc).timestamp())}"
+        session.last_refresh_at = now
+        session.updated_at = now
+
+        await session.update()
+
+        return {
+            "session_id": session.session_id,
+            "last_refresh_at": session.last_refresh_at,
+            "refreshed": True,
+        }
+    except Exception as e:
+        logger.error(f"Error refreshing session: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error refreshing session: {str(e)}"
+        )
+
+
+@router.get("/session/rate-limits", response_model=dict)
+async def get_rate_limits():
+    """Return current rate limit status per provider."""
+    try:
+        session = await SessionState.get_instance()
+        return {"rate_limits": session.rate_limits or {}}
+    except Exception as e:
+        logger.error(f"Error fetching rate limits: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching rate limits: {str(e)}"
         )
 
 

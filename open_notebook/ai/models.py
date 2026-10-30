@@ -230,6 +230,46 @@ class ProcessingFlags(RecordModel):
         return instance
 
 
+class SessionState(RecordModel):
+    """Hybrid session management (Option C): client session ID + server state.
+    
+    Tracks session metadata for browser/Playwright capture-based processing,
+    including rate limit state per provider and whether local processing
+    resources are available."""
+    record_id: ClassVar[str] = "open_notebook:session_state"
+    session_id: str = ""
+    local_processing_enabled: bool = False
+    cloud_processing_enabled: bool = True
+    browser_session_active: bool = False
+    last_refresh_at: Optional[str] = None
+    rate_limits: Dict[str, Any] = {}
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @classmethod
+    async def get_instance(cls) -> "SessionState":
+        """Always fetch fresh session state from database."""
+        result = await repo_query(
+            "SELECT * FROM ONLY $record_id",
+            {"record_id": ensure_record_id(cls.record_id)},
+        )
+
+        if result:
+            if isinstance(result, list) and len(result) > 0:
+                data = result[0]
+            elif isinstance(result, dict):
+                data = result
+            else:
+                data = {}
+        else:
+            data = {}
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "__dict__", {})
+        super(RecordModel, instance).__init__(**data)
+        return instance
+
+
 class ModelManager:
     def __init__(self):
         pass  # No caching needed

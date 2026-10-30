@@ -62,6 +62,12 @@ export interface SettingsResponse {
   docling_vision?: boolean
   youtube_preferred_languages?: string[]
   allow_local_processing?: boolean
+  session_id?: string
+  local_processing_enabled?: boolean
+  cloud_processing_enabled?: boolean
+  browser_session_active?: boolean
+  last_refresh_at?: string
+  rate_limits?: Record<string, unknown>
 }
 
 export interface Capabilities {

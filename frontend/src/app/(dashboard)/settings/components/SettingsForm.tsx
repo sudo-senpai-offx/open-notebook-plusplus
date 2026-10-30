@@ -13,6 +13,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert'
 import { useSettings, useUpdateSettings } from '@/lib/hooks/use-settings'
 import { useCapabilities } from '@/lib/hooks/use-capabilities'
+import { sessionApi } from '@/lib/api/settings'
 import { useEffect, useState } from 'react'
 import { ChevronDownIcon } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
@@ -43,6 +44,33 @@ export function SettingsForm() {
   // engine the backend couldn't verify.
   const doclingAvailable = capabilities?.docling_available ?? !capabilitiesError
   const crawl4aiAvailable = capabilities?.crawl4ai_available ?? !capabilitiesError
+  const [sessionData, setSessionData] = useState<{
+    session_id?: string
+    local_processing_enabled?: boolean
+    cloud_processing_enabled?: boolean
+    browser_session_active?: boolean
+    last_refresh_at?: string
+    rate_limits?: Record<string, unknown>
+    allow_local_processing?: boolean
+  }>({})
+  const [sessionLoading, setSessionLoading] = useState(false)
+
+  useEffect(() => {
+    let mounted = true
+    const fetchSession = async () => {
+      setSessionLoading(true)
+      try {
+        const data = await sessionApi.getStatus()
+        if (mounted) setSessionData(data)
+      } catch {
+        if (mounted) setSessionData({})
+      } finally {
+        if (mounted) setSessionLoading(false)
+      }
+    }
+    fetchSession()
+    return () => { mounted = false }
+  }, [])
 const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
   doc: false,
   url: false,
@@ -393,6 +421,84 @@ const [hasResetForm, setHasResetForm] = useState(false)
                 {t('settings.localProcessingEnabledNotice')}
               </p>
             )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('settings.sessionStatus')}</CardTitle>
+          <CardDescription>{t('settings.sessionStatusDesc')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-sm">
+              <span>{t('settings.sessionId')}</span>
+              <span className="text-muted-foreground truncate max-w-xs">
+                {sessionData.session_id || t('settings.sessionNotInitialized')}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="w-24">{t('settings.localProcessing')}</span>
+              <span className={[
+                'px-2 py-0.5 rounded text-xs font-medium',
+                sessionData.local_processing_enabled
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-gray-100 text-gray-600',
+              ].join(' ')}>
+                {sessionData.local_processing_enabled
+                  ? t('settings.enabled')
+                  : t('settings.disabled')}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="w-24">{t('settings.cloudProcessing')}</span>
+              <span className={[
+                'px-2 py-0.5 rounded text-xs font-medium',
+                sessionData.cloud_processing_enabled !== false
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-gray-100 text-gray-600',
+              ].join(' ')}>
+                {sessionData.cloud_processing_enabled !== false
+                  ? t('settings.enabled')
+                  : t('settings.disabled')}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="w-24">{t('settings.browserSession')}</span>
+              <span className={[
+                'px-2 py-0.5 rounded text-xs font-medium',
+                sessionData.browser_session_active
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-gray-100 text-gray-600',
+              ].join(' ')}>
+                {sessionData.browser_session_active
+                  ? t('settings.active')
+                  : t('settings.inactive')}
+              </span>
+            </div>
+            {sessionData.last_refresh_at && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span>{t('settings.lastRefreshed')}</span>
+                <span>{new Date(sessionData.last_refresh_at).toLocaleString()}</span>
+              </div>
+            )}
+            <Button
+              onClick={async () => {
+                setSessionLoading(true)
+                try {
+                  await sessionApi.refresh()
+                  const data = await sessionApi.getStatus()
+                  setSessionData(data)
+                } finally {
+                  setSessionLoading(false)
+                }
+              }}
+              disabled={sessionLoading}
+              size="sm"
+            >
+              {sessionLoading ? t('common.refreshing') : t('settings.refreshSession')}
+            </Button>
           </div>
         </CardContent>
       </Card>
