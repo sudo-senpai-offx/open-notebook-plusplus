@@ -21,7 +21,7 @@ from open_notebook.ai.model_discovery import (
     sync_all_providers,
     sync_provider_models,
 )
-from open_notebook.ai.models import DefaultModels, Model
+from open_notebook.ai.models import DefaultModels, Model, ProcessingFlags
 from open_notebook.domain.credential import Credential
 from open_notebook.exceptions import (
     InvalidInputError,
@@ -372,6 +372,46 @@ async def update_default_models(defaults_data: DefaultModelsResponse):
             default_speech_to_text_model=defaults.default_speech_to_text_model,  # type: ignore[attr-defined]
             default_embedding_model=defaults.default_embedding_model,  # type: ignore[attr-defined]
             default_tools_model=defaults.default_tools_model,  # type: ignore[attr-defined]
+        )
+
+
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating default models: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error updating default models: {str(e)}"
+        )
+
+@router.get("/processing-flags", response_model=dict)
+async def get_processing_flags():
+    """Return the current processing flag configuration."""
+    flags = await ProcessingFlags.get_instance()
+    return {"allow_local_processing": flags.allow_local_processing}
+
+
+@router.put("/processing-flags", response_model=dict)
+async def update_processing_flags(flags_data: dict):
+    """Update processing flag configuration.
+
+    Expected payload: {"allow_local_processing": bool}
+    """
+    try:
+        flags = await ProcessingFlags.get_instance()
+
+        value = flags_data.get("allow_local_processing")
+        if value is not None:
+            flags.allow_local_processing = bool(value)
+
+        await flags.update()
+
+        return {"allow_local_processing": flags.allow_local_processing}
+    except Exception as e:
+        logger.error(f"Error updating processing flags: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error updating processing flags: {str(e)}"
         )
     except HTTPException:
         raise

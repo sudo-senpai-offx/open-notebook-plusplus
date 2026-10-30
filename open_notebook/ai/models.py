@@ -198,6 +198,38 @@ class DefaultModels(RecordModel):
         return instance
 
 
+class ProcessingFlags(RecordModel):
+    """Global processing flag configuration — controls whether local resources
+    (LLM, embeddings, STT, TTS) may be used. Persisted in SurrealDB as
+    `open_notebook:processing_flags`; a single record with one boolean field."""
+    record_id: ClassVar[str] = "open_notebook:processing_flags"
+    allow_local_processing: bool = False
+
+    @classmethod
+    async def get_instance(cls) -> "ProcessingFlags":
+        """Always fetch fresh flags from database (override parent caching behavior)"""
+        result = await repo_query(
+            "SELECT * FROM ONLY $record_id",
+            {"record_id": ensure_record_id(cls.record_id)},
+        )
+
+        if result:
+            if isinstance(result, list) and len(result) > 0:
+                data = result[0]
+            elif isinstance(result, dict):
+                data = result
+            else:
+                data = {}
+        else:
+            data = {}
+
+        # Create new instance with fresh data (bypass singleton cache)
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "__dict__", {})
+        super(RecordModel, instance).__init__(**data)
+        return instance
+
+
 class ModelManager:
     def __init__(self):
         pass  # No caching needed

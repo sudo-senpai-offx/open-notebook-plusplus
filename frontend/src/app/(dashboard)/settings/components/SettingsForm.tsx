@@ -25,6 +25,7 @@ const settingsSchema = z.object({
   docling_ocr: z.boolean().optional(),
   docling_formulas: z.boolean().optional(),
   docling_vision: z.boolean().optional(),
+  allow_local_processing: z.boolean().optional(),
 })
 
 type SettingsFormData = z.infer<typeof settingsSchema>
@@ -42,19 +43,21 @@ export function SettingsForm() {
   // engine the backend couldn't verify.
   const doclingAvailable = capabilities?.docling_available ?? !capabilitiesError
   const crawl4aiAvailable = capabilities?.crawl4ai_available ?? !capabilitiesError
-  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
-    doc: false,
-    url: false,
-    embedding: false,
-    files: false
-  })
-  const [hasResetForm, setHasResetForm] = useState(false)
-  
-  
+const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
+  doc: false,
+  url: false,
+  embedding: false,
+  files: false
+})
+const [showRestartModal, setShowRestartModal] = useState(false)
+const [hasResetForm, setHasResetForm] = useState(false)
+
   const {
     control,
     handleSubmit,
     reset,
+    setValue,
+    watch,
     formState: { isDirty }
   } = useForm<SettingsFormData>({
     resolver: zodResolver(settingsSchema),
@@ -66,8 +69,11 @@ export function SettingsForm() {
       docling_ocr: undefined,
       docling_formulas: undefined,
       docling_vision: undefined,
+      allow_local_processing: undefined,
     }
   })
+
+  const allowLocalProcessing = watch('allow_local_processing')
 
 
   const toggleSection = (section: string) => {
@@ -84,6 +90,7 @@ export function SettingsForm() {
         docling_ocr: settings.docling_ocr ?? true,
         docling_formulas: settings.docling_formulas ?? false,
         docling_vision: settings.docling_vision ?? false,
+        allow_local_processing: settings.allow_local_processing,
       }
       reset(formData)
       setHasResetForm(true)
@@ -92,6 +99,7 @@ export function SettingsForm() {
 
   const onSubmit = async (data: SettingsFormData) => {
     await updateSettings.mutateAsync(data)
+    setShowRestartModal(true)
   }
 
   if (isLoading) {
@@ -348,6 +356,61 @@ export function SettingsForm() {
           </div>
         </CardContent>
       </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('settings.allowLocalProcessing')}</CardTitle>
+          <CardDescription>{t('settings.allowLocalProcessingDesc')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Controller
+                name="allow_local_processing"
+                control={control}
+                render={({ field }) => (
+                  <Checkbox
+                    id="allow_local_processing"
+                    checked={field.value ?? false}
+                    onCheckedChange={(val) => {
+                      field.onChange(val as boolean)
+                      setShowRestartModal(true)
+                      setValue('allow_local_processing', val as boolean)
+                    }}
+                    disabled={field.disabled || isLoading}
+                  />
+                )}
+              />
+              <Label htmlFor="allow_local_processing">{t('settings.allowLocalProcessing')}</Label>
+            </div>
+            {allowLocalProcessing === false && (
+              <p className="text-sm text-muted-foreground">
+                {t('settings.localProcessingDisabledNotice')}
+              </p>
+            )}
+            {allowLocalProcessing === true && (
+              <p className="text-sm text-muted-foreground">
+                {t('settings.localProcessingEnabledNotice')}
+              </p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {showRestartModal && (
+        <Alert variant="default">
+          <AlertTitle>{t('settings.restartRequiredTitle')}</AlertTitle>
+          <AlertDescription>{t('settings.restartRequiredDesc')}</AlertDescription>
+          <div className="flex gap-2 justify-end">
+            <Button onClick={() => setShowRestartModal(false)} variant="outline">
+              {t('common.cancel')}
+            </Button>
+            <Button onClick={() => window.location.reload()} variant="default">
+              {t('common.restart')}
+            </Button>
+          </div>
+        </Alert>
+      )}
 
       <div className="flex justify-end">
          <Button 

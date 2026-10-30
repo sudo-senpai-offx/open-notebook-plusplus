@@ -1,6 +1,9 @@
 'use client'
 
 import { useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { QUERY_KEYS } from '@/lib/api/query-client'
+import { settingsApi } from '@/lib/api/settings'
 import { AppShell } from '@/components/layout/AppShell'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert'
@@ -14,6 +17,7 @@ import {
 } from '@/lib/hooks/use-credentials'
 import { useProviders } from '@/lib/hooks/use-providers'
 import { Credential } from '@/lib/api/credentials'
+import { ProviderInfo } from '@/lib/api/providers'
 import {
   DefaultModelSelectors,
   MigrationBanner,
@@ -26,6 +30,11 @@ export default function ApiKeysPage() {
   // Data
   const { data: credentials, isLoading: credentialsLoading } = useCredentials()
   const { data: models, isLoading: modelsLoading } = useModels()
+  const { data: settings, isLoading: settingsLoading } = useQuery({
+    queryKey: QUERY_KEYS.settings,
+    queryFn: () => settingsApi.get(),
+  })
+
   const { data: defaults, isLoading: defaultsLoading } = useModelDefaults()
   const { data: credentialStatus } = useCredentialStatus()
   const { data: envStatus } = useEnvStatus()
@@ -116,7 +125,7 @@ export default function ApiKeysPage() {
 
           {/* Default Model Selectors */}
           {models && defaults && (
-            <DefaultModelSelectors models={models} defaults={defaults} />
+            <DefaultModelSelectors models={models} defaults={defaults} allow_local_processing={settings?.allow_local_processing ?? false} />
           )}
 
           {/* Provider Cards */}
@@ -128,7 +137,7 @@ export default function ApiKeysPage() {
             </Alert>
           ) : (
             <div className="grid gap-4">
-              {sortedProviders.map(provider => (
+              {sortedProviders.map((provider: ProviderInfo) => (
                 <ProviderSection
                   key={provider.name}
                   provider={provider}

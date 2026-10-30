@@ -3,6 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import ApiKeysPage from './page'
 import { ProviderInfo } from '@/lib/api/providers'
 import { Credential } from '@/lib/api/credentials'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { settingsApi } from '@/lib/api/settings'
 
 // useTranslation is mocked globally in setup.ts (t returns the key string)
 
@@ -21,6 +23,12 @@ vi.mock('@/components/settings', () => ({
 vi.mock('@/lib/hooks/use-models', () => ({
   useModels: vi.fn(() => ({ data: [], isLoading: false })),
   useModelDefaults: vi.fn(() => ({ data: null, isLoading: false })),
+}))
+
+vi.mock('@/lib/api/settings', () => ({
+  settingsApi: {
+    get: vi.fn(() => Promise.resolve({})),
+  },
 }))
 
 const mockUseCredentials = vi.fn()
@@ -65,6 +73,19 @@ const anthropicCredential = {
   model_count: 0,
 } as Credential
 
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: false,
+    },
+  },
+})
+
+const renderWithProviders = (ui: React.ReactNode) =>
+  render(
+    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>
+  )
+
 describe('ApiKeysPage', () => {
   beforeEach(() => {
     mockUseCredentials.mockReturnValue({ data: [], isLoading: false })
@@ -73,10 +94,11 @@ describe('ApiKeysPage', () => {
       isLoading: false,
       isError: false,
     })
+    vi.mocked(settingsApi.get).mockResolvedValue({})
   })
 
   it('renders one section per provider from GET /api/providers', () => {
-    render(<ApiKeysPage />)
+    renderWithProviders(<ApiKeysPage />)
     const sections = screen.getAllByTestId('provider-section')
     expect(sections.map(s => s.textContent)).toEqual(['OpenAI', 'Anthropic'])
   })
@@ -86,7 +108,7 @@ describe('ApiKeysPage', () => {
       data: [anthropicCredential],
       isLoading: false,
     })
-    render(<ApiKeysPage />)
+    renderWithProviders(<ApiKeysPage />)
     const sections = screen.getAllByTestId('provider-section')
     expect(sections.map(s => s.textContent)).toEqual(['Anthropic', 'OpenAI'])
   })
@@ -97,7 +119,7 @@ describe('ApiKeysPage', () => {
       isLoading: true,
       isError: false,
     })
-    render(<ApiKeysPage />)
+    renderWithProviders(<ApiKeysPage />)
     expect(screen.queryAllByTestId('provider-section')).toHaveLength(0)
   })
 
@@ -107,7 +129,7 @@ describe('ApiKeysPage', () => {
       isLoading: false,
       isError: true,
     })
-    render(<ApiKeysPage />)
+    renderWithProviders(<ApiKeysPage />)
     expect(screen.getByText('apiKeys.providersLoadFailed')).toBeInTheDocument()
     expect(
       screen.getByText('apiKeys.providersLoadFailedDescription')

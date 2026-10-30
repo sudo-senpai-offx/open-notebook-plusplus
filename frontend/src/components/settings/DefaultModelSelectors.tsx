@@ -36,9 +36,12 @@ interface DefaultModelSelectProps {
   showDescription?: boolean
   /** Name of the currently selected chat model, used for the fallback hint. */
   chatModelName?: string
+  /** When true, the selector is disabled/greyed out (e.g. local processing off). */
+  disabled?: boolean
 }
 
 function DefaultModelSelect({
+  disabled = false,
   config,
   available,
   currentValue,
@@ -72,7 +75,7 @@ function DefaultModelSelect({
       <div className="flex gap-1">
         <Select
           value={currentValue || (config.required ? "" : NONE_VALUE)}
-          onValueChange={(v) => onChange(config.key, v === NONE_VALUE ? "" : v)}
+          onValueChange={(v) => onChange(config.key, v === NONE_VALUE ? "" : v)} disabled={disabled}
         >
           <SelectTrigger
             id={config.id}
@@ -121,11 +124,13 @@ function DefaultModelSelect({
 interface DefaultModelSelectorsProps {
   models: Model[]
   defaults: ModelDefaults
+  allow_local_processing?: boolean
 }
 
 export function DefaultModelSelectors({
   models,
   defaults,
+  allow_local_processing = false,
 }: DefaultModelSelectorsProps) {
   const { t } = useTranslation()
   const updateDefaults = useUpdateModelDefaults()
@@ -228,6 +233,7 @@ export function DefaultModelSelectors({
               currentValue={watch(config.key) || undefined}
               onChange={handleChange}
               chatModelName={chatModelName}
+              disabled={!allow_local_processing}
             />
           ))}
         </div>
@@ -245,6 +251,7 @@ export function DefaultModelSelectors({
                   onChange={handleChange}
                   showDescription
                   chatModelName={chatModelName}
+                  disabled={!allow_local_processing}
                 />
               ))}
             </div>
