@@ -8,12 +8,15 @@ default.
 """
 
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from open_notebook.ai.models import SyncConflict, SyncOptOut
+from open_notebook.database.repository import repo_query
 from open_notebook.domain.notebook import Asset
 from open_notebook.exceptions import OpenNotebookError
 from open_notebook.peers.urls import InvalidPeerURL, validate_peer_url
@@ -355,3 +358,180 @@ async def sync_blob_put(
         )
 
     return {"sha256": ref.sha256, "size": ref.size, "deduped": ref.deduped}
+
+
+# --------------------------------------------------------------------------
+# conflict management
+# --------------------------------------------------------------------------
+
+
+class SyncConflictResponse(BaseModel):
+    collection: str
+    db_record_id: str
+    local_updated: Optional[str] = None
+    remote_updated: Optional[str] = None
+    resolved: bool
+    resolution: Optional[str] = None
+
+
+@router.get("/sync/conflicts", response_model=List[SyncConflictResponse])
+async def list_conflicts():
+    """List pending sync conflicts awaiting user resolution."""
+    conflict = await SyncConflict.get_instance()
+    # The singleton holds one conflict at a time for simplicity;
+    # a full conflict queue is a later slice.
+    if conflict.resolved:
+        return []
+    return [
+        SyncConflictResponse(
+            collection=conflict.collection,
+            db_record_id=conflict.db_record_id,
+            local_updated=conflict.local_updated,
+            remote_updated=conflict.remote_updated,
+            resolved=conflict.resolved,
+            resolution=conflict.resolution,
+        )
+    ]
+
+
+class SyncConflictResolveRequest(BaseModel):
+    resolution: str  # "local" | "remote" | "merge"
+    merged_data: Optional[Dict[str, Any]] = None
+
+
+@router.post("/sync/resolve", response_model=dict)
+async def resolve_conflict(body: SyncConflictResolveRequest):
+    """Resolve the pending sync conflict.
+
+    `resolution` is "local" (keep local), "remote" (take remote),
+    or "merge" (use merged_data). The winning version is written
+    into the database and the conflict record is cleared.
+    """
+    if body.resolution not in ("local", "remote", "merge"):
+        raise HTTPException(status_code=400, detail="resolution must be local, remote, or merge")
+
+    conflict = await SyncConflict.get_instance()
+    if conflict.resolved:
+        return {"ok": True, "message": "no pending conflict"}
+
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    if body.resolution == "merge" and body.merged_data is not None:
+        # Apply merged data to the database record
+        target_id = conflict.db_record_id
+        collection = conflict.collection
+        # Upsert the merged data
+        await repo_query(
+            f"UPDATE type::table($collection) SET $data WHERE id = $id RETURN AFTER",
+            {"collection": collection, "data": body.merged_data, "id": target_id},
+        )
+    elif body.resolution == "remote":
+        # Take remote data
+        target_id = conflict.db_record_id
+        collection = conflict.collection
+        await repo_query(
+            f"UPDATE type::table($collection) SET $data WHERE id = $id RETURN AFTER",
+            {"collection": collection, "data": conflict.remote_data, "id": target_id},
+        )
+    # "local" means keep what we have - nothing to write
+
+    conflict.resolved = True
+    conflict.resolution = body.resolution
+    conflict.resolved_at = now
+    await conflict.update()
+
+    return {
+        "ok": True,
+        "resolution": body.resolution,
+        "resolved_at": now,
+    }
+
+
+# --------------------------------------------------------------------------
+# opt-out management
+# --------------------------------------------------------------------------
+
+
+class SyncOptOutResponse(BaseModel):
+    collections: List[str]
+    record_ids: List[str]
+
+
+@router.get("/sync/optout", response_model=SyncOptOutResponse)
+async def get_optout():
+    """Return the current sync opt-out configuration."""
+    optout = await SyncOptOut.get_instance()
+    return SyncOptOutResponse(
+        collections=optout.collections,
+        record_ids=optout.record_ids,
+    )
+
+
+class SyncOptOutUpdateRequest(BaseModel):
+    collections: Optional[List[str]] = None
+    record_ids: Optional[List[str]] = None
+
+
+@router.put("/sync/optout", response_model=SyncOptOutResponse)
+async def update_optout(body: SyncOptOutUpdateRequest):
+    """Update sync opt-out configuration.
+
+    Collections listed here are excluded from sync entirely.
+    Record ids listed here are excluded per-record.
+    """
+    optout = await SyncOptOut.get_instance()
+
+    if body.collections is not None:
+        optout.collections = body.collections
+    if body.record_ids is not None:
+        optout.record_ids = body.record_ids
+
+    await optout.update()
+
+    return SyncOptOutResponse(
+        collections=optout.collections,
+        record_ids=optout.record_ids,
+    )
+
+
+# --------------------------------------------------------------------------
+# auto sync (timer-driven)
+# --------------------------------------------------------------------------
+
+
+class SyncAutoRequest(BaseModel):
+    device: str = Field(default="auto", description="Device name for the manifest")
+
+
+@router.post("/sync/auto", response_model=dict)
+async def auto_sync(body: SyncAutoRequest):
+    """Run one auto-sync cycle: export, pull, import dry-run, report conflicts.
+
+    Intended for a 30-minute timer. Does not apply imports automatically
+    - conflicts are surfaced for user resolution instead.
+    """
+    try:
+        manifest = await export_all(body.device)
+    except Exception as exc:
+        logger.warning(f"auto sync export failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Export failed: {exc}")
+
+    # Dry-run import to detect conflicts without writing
+    try:
+        result = await import_all(dry_run=True)
+    except Exception as exc:
+        logger.warning(f"auto sync import dry-run failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Import dry-run failed: {exc}")
+
+    return {
+        "ok": True,
+        "exported": manifest.get("counts", {}),
+        "import_preview": {
+            k: v for k, v in result.items()
+            if k.startswith(("notes_", "cards_", "sources_", "chats_", "insights_", "notebooks_"))
+        },
+        "errors": result.get("errors", []),
+        "dry_run": True,
+    }

@@ -320,6 +320,88 @@ cmd_status() {
   fi
 }
 
+cmd_auto() {
+  # One auto-sync cycle: export, pull, dry-run import to detect conflicts.
+  # Intended for a 30-minute timer. Does not apply imports automatically -
+  # conflicts are surfaced for user resolution instead.
+  api_up
+  [ -d "$SYNC_DIR/.git" ] || die "no git repo at $SYNC_DIR - run: pc-sync.sh init <url>"
+  git_sane
+
+  echo "[auto] exporting from the app (device: $DEVICE)"
+  pw=$(api_password)
+  curl -s -m 300 -X POST "$API/api/sync/export" \
+    ${pw:+-H "Authorization: Bearer $pw"} \
+    -H 'Content-Type: application/json' \
+    -d "{\"device\":\"$DEVICE\"}" |
+    grep -o '"counts":{[^}]*}' || echo "  (no counts in response - check the app log)"
+
+  echo "[auto] pulling"
+  pull_err=$(git -C "$SYNC_DIR" pull --ff-only origin main 2>&1 >/dev/null) || {
+    echo "[auto] pull failed: $pull_err" | head -3
+    if echo "$pull_err" | grep -qiE "could not resolve|connection|timed out|refused|authentication|credential|permission"; then
+      echo "       This is the network or the credential, not a conflict."
+      return 1
+    fi
+    if ! git -C "$SYNC_DIR" merge-base HEAD FETCH_HEAD >/dev/null 2>&1; then
+      echo "[auto] unrelated histories - skipping this cycle."
+      return 1
+    fi
+    echo "[auto] pull was not a fast-forward - conflicts detected, not applied."
+    echo "       Run: pc-sync.sh conflicts   # to review"
+    return 1
+  }
+
+  echo "[auto] import dry-run (conflict detection)"
+  pw=$(api_password)
+  curl -s -m 300 -X POST "$API/api/sync/import" \
+    ${pw:+-H "Authorization: Bearer $pw"} \
+    -H 'Content-Type: application/json' -d '{"dry_run":true}' |
+    tr ',' '\n' | grep -E 'created|updated|stale|errors' | sed 's/^/       /'
+
+  # Check for pending conflicts via the API
+  code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$API/api/sync/conflicts" 2>/dev/null) || code=000
+  if [ "$code" = "200" ]; then
+    conflicts=$(curl -s -m 10 "$API/api/sync/conflicts" 2>/dev/null)
+    if echo "$conflicts" | grep -q '"resolved":false'; then
+      echo
+      echo "[auto] CONFLICTS DETECTED - review with:"
+      echo "       pc-sync.sh conflicts          # list"
+    else
+      echo "[auto] no pending conflicts"
+    fi
+  fi
+
+  echo "[auto] cycle complete"
+}
+
+cmd_conflicts() {
+  # List pending sync conflicts via the API.
+  api_up
+  pw=$(api_password)
+  code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' ${pw:+-H "Authorization: Bearer $pw"} "$API/api/sync/conflicts" 2>/dev/null) || code=000
+  if [ "$code" != "200" ]; then
+    echo "  API not answering (HTTP $code)"
+    return 1
+  fi
+  curl -s -m 10 ${pw:+-H "Authorization: Bearer $pw"} "$API/api/sync/conflicts" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print('  (unable to parse conflict list)')
+    sys.exit(0)
+if not data:
+    print('  no pending conflicts')
+else:
+    for c in data:
+        print(f\"  {c['collection']}:{c['db_record_id']}\")
+        print(f\"    local_updated : {c.get('local_updated')}\")
+        print(f\"    remote_updated: {c.get('remote_updated')}\")
+        print(f\"    resolved      : {c.get('resolved')}\")
+" 2>/dev/null || curl -s -m 10 ${pw:+-H "Authorization: Bearer $pw"} "$API/api/sync/conflicts" 2>/dev/null
+}
+
 case "${1:-}" in
   init) shift; cmd_init "$@" ;;
   push) shift; cmd_push "$@" ;;
@@ -327,6 +409,8 @@ case "${1:-}" in
   cycle)
     cmd_pull --apply && cmd_push
     ;;
+  auto) cmd_auto ;;
+  conflicts) cmd_conflicts ;;
   blobs) shift; cmd_blobs "$@" ;;
   bundle) shift; cmd_bundle "$@" ;;
   fetch-bundle) shift; cmd_fetch_bundle "$@" ;;

@@ -1,5 +1,5 @@
 import os
-from typing import Any, ClassVar, Dict, Optional, Sequence, Union
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Union
 
 from esperanto import (
     AIFactory,
@@ -270,6 +270,79 @@ class SessionState(RecordModel):
         return instance
 
 
+class SyncConflict(RecordModel):
+    """A sync conflict waiting for user resolution.
+
+    Detected during import when a record exists on both sides, the
+    `updated` timestamps differ, *and* the full record content differs.
+    Both versions are stored so the user can pick a winner or merge.
+    """
+    record_id: ClassVar[str] = "open_notebook:sync_conflict"
+
+    collection: str = ""
+    db_record_id: str = ""
+    local_updated: Optional[str] = None
+    remote_updated: Optional[str] = None
+    local_data: Dict[str, Any] = {}
+    remote_data: Dict[str, Any] = {}
+    resolved: bool = False
+    resolution: Optional[str] = None  # "local" | "remote" | "merge"
+    resolved_at: Optional[str] = None
+
+    @classmethod
+    async def get_instance(cls) -> "SyncConflict":
+        """Fetch the conflict record (singleton)."""
+        result = await repo_query(
+            "SELECT * FROM ONLY $record_id",
+            {"record_id": ensure_record_id(cls.record_id)},
+        )
+        if result:
+            if isinstance(result, list) and len(result) > 0:
+                data = result[0]
+            elif isinstance(result, dict):
+                data = result
+            else:
+                data = {}
+        else:
+            data = {}
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "__dict__", {})
+        super(RecordModel, instance).__init__(**data)
+        return instance
+
+
+class SyncOptOut(RecordModel):
+    """Collections and record ids excluded from sync.
+
+    Everything is synced by default; opt-out is the escape hatch for
+    collections or individual records the operator wants to keep
+    device-local.
+    """
+    record_id: ClassVar[str] = "open_notebook:sync_optout"
+
+    collections: List[str] = []
+    record_ids: List[str] = []
+
+    @classmethod
+    async def get_instance(cls) -> "SyncOptOut":
+        """Fetch the opt-out record (singleton)."""
+        result = await repo_query(
+            "SELECT * FROM ONLY $record_id",
+            {"record_id": ensure_record_id(cls.record_id)},
+        )
+        if result:
+            if isinstance(result, list) and len(result) > 0:
+                data = result[0]
+            elif isinstance(result, dict):
+                data = result
+            else:
+                data = {}
+        else:
+            data = {}
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "__dict__", {})
+        super(RecordModel, instance).__init__(**data)
+        return instance
 class ModelManager:
     def __init__(self):
         pass  # No caching needed

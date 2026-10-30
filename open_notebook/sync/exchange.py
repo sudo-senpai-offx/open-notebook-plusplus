@@ -65,6 +65,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from loguru import logger
 from pydantic import BaseModel
 
+from open_notebook.ai.models import SyncConflict, SyncOptOut
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Asset, Source
 from open_notebook.storage.blobs import resolve_blob_path
@@ -202,6 +203,9 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     (root / CARDS_DIR).mkdir(parents=True, exist_ok=True)
     (root / SOURCES_DIR).mkdir(parents=True, exist_ok=True)
 
+    # Opt-out configuration: collections and record ids excluded from sync.
+    optout = await _optout()
+
     notes: List[Note] = await Note.get_all()
     cards: List[Flashcard] = await Flashcard.get_all()
     sources: List[Source] = await Source.get_all()
@@ -251,6 +255,8 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     # keyed by slug and deduped on it.
     notebook_entries: Dict[str, Dict[str, Any]] = {}
     for notebook_id, name in notebook_names.items():
+        if _is_opted_out(optout, "notebooks", str(notebook_id)):
+            continue
         slug = _slug(name)
         if not slug:
             continue
@@ -282,6 +288,8 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
     )
 
     for note in notes:
+        if _is_opted_out(optout, "notes", str(note.id)):
+            continue
         _write_json(
             root / NOTES_DIR / f"{str(note.id).replace(':', '-')}.json",
             {
@@ -295,6 +303,8 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
         )
 
     for source in sources:
+        if _is_opted_out(optout, "sources", str(source.id)):
+            continue
         asset = source.asset or Asset()
         # A source can hang off a notebook by two edge types depending on
         # how it was added - sources use `reference`, notes `artifact`.
@@ -352,6 +362,8 @@ async def export_all(device: str, root: Optional[Path] = None) -> Dict[str, Any]
         )
 
     for card in cards:
+        if _is_opted_out(optout, "cards", str(card.id)):
+            continue
         _write_json(
             root / CARDS_DIR / f"{str(card.id).replace(':', '-')}.json",
             {
@@ -483,6 +495,8 @@ async def _export_insights(root: Path) -> Dict[str, Dict[str, Any]]:
     """
     (root / INSIGHTS_DIR).mkdir(parents=True, exist_ok=True)
 
+    optout = await _optout()
+
     rows = (
         await repo_query(
             "SELECT id, insight_type, content, source, updated FROM source_insight"
@@ -494,6 +508,8 @@ async def _export_insights(root: Path) -> Dict[str, Dict[str, Any]]:
     for row in rows:
         insight_id = str(row.get("id") or "")
         if not insight_id:
+            continue
+        if _is_opted_out(optout, "insights", insight_id):
             continue
         stamped = _as_iso(row.get("updated"))
         entries[insight_id] = {
@@ -534,6 +550,8 @@ async def _export_chats(
 
     (root / CHAT_DIR).mkdir(parents=True, exist_ok=True)
 
+    optout = await _optout()
+
     rows = (
         await repo_query("SELECT id, title, model_override, updated FROM chat_session")
         or []
@@ -564,6 +582,8 @@ async def _export_chats(
     for row in rows:
         session_id = str(row.get("id") or "")
         if not session_id:
+            continue
+        if _is_opted_out(optout, "chats", session_id):
             continue
 
         messages = by_session.get(session_id, [])
@@ -725,6 +745,58 @@ def _newer(incoming: Optional[str], existing: Optional[str]) -> bool:
     return incoming > existing
 
 
+async def _optout() -> SyncOptOut:
+    """Load the sync opt-out configuration (singleton)."""
+    return await SyncOptOut.get_instance()
+
+
+def _is_opted_out(optout: SyncOptOut, collection: str, record_id: str) -> bool:
+    """True if this collection or record id is excluded from sync."""
+    if collection in optout.collections:
+        return True
+    if record_id in optout.record_ids:
+        return True
+    return False
+
+
+def _records_differ(local: Optional[Dict[str, Any]], remote: Optional[Dict[str, Any]]) -> bool:
+    """True if two record dicts differ in any field (full-record comparison)."""
+    if local is None and remote is None:
+        return False
+    if local is None or remote is None:
+        return True
+    # Normalise: compare sorted JSON serialization
+    import json
+    return json.dumps(local, sort_keys=True, default=str) != json.dumps(remote, sort_keys=True, default=str)
+
+
+async def _queue_conflict(
+    collection: str,
+    db_record_id: str,
+    local_updated: Optional[str],
+    remote_updated: Optional[str],
+    local_data: Optional[Dict[str, Any]],
+    remote_data: Optional[Dict[str, Any]],
+) -> None:
+    """Record a sync conflict for user resolution."""
+    conflict = await SyncConflict.get_instance()
+    if conflict.resolved:
+        # A previous conflict was already resolved; clear it first.
+        conflict.resolved = False
+        conflict.resolution = None
+        conflict.resolved_at = None
+    conflict.collection = collection
+    conflict.db_record_id = db_record_id
+    conflict.local_updated = local_updated
+    conflict.remote_updated = remote_updated
+    conflict.local_data = local_data or {}
+    conflict.remote_data = remote_data or {}
+    conflict.resolved = False
+    conflict.resolution = None
+    conflict.resolved_at = None
+    await conflict.update()
+
+
 async def import_all(
     root: Optional[Path] = None, dry_run: bool = False
 ) -> Dict[str, Any]:
@@ -738,6 +810,7 @@ async def import_all(
 
     root = root or sync_dir()
     missing: set[str] = set()
+    optout = await _optout()
 
     # Notebooks first. Everything downstream resolves a `notebook_slugs`
     # entry to a local notebook id, so this has to run before the notes
@@ -849,6 +922,9 @@ async def import_all(
             if (existing_note and existing_note.updated)
             else None
         )
+        # Opt-out: never import records the operator wants device-local.
+        if _is_opted_out(optout, "notes", record_id):
+            continue
         # Staleness gates the field upsert, not the filing: a record
         # skipped as stale still converges its notebook membership
         # below, which is what lets a repeated import repair a missed
@@ -856,6 +932,27 @@ async def import_all(
         note_stale = bool(
             existing_note and not _newer(data.get("updated"), local_updated)
         )
+        # Full-record conflict detection: same updated but different
+        # content is not a conflict; different updated AND different
+        # content means both sides edited and the user must choose.
+        if existing_note and not note_stale and data.get("updated") != local_updated:
+            note_local_data: Dict[str, Any] = {
+                "title": existing_note.title,
+                "content": existing_note.content,
+                "note_type": existing_note.note_type,
+                "updated": local_updated,
+            }
+            if _records_differ(note_local_data, data):
+                await _queue_conflict(
+                    "notes",
+                    record_id,
+                    local_updated,
+                    data.get("updated"),
+                    note_local_data,
+                    data,
+                )
+                result["notes_skipped_stale"] += 1
+                continue
         if note_stale:
             result["notes_skipped_stale"] += 1
         elif dry_run:
@@ -904,6 +1001,34 @@ async def import_all(
             if (existing_card and existing_card.updated)
             else None
         )
+        # Opt-out: never import records the operator wants device-local.
+        if _is_opted_out(optout, "cards", record_id):
+            continue
+        # Full-record conflict detection: different updated AND different
+        # content means both sides edited and the user must choose.
+        if existing_card and data.get("updated") != local_updated:
+            card_local_data: Dict[str, Any] = {
+                "model": existing_card.model,
+                "front": existing_card.front,
+                "back": existing_card.back,
+                "cloze_text": existing_card.cloze_text,
+                "tags": existing_card.tags,
+                "guid": existing_card.guid,
+                "status": existing_card.status,
+                "fsrs_json": existing_card.fsrs_json,
+                "updated": local_updated,
+            }
+            if _records_differ(card_local_data, data):
+                await _queue_conflict(
+                    "cards",
+                    record_id,
+                    local_updated,
+                    data.get("updated"),
+                    card_local_data,
+                    data,
+                )
+                result["cards_skipped_stale"] += 1
+                continue
         if existing_card and not _newer(data.get("updated"), local_updated):
             result["cards_skipped_stale"] += 1
             continue
@@ -951,6 +1076,34 @@ async def import_all(
             if (existing_source and existing_source.updated)
             else None
         )
+        # Opt-out: never import records the operator wants device-local.
+        if _is_opted_out(optout, "sources", record_id):
+            continue
+        # Full-record conflict detection: different updated AND different
+        # content means both sides edited and the user must choose.
+        if existing_source and data.get("updated") != local_updated:
+            source_local_data: Dict[str, Any] = {
+                "title": existing_source.title,
+                "topics": existing_source.topics,
+                "updated": local_updated,
+                "asset": {
+                    "url": existing_source.asset.url if existing_source.asset else None,
+                    "sha256": existing_source.asset.sha256 if existing_source.asset else None,
+                    "filename": existing_source.asset.filename if existing_source.asset else None,
+                    "size": existing_source.asset.size if existing_source.asset else None,
+                },
+            }
+            if _records_differ(source_local_data, data):
+                await _queue_conflict(
+                    "sources",
+                    record_id,
+                    local_updated,
+                    data.get("updated"),
+                    source_local_data,
+                    data,
+                )
+                result["sources_skipped_stale"] += 1
+                continue
         # As with notes: staleness gates the field upsert, and an
         # outstanding blob is still counted on the stale path, but the
         # filing below runs either way.
