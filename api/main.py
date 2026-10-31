@@ -63,6 +63,7 @@ from api.routers import (
 )
 from api.routers import commands as commands_router
 from open_notebook.database.async_migrate import AsyncMigrationManager
+from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.exceptions import (
     AuthenticationError,
     ConfigurationError,
@@ -256,6 +257,62 @@ async def lifespan(app: FastAPI):
     _governor = Governor()
     _governor.start()
     app.state.governor = _governor
+    # Resume-on-reopen: reconcile jobs interrupted by device restart.
+    # Any command still in `running` was killed mid-execution; re-queue it
+    # as `held` if attempts remain, or mark `failed` with a clear reason
+    # when attempts are exhausted. Nothing is silently abandoned.
+    try:
+        from open_notebook.ai.models import JobCheckpoint
+
+        interrupted = await repo_query(
+            "SELECT id, name, args, error_message FROM command WHERE status = 'running'"
+        )
+        for row in interrupted or []:
+            cmd_id = str(row["id"])
+            checkpoint = await JobCheckpoint.get_for_command(cmd_id)
+            attempts = checkpoint.attempt_count if checkpoint else 0
+            # A job with no checkpoint has never been interrupted, so it
+            # can be retried. Otherwise, check remaining attempts.
+            if checkpoint is None:
+                can = True
+            else:
+                can = await checkpoint.can_retry()
+            if can:
+                await repo_query(
+                    "UPDATE $id SET status = $status, error_message = $error",
+                    {
+                        "id": ensure_record_id(cmd_id),
+                        "status": "held",
+                        "error": "resumed after device restart - re-queued",
+                    },
+                )
+                await JobCheckpoint.upsert_for_command(
+                    cmd_id,
+                    increment_attempt=True,
+                    checkpoint=checkpoint.checkpoint if checkpoint else {},
+                )
+                logger.info(
+                    f"resume: re-queued {cmd_id} (attempt {attempts + 1}/3)"
+                )
+            else:
+                await JobCheckpoint.upsert_for_command(
+                    cmd_id,
+                    increment_attempt=True,
+                    checkpoint=checkpoint.checkpoint if checkpoint else {},
+                )
+                await repo_query(
+                    "UPDATE $id SET status = $status, error_message = $error",
+                    {
+                        "id": ensure_record_id(cmd_id),
+                        "status": "failed",
+                        "error": "exhausted all 3 resume attempts after repeated interruption",
+                    },
+                )
+                logger.warning(
+                    f"resume: exhausted {cmd_id} after {attempts + 1} attempts"
+                )
+    except Exception as exc:  # noqa: BLE001 - resume must never block boot
+        logger.debug(f"resume-on-reopen skipped: {exc}")
     # Yield control to the application
     yield
     # Shutdown: stop monitor

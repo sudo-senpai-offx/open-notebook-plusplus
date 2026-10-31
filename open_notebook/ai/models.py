@@ -1,5 +1,6 @@
 import os
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, Union
+from datetime import datetime, timezone
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Union, cast
 
 from esperanto import (
     AIFactory,
@@ -12,7 +13,7 @@ from loguru import logger
 from surrealdb import RecordID
 
 from open_notebook.ai.connection_tester import normalize_anthropic_compatible_base_url
-from open_notebook.database.repository import ensure_record_id, repo_query
+from open_notebook.database.repository import ensure_record_id, repo_query, repo_upsert
 from open_notebook.domain.base import ObjectModel, RecordModel
 from open_notebook.exceptions import ConfigurationError
 from open_notebook.utils.url_validation import validate_url
@@ -518,3 +519,145 @@ class ModelManager:
 
 
 model_manager = ModelManager()
+
+
+class JobCheckpoint:
+    """Per-job checkpoint for durable resume-on-reopen.
+
+    Stored in SurrealDB as `job_checkpoint:<command_id>` records.
+    The checkpoint payload is a JSON blob — opaque to the store, interpreted
+    by the command itself — so any job type can record whatever progress
+    makes sense for it (sources embedded, pages processed, etc.).
+
+    Attempt counting lives here so a job interrupted by device restart is
+    retried up to max_attempts (3) before being marked failed with a clear
+    reason. Nothing is ever silently abandoned.
+
+    Not a RecordModel subclass: each command id gets its own record, so the
+    RecordModel singleton pattern does not apply. DB access goes through
+    repo_upsert / repo_query directly.
+    """
+
+    def __init__(
+        self,
+        command_id: str,
+        checkpoint: Optional[Dict[str, Any]] = None,
+        attempt_count: int = 0,
+        max_attempts: int = 3,
+        last_attempt_at: Optional[str] = None,
+        created_at: Optional[str] = None,
+        updated_at: Optional[str] = None,
+    ) -> None:
+        self.command_id = command_id
+        self.checkpoint = checkpoint or {}
+        self.attempt_count = attempt_count
+        self.max_attempts = max_attempts
+        self.last_attempt_at = last_attempt_at
+        self.created_at = created_at
+        self.updated_at = updated_at
+
+    @classmethod
+    async def get_for_command(cls, command_id: str) -> Optional["JobCheckpoint"]:
+        """Fetch the checkpoint for a specific command id."""
+        try:
+            rows = await repo_query(
+                "SELECT * FROM $id",
+                {"id": ensure_record_id(f"job_checkpoint:{command_id}")},
+            )
+        except Exception:
+            return None
+        if not rows:
+            return None
+        data = rows[0]
+        return cls(
+            command_id=str(data.get("command_id", command_id)),
+            checkpoint=data.get("checkpoint") or {},
+            attempt_count=int(data.get("attempt_count") or 0),
+            max_attempts=int(data.get("max_attempts") or 3),
+            last_attempt_at=data.get("last_attempt_at"),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+        )
+
+    @classmethod
+    async def upsert_for_command(
+        cls,
+        command_id: str,
+        checkpoint: Optional[Dict[str, Any]] = None,
+        increment_attempt: bool = False,
+    ) -> "JobCheckpoint":
+        """Create or update the checkpoint for a command id.
+
+        If increment_attempt is True, the attempt counter is bumped —
+        callers use this when a job is re-dispatched after interruption.
+        """
+        existing = await cls.get_for_command(command_id)
+        now = datetime.now(timezone.utc).isoformat()
+
+        if existing is None:
+            attempt_count = 1 if increment_attempt else 0
+            last_attempt = now if increment_attempt else None
+            data = {
+                "command_id": command_id,
+                "checkpoint": checkpoint or {},
+                "attempt_count": attempt_count,
+                "max_attempts": 3,
+                "last_attempt_at": last_attempt,
+                "created_at": now,
+                "updated_at": now,
+            }
+        else:
+            data = {
+                "command_id": command_id,
+                "checkpoint": checkpoint if checkpoint is not None else existing.checkpoint,
+                "attempt_count": (existing.attempt_count + 1) if increment_attempt else existing.attempt_count,
+                "max_attempts": existing.max_attempts,
+                "last_attempt_at": now if increment_attempt else existing.last_attempt_at,
+                "created_at": existing.created_at,
+                "updated_at": now,
+            }
+
+        await repo_upsert(
+            "job_checkpoint",
+            f"job_checkpoint:{command_id}",
+            data,
+            add_timestamp=True,
+        )
+        result = await cls.get_for_command(command_id)
+        if result is None:
+            # Should not happen after a successful upsert, but mypy needs it.
+            ac = data.get("attempt_count")
+            ma = data.get("max_attempts")
+            return cls(
+                command_id=command_id,
+                checkpoint=cast(Dict[str, Any], data.get("checkpoint") or {}),
+                attempt_count=int(ac) if isinstance(ac, int) else 0,
+                max_attempts=int(ma) if isinstance(ma, int) else 3,
+                last_attempt_at=cast(Optional[str], data.get("last_attempt_at")),
+                created_at=cast(Optional[str], data.get("created_at")),
+                updated_at=cast(Optional[str], data.get("updated_at")),
+            )
+        return result
+
+    async def can_retry(self) -> bool:
+        """True if the job has attempts remaining."""
+        return self.attempt_count < self.max_attempts
+
+    async def mark_exhausted(self) -> None:
+        """Record that no attempts remain."""
+        self.attempt_count += 1
+        self.updated_at = datetime.now(timezone.utc).isoformat()
+        await repo_upsert(
+            "job_checkpoint",
+            f"job_checkpoint:{self.command_id}",
+            {
+                "command_id": self.command_id,
+                "checkpoint": self.checkpoint,
+                "attempt_count": self.attempt_count,
+                "max_attempts": self.max_attempts,
+                "last_attempt_at": self.last_attempt_at,
+                "created_at": self.created_at,
+                "updated_at": self.updated_at,
+            },
+            add_timestamp=True,
+        )

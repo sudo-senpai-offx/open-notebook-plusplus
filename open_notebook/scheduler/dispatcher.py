@@ -52,6 +52,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from open_notebook.ai.models import JobCheckpoint
 from open_notebook.residency import (
     client as residency,
 )
@@ -342,6 +343,7 @@ def _order_held(
     held: List[Dict[str, Any]],
     policy: Optional[Dict[str, residency.RolePolicy]],
     generation_bytes: Optional[int],
+    resumed_ids: Optional[set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Order the held queue so interactive work goes first.
 
@@ -377,17 +379,43 @@ def _order_held(
     one job rather than abandoning the queue behind it.
     """
 
-    def sort_key(row: Dict[str, Any]) -> tuple[int, int, str]:
+    # Command-name prefixes for prioritization within the resumed tier.
+    # User-specified order: embedding > sources > notes > other.
+    _RESUMED_PRIORITY = {
+        "embed": 0,   # embed_source, embed_note, embed_insight, rebuild_embeddings
+        "process": 1, # process_source, crawl_site
+        "note": 2,    # any note-related command
+    }
+
+    def _resumed_priority(name: str) -> int:
+        lower = (name or "").lower()
+        for prefix, prio in _RESUMED_PRIORITY.items():
+            if lower.startswith(prefix):
+                return prio
+        return 99  # other commands
+
+    _resumed = resumed_ids or set()
+
+    def sort_key(row: Dict[str, Any]) -> tuple[int, int, int, str]:
         created = str(row.get("created") or "")
+        name = str(row.get("name") or "")
+        cmd_id = str(row.get("id") or "")
         roles = _roles_of(row, generation_bytes)
+
+        # Tier -1: resumed jobs go first, prioritized by command type.
+        is_resumed = cmd_id in _resumed
+        tier = -1 if is_resumed else 0
+
         if not roles:
-            return (0, 0, created)
+            return (tier, 0, 0, created)
         if not policy:
             # Equal priority for every model job, so this is oldest-first
             # among them - but still behind the no-model tier.
-            return (1, 0, created)
+            resumed_prio = _resumed_priority(name) if is_resumed else 99
+            return (tier, resumed_prio, 0, created)
         known = [policy[role].priority for role in roles if role in policy]
-        return (1, min(known) if known else 0, created)
+        resumed_prio = _resumed_priority(name) if is_resumed else 99
+        return (tier, resumed_prio, min(known) if known else 0, created)
 
     return sorted(held, key=sort_key)
 
@@ -442,6 +470,20 @@ async def dispatch_once(
     counts = _role_counts(live_rows, generation_bytes) if policy else {}
     outcome.role_counts = dict(counts)
 
+    # Pre-load checkpoint state so resumed jobs (interrupted by device
+    # restart and re-queued as `held`) are promoted first. A checkpoint
+    # with non-empty data means the job was mid-execution when the device
+    # went down.
+    resumed_ids: set[str] = set()
+    try:
+        for row in held_rows:
+            cmd_id = str(row.get("id") or "")
+            cp = await JobCheckpoint.get_for_command(cmd_id)
+            if cp is not None and bool(cp.checkpoint):
+                resumed_ids.add(cmd_id)
+    except Exception:  # noqa: BLE001 - checkpoint pre-load is advisory only
+        pass
+
     # Ordering is applied unconditionally. `_order_held` sorts model work by
     # class priority only when there is a policy to sort by, and puts no-model
     # work first either way — that tier reads the command name off the row and
@@ -452,7 +494,7 @@ async def dispatch_once(
     # A unit test that called `_order_held` directly passed against a change
     # production could not execute, which is why the first attempt at this fix
     # shipped green and changed nothing.
-    held_rows = _order_held(held_rows, policy, generation_bytes)
+    held_rows = _order_held(held_rows, policy, generation_bytes, resumed_ids)
 
     # Shared CPU budget, fetched once like the policy. None means unknown - no
     # supervisor or an unreadable topology - and then nothing is enforced.
