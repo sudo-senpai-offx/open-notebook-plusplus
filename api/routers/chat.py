@@ -16,6 +16,7 @@ from api.routers._chat_shared import (
     get_session_or_404,
     transcript_sync_state,
 )
+from open_notebook.ai.models import ProcessingFlags
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import (
     ChatSession,
@@ -27,6 +28,7 @@ from open_notebook.exceptions import (
     OpenNotebookError,
 )
 from open_notebook.graphs.chat import graph as chat_graph
+from open_notebook.services.quota_tracker import quota_tracker
 from open_notebook.utils import token_count
 from open_notebook.utils.context_builder import (
     _ensure_prefix,
@@ -509,6 +511,36 @@ async def execute_chat(request: ExecuteChatRequest):
         user_message = HumanMessage(content=request.message, id=str(uuid4()))
         state_values["messages"].append(user_message)
 
+        # --- Quota check for cloud providers ---
+        # If the selected model is a cloud provider (DeepSeek), verify quota
+        # before sending. If exceeded, auto-switch to local processing when
+        # allowed, otherwise return 429 with a clear message.
+        is_cloud_model = bool(model_override) and (
+            "deepseek" in str(model_override).lower()
+            or "gpt" in str(model_override).lower()
+            or "claude" in str(model_override).lower()
+            or "gemini" in str(model_override).lower()
+        )
+        if is_cloud_model:
+            provider = "deepseek"  # DeepSeek is the primary cloud provider
+            if not await quota_tracker.can_request(provider):
+                # Quota exceeded — try local fallback
+                flags = await ProcessingFlags.get_instance()
+                if flags.allow_local_processing:
+                    model_override = "llama"  # local llama-server at :8080
+                    logger.info(
+                        f"Quota exceeded for {provider}; switching to local llama"
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            f"Cloud quota exhausted for {provider}. "
+                            "Enable 'Allow local processing' in Settings to use "
+                            "local models, or wait for quota reset."
+                        ),
+                    )
+
         # Execute chat graph in a thread so the synchronous LangGraph invoke
         # (SqliteSaver checkpoints are sync) doesn't block the event loop and
         # freeze the rest of the API while the LLM responds. Mirrors the
@@ -551,6 +583,13 @@ async def execute_chat(request: ExecuteChatRequest):
 
         # Convert messages to response format
         messages = extract_chat_messages(turn_messages)
+
+        # Increment quota for cloud provider used
+        if is_cloud_model and model_override != "llama":
+            try:
+                await quota_tracker.increment("deepseek", 1)
+            except Exception:  # noqa: BLE001
+                pass
 
         return ExecuteChatResponse(
             session_id=request.session_id,

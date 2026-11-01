@@ -53,6 +53,7 @@ from api.routers import (
     providers,
     review,
     search,
+    services,
     settings,
     sites,
     source_chat,
@@ -492,6 +493,7 @@ app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(config.router, prefix="/api", tags=["config"])
 app.include_router(notebooks.router, prefix="/api", tags=["notebooks"])
 app.include_router(search.router, prefix="/api", tags=["search"])
+app.include_router(services.router, prefix="/api", tags=["services"])
 app.include_router(models.router, prefix="/api", tags=["models"])
 app.include_router(transformations.router, prefix="/api", tags=["transformations"])
 app.include_router(notes.router, prefix="/api", tags=["notes"])

@@ -661,3 +661,115 @@ class JobCheckpoint:
             },
             add_timestamp=True,
         )
+
+
+class QuotaCounters:
+    """Per-provider request counters with a unified cumulative budget.
+
+    Stored in SurrealDB as a single record `open_notebook:quota_counters`.
+    Each provider tracks its own `requests_used`, `limit`, and `reset_at`.
+    The cumulative total across all providers is the "budget" — when it is
+    exhausted, cloud processing falls back to local (if enabled) or a
+    warning is shown.
+
+    Default limit is 0 (unlimited) per provider; operators configure limits
+    to avoid ToS on free tiers. Requests are the limiting factor, not tokens
+    or minutes.
+    """
+
+    def __init__(
+        self,
+        providers: Optional[Dict[str, Dict[str, Any]]] = None,
+        cumulative_used: int = 0,
+        cumulative_limit: int = 0,
+        updated_at: Optional[str] = None,
+    ) -> None:
+        self.providers = providers or {}
+        self.cumulative_used = cumulative_used
+        self.cumulative_limit = cumulative_limit
+        self.updated_at = updated_at or datetime.now(timezone.utc).isoformat()
+
+    @classmethod
+    async def get_instance(cls) -> "QuotaCounters":
+        """Fetch the quota counters record (singleton)."""
+        try:
+            rows = await repo_query(
+                "SELECT * FROM ONLY $record_id",
+                {"record_id": ensure_record_id("open_notebook:quota_counters")},
+            )
+        except Exception:
+            return cls()
+        if not rows:
+            return cls()
+        data = rows[0]
+        return cls(
+            providers=data.get("providers") or {},
+            cumulative_used=int(data.get("cumulative_used") or 0),
+            cumulative_limit=int(data.get("cumulative_limit") or 0),
+            updated_at=data.get("updated_at"),
+        )
+
+    async def save(self) -> None:
+        """Persist counters to SurrealDB."""
+        data = {
+            "providers": self.providers,
+            "cumulative_used": self.cumulative_used,
+            "cumulative_limit": self.cumulative_limit,
+            "updated_at": self.updated_at,
+        }
+        await repo_upsert(
+            "quota_counters",
+            "open_notebook:quota_counters",
+            data,
+            add_timestamp=True,
+        )
+
+    def provider_remaining(self, provider: str) -> int:
+        """Requests remaining for a provider before its limit is hit."""
+        p = self.providers.get(provider, {})
+        used = int(p.get("requests_used") or 0)
+        limit = int(p.get("limit") or 0)
+        if limit <= 0:
+            return 10**9  # effectively unlimited
+        return max(0, limit - used)
+
+    def provider_exceeded(self, provider: str) -> bool:
+        """True if the provider has hit its request limit."""
+        return self.provider_remaining(provider) <= 0
+
+    def cumulative_remaining(self) -> int:
+        """Requests remaining across all providers before budget is hit."""
+        if self.cumulative_limit <= 0:
+            return 10**9
+        return max(0, self.cumulative_limit - self.cumulative_used)
+
+    def cumulative_exceeded(self) -> bool:
+        """True if the cumulative budget is exhausted."""
+        return self.cumulative_remaining() <= 0
+
+    def increment(self, provider: str, count: int = 1) -> None:
+        """Record `count` requests for a provider."""
+        now = datetime.now(timezone.utc).isoformat()
+        p = self.providers.get(provider, {})
+        used = int(p.get("requests_used") or 0) + count
+        p["requests_used"] = used
+        p["last_used_at"] = now
+        self.providers[provider] = p
+        self.cumulative_used += count
+        self.updated_at = now
+
+    def can_make_cloud_request(self, provider: str) -> bool:
+        """True if a cloud request to `provider` is within quota."""
+        return not self.provider_exceeded(provider) and not self.cumulative_exceeded()
+
+    def set_limit(self, provider: str, limit: int, reset_at: Optional[str] = None) -> None:
+        """Set the request limit for a provider."""
+        now = datetime.now(timezone.utc).isoformat()
+        p = self.providers.get(provider, {})
+        p["limit"] = limit
+        p["reset_at"] = reset_at or now
+        self.providers[provider] = p
+        self.cumulative_limit = sum(
+            int(v.get("limit") or 0) for v in self.providers.values()
+        )
+        self.updated_at = now
