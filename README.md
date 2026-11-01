@@ -331,6 +331,118 @@ Explore [GitHub Discussions](https://github.com/lfnovo/open-notebook/discussions
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 
+## 🔧 Open Notebook Plus Plus — Phone-First Fork
+
+This repository (`sudo-senpai-offx/open-notebook-plusplus`) is a student-focused fork of
+[lfnovo/open-notebook](https://github.com/lfnovo/open-notebook) optimized for
+low-end hardware (Snapdragon 439-class ARM, 3 GB RAM) and offline-first use.
+See [FORK.md](FORK.md) for what changed, the upstream pin, and the sync policy.
+
+### Plus Plus Additions
+
+| Feature | Description |
+|---------|-------------|
+| **`allow local processing` toggle** | Master resource-governance switch. Enabled = local models (llama/embed/STT/TTS) used as intended; disabled = only backend + frontend run, all local resources freed. Default: disabled. |
+| **Quota tracking** | Per-provider request counters with unified cumulative budget, persisted in SurrealDB (`open_notebook:quota_counters`). Rate-limited to respect free-tier ToS. Exhausted quota falls back to local processing (if enabled) or shows a warning. |
+| **Session management** | Hybrid client + server session state (`open_notebook:session_state`) with browser/Playwright capture support and rate-limit tracking per provider. |
+| **2-way sync with conflicts** | Per full-record conflict detection with user-picked resolution (local/remote/merge). Opt-out configurable per collection/record. Auto-sync at 30-minute intervals. |
+| **Durable job store** | Per-job checkpoints (JSON blobs) for resume-on-reopen. All command types supported with rate limiting and prioritization (embedding > sources > notes > other). 3 max attempts, clear failure reasons. |
+| **Mini-services** | browser-use (Python library subprocess) for DeepSeek chat.deepseek.com integration via session capture; linuxdrop for text+image clipboard sync between phone and PC. |
+
+### Device Architecture
+
+```
+Phone (Termux, ARM, 3 GB RAM)                    PC (x86)
+┌─────────────────────────────┐                  ┌─────────────────────────────┐
+│  SurrealDB (guest, 8108)    │                  │  SurrealDB (guest, 8000)    │
+│  API (uvicorn, 5055)        │◀── adb forward ──│  API (uvicorn, 5055)        │
+│  Frontend (Next, 8502)      │   (loopback)     │  Frontend (Next, 8502)      │
+│  llama-server (8080)        │                  │  llama-server (8080)        │
+│  embedder (8081)            │                  │  embedder (8081)            │
+│  residency supervisor (8099)│                  │  residency supervisor (8099)│
+│  guest TTS (8092)           │                  │  guest TTS (8092)           │
+└─────────────────────────────┘                  └─────────────────────────────┘
+         ▲                                               ▲
+         │ adb shell am force-stop                        │
+         └───────── phone worker cap = 2 ────────────────┘
+```
+
+### Phone Quick Start
+
+```bash
+# 1. Install Termux, then:
+sh ~/bin/onb-update              # fetch and merge latest bundle
+sh ~/bin/onb-stack up            # start backend + frontend only (local processing off by default)
+
+# 2. Enable local processing in Settings → Allow local processing, then restart:
+sh ~/bin/onb-stack down
+sh ~/bin/onb-stack up            # now starts llama, embedder, residency supervisor
+
+# 3. Check quota status:
+curl http://127.0.0.1:5055/api/services/quota
+```
+
+### PC Quick Start
+
+```bash
+# 1. Clone and install:
+git clone https://github.com/sudo-senpai-offx/open-notebook-plusplus.git
+cd open-notebook-plusplus
+pip install -e .
+
+# 2. Start the stack:
+python run_api.py   # API on 5055
+npm run dev         # Frontend on 8502 (in frontend/)
+
+# 3. Connect phone via adb:
+adb forward tcp:5055 tcp:5055
+```
+
+### Cloud Quota & Auto-Switch
+
+Cloud providers (DeepSeek via browser session capture) are rate-limited to respect free-tier ToS.
+When a provider's quota is exhausted:
+
+1. Auto-switches to the next available cloud provider
+2. If all cloud providers exhausted, falls back to local processing **only when** `allow local processing` is enabled
+3. If local processing is disabled, shows a warning and waits for quota reset
+
+Configure limits via:
+```bash
+curl -X PUT http://127.0.0.1:5055/api/services/quota/deepseek \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"deepseek","limit":100,"reset_at":"2026-11-02T00:00:00Z"}'
+```
+
+### Credits
+
+This fork builds on the following projects:
+
+- **[lfnovo/open-notebook](https://github.com/lfnovo/open-notebook)** — Upstream Open Notebook (MIT licensed). Core application: notebooks, sources, chat, transformations, embeddings, podcasts.
+- **[browser-use/browser-use](https://github.com/browser-use/browser-use)** — Open-source browser agent (MIT licensed). Used for DeepSeek chat.deepseek.com session capture via headless/headed browser automation.
+- **[burakgon/linuxdrop](https://github.com/burakgon/linuxdrop)** — Self-hosted, E2E-encrypted clipboard sync between Android and Linux (Apache-2.0 licensed). Used for text+image clipboard sync.
+- **[steel-dev/steel-browser](https://github.com/steel-dev/steel-browser)** — Open-source browser API for AI agents. Reference for browser fleet/session management patterns.
+- **[sums001/Deepseek-API](https://github.com/sums001/Deepseek-API)** — Reverse-engineered DeepSeek chat → OpenAI-compatible API. Reference for session capture approach.
+
+### Progress
+
+| Step | Feature | Status |
+|------|---------|--------|
+| 1 | Fix `onb-stack` launch (stop residency supervisor, guard against duplicate launchers) | ✅ Done |
+| 2 | Phone cold-boot drill (warm + cold boot verified on device) | ✅ Done |
+| 3 | `allow local processing` master toggle + settings repolish | ✅ Done |
+| 4 | DeepSeek brainstorm + session management + rate limits | ✅ Done |
+| 5 | 2-way sync with conflict handling (per full record, user-picked, opt-out) | ✅ Done |
+| 6 | Durable job store with resume-on-reopen (per-job checkpoints, 3 max attempts) | ✅ Done |
+| 7 | Mini-services: browser-use + linuxdrop clipboard + quota UI | ✅ Done |
+
+### Bundle Delivery
+
+Bundles are delivered to `/data/local/tmp/plusplus.bundle` on the device and merged via `sh ~/bin/onb-update`. Current bundle: #10 (commit `ff525fd`).
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+
 ## 📖 Need Help?
 - **🤖 AI Installation Assistant**: We have a [CustomGPT built to help you install Open Notebook](https://chatgpt.com/g/g-68776e2765b48191bd1bae3f30212631-open-notebook-installation-assistant) - it will guide you through each step!
 - **New to Open Notebook?** Start with our [Getting Started Guide](docs/0-START-HERE/index.md)
