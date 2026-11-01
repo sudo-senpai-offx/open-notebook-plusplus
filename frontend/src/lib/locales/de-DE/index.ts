@@ -914,6 +914,11 @@ export const deDE = {
     syncAutoDesc: "Run a sync cycle now (timer-based sync at 30-minute intervals is configured on the device).",
     runAutoSync: "Run Sync Now",
     syncAutoNote: "Exports, pulls, and dry-runs import to detect conflicts. Conflicts must be resolved manually above.",
+    quotaStatus: "Cloud Quota",
+    quotaStatusDesc: "Request counts per cloud provider. Rate-limited to respect free-tier ToS. Exhausted quota falls back to local processing when enabled.",
+    cumulativeUsed: "Total requests used",
+    remaining: "{{count}} remaining",
+    quotaExceeded: "Cloud quota exhausted — local processing only (if enabled) or wait for reset.",
   },
   advanced: {
     title: "Erweiterte Werkzeuge",

@@ -54,5 +54,24 @@ export const syncApi = {
   autoSync: async (device?: string) => {
     const response = await apiClient.post<{ ok: boolean; exported: Record<string, unknown>; import_preview: Record<string, unknown>; errors: string[]; dry_run: boolean }>('/sync/auto', { device: device || 'auto' })
     return response.data
-  }
+  },
+}
+
+export const quotaApi = {
+  getStatus: async () => {
+    const response = await apiClient.get<{
+      providers: Record<string, { used: number; limit: number; remaining: number; exceeded: boolean; reset_at?: string; last_used_at?: string }>
+      cumulative_used: number
+      cumulative_limit: number
+      cumulative_remaining: number
+      cumulative_exceeded: boolean
+      updated_at?: string
+    }>('/services/quota')
+    return response.data
+  },
+
+  setLimit: async (provider: string, limit: number, reset_at?: string) => {
+    const response = await apiClient.put<{ ok: boolean; provider: string; limit: number }>(`/services/quota/${provider}`, { provider, limit, reset_at })
+    return response.data
+  },
 }

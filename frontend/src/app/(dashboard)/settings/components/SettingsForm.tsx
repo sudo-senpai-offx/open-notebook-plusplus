@@ -13,7 +13,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert'
 import { useSettings, useUpdateSettings } from '@/lib/hooks/use-settings'
 import { useCapabilities } from '@/lib/hooks/use-capabilities'
-import { sessionApi } from '@/lib/api/settings'
+import { sessionApi, quotaApi } from '@/lib/api/settings'
 import { useEffect, useState } from 'react'
 import { ChevronDownIcon } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
@@ -54,6 +54,21 @@ export function SettingsForm() {
     allow_local_processing?: boolean
   }>({})
   const [sessionLoading, setSessionLoading] = useState(false)
+  const [quotaData, setQuotaData] = useState<{
+    providers: Record<string, { used: number; limit: number; remaining: number; exceeded: boolean; reset_at?: string; last_used_at?: string }>
+    cumulative_used: number
+    cumulative_limit: number
+    cumulative_remaining: number
+    cumulative_exceeded: boolean
+    updated_at?: string
+  }>({
+    providers: {},
+    cumulative_used: 0,
+    cumulative_limit: 0,
+    cumulative_remaining: 0,
+    cumulative_exceeded: false,
+  })
+  const [quotaLoading, setQuotaLoading] = useState(false)
 
   useEffect(() => {
     let mounted = true
@@ -68,7 +83,25 @@ export function SettingsForm() {
         if (mounted) setSessionLoading(false)
       }
     }
+    const fetchQuota = async () => {
+      setQuotaLoading(true)
+      try {
+        const data = await quotaApi.getStatus()
+        if (mounted) setQuotaData(data)
+      } catch {
+        if (mounted) setQuotaData({
+          providers: {},
+          cumulative_used: 0,
+          cumulative_limit: 0,
+          cumulative_remaining: 0,
+          cumulative_exceeded: false,
+        })
+      } finally {
+        if (mounted) setQuotaLoading(false)
+      }
+    }
     fetchSession()
+    fetchQuota()
     return () => { mounted = false }
   }, [])
 const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -499,6 +532,60 @@ const [hasResetForm, setHasResetForm] = useState(false)
             >
               {sessionLoading ? t('common.refreshing') : t('settings.refreshSession')}
             </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Quota Status Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('settings.quotaStatus')}</CardTitle>
+          <CardDescription>{t('settings.quotaStatusDesc')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-sm">
+              <span>{t('settings.cumulativeUsed')}</span>
+              <span className={[
+                'font-mono text-xs',
+                quotaData.cumulative_exceeded ? 'text-destructive' : 'text-muted-foreground',
+              ].join(' ')}>
+                {quotaData.cumulative_used}
+              </span>
+              <span className="text-xs text-muted-foreground">/ {quotaData.cumulative_limit || '∞'}</span>
+            </div>
+            {quotaData.cumulative_exceeded && (
+              <div className="flex items-center gap-2 text-xs text-destructive">
+                <span className="h-3 w-3 rounded-full bg-destructive/20 text-destructive" />
+                <span>{t('settings.quotaExceeded')}</span>
+              </div>
+            )}
+            {Object.entries(quotaData.providers || {}).length > 0 && (
+              <div className="space-y-2">
+                {Object.entries(quotaData.providers).map(([provider, stats]) => (
+                  <div key={provider} className="flex items-center justify-between text-sm border-b pb-1 last:border-b-0">
+                    <span className="font-mono text-xs">{provider}</span>
+                    <div className="flex items-center gap-2">
+                      <span className={[
+                        'px-1.5 py-0.5 rounded text-xs font-mono',
+                        stats.exceeded ? 'bg-destructive/10 text-destructive' : 'bg-green-100 text-green-700',
+                      ].join(' ')}>
+                        {stats.used}/{stats.limit || '∞'}
+                      </span>
+                      {stats.remaining !== undefined && stats.remaining !== Infinity && (
+                        <span className="text-xs text-muted-foreground">{t('settings.remaining', { count: stats.remaining })}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {quotaData.updated_at && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span>{t('settings.lastRefreshed')}</span>
+                <span>{new Date(quotaData.updated_at).toLocaleString()}</span>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
