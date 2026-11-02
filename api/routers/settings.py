@@ -94,6 +94,15 @@ async def update_settings(settings_update: SettingsUpdate):
             )
             await flags.update()
 
+            # Also write to Termux-side file so termux-launch.sh can read it
+            # before SurrealDB starts on cold boot.
+            try:
+                local_flag_file = "/data/data/com.termux/files/home/.onb_allow_local"
+                with open(local_flag_file, "w") as f:
+                    f.write("1" if flags.allow_local_processing else "0")
+            except Exception:
+                pass  # Non-critical; SurrealDB is the source of truth
+
         await settings.update()
 
         return SettingsResponse(
