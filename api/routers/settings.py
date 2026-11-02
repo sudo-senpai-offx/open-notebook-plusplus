@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 
 from api.models import SettingsResponse, SettingsUpdate
+from open_notebook.ai.models import ProcessingFlags
 from open_notebook.domain.content_settings import ContentSettings
 from open_notebook.exceptions import (
     InvalidInputError,
@@ -16,6 +17,7 @@ async def get_settings():
     """Get all application settings."""
     try:
         settings: ContentSettings = await ContentSettings.get_instance()  # type: ignore[assignment]
+        flags = await ProcessingFlags.get_instance()
 
         return SettingsResponse(
             default_content_processing_engine_doc=settings.default_content_processing_engine_doc,
@@ -26,6 +28,7 @@ async def get_settings():
             docling_formulas=settings.docling_formulas,
             docling_vision=settings.docling_vision,
             youtube_preferred_languages=settings.youtube_preferred_languages,
+            allow_local_processing=flags.allow_local_processing,
         )
     except HTTPException:
         raise
@@ -41,6 +44,7 @@ async def update_settings(settings_update: SettingsUpdate):
     """Update application settings."""
     try:
         settings: ContentSettings = await ContentSettings.get_instance()  # type: ignore[assignment]
+        flags = await ProcessingFlags.get_instance()
 
         # Update only provided fields
         if settings_update.default_content_processing_engine_doc is not None:
@@ -82,6 +86,14 @@ async def update_settings(settings_update: SettingsUpdate):
                 settings_update.youtube_preferred_languages
             )
 
+        # Update allow_local_processing in ProcessingFlags record
+        if settings_update.allow_local_processing is not None:
+            flags = await ProcessingFlags.get_instance()
+            flags.allow_local_processing = bool(
+                settings_update.allow_local_processing
+            )
+            await flags.update()
+
         await settings.update()
 
         return SettingsResponse(
@@ -93,6 +105,7 @@ async def update_settings(settings_update: SettingsUpdate):
             docling_formulas=settings.docling_formulas,
             docling_vision=settings.docling_vision,
             youtube_preferred_languages=settings.youtube_preferred_languages,
+            allow_local_processing=flags.allow_local_processing,
         )
     except HTTPException:
         raise

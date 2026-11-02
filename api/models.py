@@ -309,6 +309,7 @@ class SettingsResponse(BaseModel):
     docling_formulas: Optional[bool] = None
     docling_vision: Optional[bool] = None
     youtube_preferred_languages: Optional[List[str]] = None
+    allow_local_processing: Optional[bool] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -320,6 +321,7 @@ class SettingsUpdate(BaseModel):
     docling_formulas: Optional[bool] = None
     docling_vision: Optional[bool] = None
     youtube_preferred_languages: Optional[List[str]] = None
+    allow_local_processing: Optional[bool] = None
 
 
 # Sources API models

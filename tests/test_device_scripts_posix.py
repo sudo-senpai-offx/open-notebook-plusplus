@@ -34,6 +34,7 @@ SCRIPTS = REPO / "scripts"
 DEVICE_SCRIPTS = [
     "termux-launch.sh",
     "termux-stack.sh",
+    "termux-check-local.sh",
     "termux-model.sh",
     "termux-embed.sh",
     "termux-sync.sh",

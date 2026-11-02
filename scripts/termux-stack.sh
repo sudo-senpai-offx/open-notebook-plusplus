@@ -297,6 +297,44 @@ PY
 
   wait_for_surreal
 
+  # Check allow_local_processing flag before starting local resources.
+  # If disabled, skip local resource start-up (llama, embed, residency
+  # supervisor, guest TTS) — backend + frontend only. Defaults to disabled
+  # when the flag record cannot be read.
+  _ALLOW_LOCAL=0
+  _check_allow_local() {
+    _ALLOW_LOCAL=$("$APP/.venv/bin/python" - <<'PY' 2>/dev/null || echo 0
+import urllib.request, json
+try:
+    r = urllib.request.urlopen("http://127.0.0.1:8000/sql", timeout=3)
+    # SurrealDB SQL endpoint: use REST with query param
+except Exception:
+    pass
+try:
+    import urllib.parse
+    q = urllib.parse.quote("SELECT * FROM ONLY open_notebook:processing_flags")
+    data = urllib.request.urlopen(
+        f"http://127.0.0.1:8000/sql?query={q}", timeout=3
+    ).read().decode()
+    import json as _j
+    rows = _j.loads(data)
+    if rows and isinstance(rows, list) and len(rows) > 0:
+        val = rows[0].get("allow_local_processing", False)
+        print(1 if val else 0)
+    else:
+        print(0)
+except Exception:
+    print(0)
+PY
+)
+  }
+  _check_allow_local
+  if [ "$_ALLOW_LOCAL" = "1" ]; then
+    echo "[stack] local processing enabled - starting local resources"
+  else
+    echo "[stack] local processing disabled - backend + frontend only"
+  fi
+
   cd "$APP" || exit 1
 
   if is_up "uvicorn api.main:app"; then
@@ -375,7 +413,7 @@ PY
   # installed it, so the absence is reported rather than failed. The
   # process boots cheap and the model loads on the first request
   # (ADR-014), so a phone that never speaks pays one Python process.
-  if [ -x "$TTS_VENV/bin/python" ]; then
+  if [ "$_ALLOW_LOCAL" = "1" ] && [ -x "$TTS_VENV/bin/python" ]; then
     if is_up "termux-guest-tts.py"; then
       echo "tts-ja   already running"
     else
@@ -384,8 +422,10 @@ PY
         >>"$LOG" 2>&1 &
       echo "tts-ja   started on 8092 (threads ${GUEST_TTS_THREADS:-2}; model loads on first use)"
     fi
-  else
+  elif [ "$_ALLOW_LOCAL" = "1" ]; then
     echo "tts-ja   not installed - run onb-tts-ja-install from Termux"
+  else
+    echo "tts-ja   skipped - local processing disabled"
   fi
 
   sleep 5

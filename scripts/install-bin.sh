@@ -98,6 +98,9 @@ echo "installing into $BIN"
 rc=0
 install_one termux-launch.sh onb       || rc=1
 install_one termux-stack.sh  onb-stack || rc=1
+# onb-check-local: queries SurrealDB for allow_local_processing flag;
+# used by termux-launch.sh before starting llama/embed/residency.
+install_one termux-check-local.sh onb-check-local || rc=1
 install_one termux-model.sh  onb-model || rc=1
 install_one termux-embed.sh  onb-embed || rc=1
 # onb-sync was missing here, which is why the wrapper drifted out of

@@ -651,6 +651,15 @@ case "${1:-up}" in
     export ONB_FOREGROUND
 
     trap 'stop_llama; stop_residency; exit 0' INT TERM
+    # Check allow_local_processing before starting local resources.
+    # SurrealDB runs inside proot, which hasn't started yet on cold boot,
+    # so default to enabled (1) if we can't read the flag.
+    _ALLOW_LOCAL=$(sh "$HOME/bin/onb-check-local" 2>/dev/null || echo 1)
+    if [ "$_ALLOW_LOCAL" = "1" ]; then
+      echo "[onb] local processing enabled - starting local resources"
+    else
+      echo "[onb] local processing disabled - backend + frontend only"
+    fi
     start_llama || exit 1
     wait_for_llama
 
@@ -660,15 +669,23 @@ case "${1:-up}" in
     # embedding while still reporting success, which is the worst kind of
     # failure to debug. Best-effort: a device without the model still
     # boots, just without vector search.
-    if [ -f "${EMBED_MODEL:-$HOME/gguf/bge-small-en-v1.5-q8_0.gguf}" ]; then
-      sh "$HOME/bin/onb-embed" up || echo "[onb] embedding server failed - vector search off"
+    if [ "$_ALLOW_LOCAL" = "1" ]; then
+      if [ -f "${EMBED_MODEL:-$HOME/gguf/bge-small-en-v1.5-q8_0.gguf}" ]; then
+        sh "$HOME/bin/onb-embed" up || echo "[onb] embedding server failed - vector search off"
+      else
+        echo "[onb] no embedding model - skipping (vector search off)"
+      fi
     else
-      echo "[onb] no embedding model - skipping (vector search off)"
+      echo "[onb] embedding server skipped - local processing disabled"
     fi
 
     # The residency supervisor, before the guest stack: the app's first
     # request for a model has to find it.
-    start_residency || true
+    if [ "$_ALLOW_LOCAL" = "1" ]; then
+      start_residency || true
+    else
+      echo "[onb] residency supervisor skipped - local processing disabled"
+    fi
 
     # Bring up the guest stack, then block so --kill-on-exit has something
     # to reap when Ctrl+C arrives.
