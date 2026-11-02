@@ -654,14 +654,14 @@ case "${1:-up}" in
     # Check allow_local_processing before starting local resources.
     # SurrealDB runs inside proot, which hasn't started yet on cold boot,
     # so default to enabled (1) if we can't read the flag.
-    _ALLOW_LOCAL=$(sh "$HOME/bin/onb-check-local" 2>/dev/null || echo 1)
+    _ALLOW_LOCAL=$(sh "$HOME/bin/onb-check-local" 2>/dev/null || echo 0)
     if [ "$_ALLOW_LOCAL" = "1" ]; then
       echo "[onb] local processing enabled - starting local resources"
+      start_llama || exit 1
+      wait_for_llama
     else
       echo "[onb] local processing disabled - backend + frontend only"
     fi
-    start_llama || exit 1
-    wait_for_llama
 
     # Embedding server. Started here rather than left to the operator
     # because the app's default_embedding_model now points at :8081 - if
