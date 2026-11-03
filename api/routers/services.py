@@ -18,7 +18,6 @@ router = APIRouter()
 
 
 class QuotaProviderUpdate(BaseModel):
-    provider: str = Field(..., description="Provider name (e.g. 'deepseek')")
     limit: int = Field(..., ge=0, description="Request limit; 0 = unlimited")
     reset_at: Optional[str] = Field(None, description="ISO timestamp when the limit resets")
 
