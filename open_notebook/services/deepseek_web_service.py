@@ -64,6 +64,8 @@ async def main() -> None:
             or _shutil.which("google-chrome")
             or _shutil.which("google-chrome-stable")
             or _shutil.which("msedge")
+            or _shutil.which("carbon")
+            or _shutil.which("carbon-browser")
         )
 
         if not chrome_path:
