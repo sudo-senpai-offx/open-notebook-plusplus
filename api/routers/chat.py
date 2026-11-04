@@ -548,7 +548,7 @@ async def execute_chat(request: ExecuteChatRequest):
             ds_result = deepseek_web_service.run_deepseek(
                 message=transformed_prompt,
                 headless=True,
-                timeout=120.0,
+                timeout=180.0,
             )
 
             # Handle errors
