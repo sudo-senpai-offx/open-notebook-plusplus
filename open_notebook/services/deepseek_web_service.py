@@ -66,6 +66,8 @@ async def main() -> None:
             or _shutil.which("msedge")
             or _shutil.which("carbon")
             or _shutil.which("carbon-browser")
+            or _shutil.which("carbon-browser-bin")
+            or _shutil.which("chromium-browser")
         )
 
         if not chrome_path:
