@@ -917,6 +917,8 @@ export const esES = {
     cumulativeUsed: "Total requests used",
     remaining: "{{count}} remaining",
     quotaExceeded: "Cloud quota exhausted — local processing only (if enabled) or wait for reset.",
+    deepseekConfigured: "Configured",
+    deepseekNotConfigured: "Not configured",
     deepseekWebTitle: "DeepSeek-web Credentials",
     deepseekWebDesc: "Configure session credentials for DeepSeek-web chat. Log in to chat.deepseek.com in a browser, then copy the ds_session_id cookie and authorization Bearer token from DevTools Network tab.",
     configured: "Yes",
