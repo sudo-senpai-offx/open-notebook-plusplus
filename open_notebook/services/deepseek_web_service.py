@@ -51,7 +51,7 @@ async def main() -> None:
 
     try:
         browser = Browser(
-            config=BrowserConfig(
+            config=BrowserProfile(
                 headless=HEADLESS,
                 disable_security=True,
                 args=[
