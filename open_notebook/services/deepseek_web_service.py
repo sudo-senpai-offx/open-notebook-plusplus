@@ -33,7 +33,7 @@ import json
 import os
 import sys
 
-from browser_use import Agent, Browser, BrowserProfile
+from browser_use import Agent, Browser
 from browser_use.agent.views import AgentHistoryList
 
 SESSION_FILE = os.environ.get("ONB_DEEPSEEK_SESSION_FILE", "")
@@ -51,17 +51,14 @@ async def main() -> None:
 
     try:
         browser = Browser(
-            config=BrowserProfile(
-                headless=HEADLESS,
-                disable_security=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                    "--window-size=1920,1080",
-                    "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                ],
-            )
+            headless=HEADLESS,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1920,1080",
+                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            ],
         )
 
         agent = Agent(
