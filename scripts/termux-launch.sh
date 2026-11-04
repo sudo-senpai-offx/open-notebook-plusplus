@@ -687,6 +687,10 @@ case "${1:-up}" in
       echo "[onb] residency supervisor skipped - local processing disabled"
     fi
 
+    # Pass allow_local_processing into the guest so termux-stack.sh can
+    # conditionally start guest TTS.
+    ONB_ALLOW_LOCAL="$_ALLOW_LOCAL"
+
     # Bring up the guest stack, then block so --kill-on-exit has something
     # to reap when Ctrl+C arrives.
     proot-distro login ubuntu -- bash -c '

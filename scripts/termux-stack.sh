@@ -413,7 +413,7 @@ PY
   # installed it, so the absence is reported rather than failed. The
   # process boots cheap and the model loads on the first request
   # (ADR-014), so a phone that never speaks pays one Python process.
-  if [ "$_ALLOW_LOCAL" = "1" ] && [ -x "$TTS_VENV/bin/python" ]; then
+  if [ "$ONB_ALLOW_LOCAL" = "1" ] && [ -x "$TTS_VENV/bin/python" ]; then
     if is_up "termux-guest-tts.py"; then
       echo "tts-ja   already running"
     else
