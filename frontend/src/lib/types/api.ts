@@ -62,6 +62,8 @@ export interface SettingsResponse {
   docling_vision?: boolean
   youtube_preferred_languages?: string[]
   allow_local_processing?: boolean
+  deepseek_ds_session_id?: string | null
+  deepseek_authorization_token?: string | null
   session_id?: string
   local_processing_enabled?: boolean
   cloud_processing_enabled?: boolean
@@ -295,4 +297,51 @@ export interface RecentlyViewedResponse {
   id: string
   title: string
   last_viewed_at: string
+}
+
+// DeepSeek-web API types
+export interface DeepSeekSessionStatus {
+  credentials_configured: boolean
+  manual_login_required: boolean
+  rate_limited: boolean
+  pow_required: boolean
+}
+
+export interface DeepSeekConfigureRequest {
+  ds_session_id: string
+  authorization_token: string
+}
+
+export interface DeepSeekConfigureResponse {
+  ok: boolean
+  message: string
+}
+
+export interface DeepSeekRefreshResponse {
+  ok: boolean
+  message: string
+}
+
+export interface DeepSeekAvailableResponse {
+  internet_available: boolean
+  credentials_configured: boolean
+  ready: boolean
+}
+
+export interface DeepSeekChatRequest {
+  message: string
+  session_id?: string
+  notebook_id?: string
+  message_type?: string
+  thinking_enabled?: boolean
+}
+
+export interface DeepSeekChatResponse {
+  response: string | null
+  error: string | null
+  manual_login_required: boolean
+  rate_limited: boolean
+  pow_required: boolean
+  session_id: string | null
+  prompt_used: string | null
 }

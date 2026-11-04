@@ -1,5 +1,5 @@
 import apiClient from './client'
-import { SettingsResponse } from '@/lib/types/api'
+import { SettingsResponse, DeepSeekSessionStatus, DeepSeekConfigureRequest, DeepSeekConfigureResponse, DeepSeekRefreshResponse, DeepSeekAvailableResponse, DeepSeekChatRequest, DeepSeekChatResponse } from '@/lib/types/api'
 
 export const settingsApi = {
   get: async () => {
@@ -72,6 +72,33 @@ export const quotaApi = {
 
   setLimit: async (provider: string, limit: number, reset_at?: string) => {
     const response = await apiClient.put<{ ok: boolean; provider: string; limit: number }>(`/services/quota/${provider}`, { provider, limit, reset_at })
+    return response.data
+  },
+}
+
+export const deepseekApi = {
+  getStatus: async () => {
+    const response = await apiClient.get<DeepSeekSessionStatus>('/chat/deepseek-web/session')
+    return response.data
+  },
+
+  configure: async (data: DeepSeekConfigureRequest) => {
+    const response = await apiClient.post<DeepSeekConfigureResponse>('/chat/deepseek-web/session/configure', data)
+    return response.data
+  },
+
+  refresh: async () => {
+    const response = await apiClient.post<DeepSeekRefreshResponse>('/chat/deepseek-web/session/refresh')
+    return response.data
+  },
+
+  available: async () => {
+    const response = await apiClient.get<DeepSeekAvailableResponse>('/chat/deepseek-web/available')
+    return response.data
+  },
+
+  chat: async (data: DeepSeekChatRequest) => {
+    const response = await apiClient.post<DeepSeekChatResponse>('/chat/deepseek-web', data)
     return response.data
   },
 }

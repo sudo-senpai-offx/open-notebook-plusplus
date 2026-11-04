@@ -13,7 +13,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert'
 import { useSettings, useUpdateSettings } from '@/lib/hooks/use-settings'
 import { useCapabilities } from '@/lib/hooks/use-capabilities'
-import { sessionApi, quotaApi } from '@/lib/api/settings'
+import { sessionApi, quotaApi, deepseekApi } from '@/lib/api/settings'
+import { DeepSeekSessionStatus } from '@/lib/types/api'
 import { useEffect, useState } from 'react'
 import { ChevronDownIcon } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
@@ -69,6 +70,13 @@ export function SettingsForm() {
     cumulative_exceeded: false,
   })
   const [quotaLoading, setQuotaLoading] = useState(false)
+  const [deepseekStatus, setDeepseekStatus] = useState<DeepSeekSessionStatus | null>(null)
+  const [deepseekLoading, setDeepseekLoading] = useState(false)
+  const [deepseekConfigured, setDeepseekConfigured] = useState(false)
+  const [dsSessionId, setDsSessionId] = useState('')
+  const [authToken, setAuthToken] = useState('')
+  const [configureMessage, setConfigureMessage] = useState<string | null>(null)
+  const [configureError, setConfigureError] = useState<string | null>(null)
 
   useEffect(() => {
     let mounted = true
@@ -102,8 +110,24 @@ export function SettingsForm() {
     }
     fetchSession()
     fetchQuota()
+    const fetchDeepseek = async () => {
+      setDeepseekLoading(true)
+      try {
+        const data = await deepseekApi.getStatus()
+        if (mounted) {
+          setDeepseekStatus(data)
+          setDeepseekConfigured(data.credentials_configured)
+        }
+      } catch {
+        if (mounted) setDeepseekStatus(null)
+      } finally {
+        if (mounted) setDeepseekLoading(false)
+      }
+    }
+    fetchDeepseek()
     return () => { mounted = false }
   }, [])
+
 const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
   doc: false,
   url: false,
@@ -585,6 +609,138 @@ const [hasResetForm, setHasResetForm] = useState(false)
                 <span>{t('settings.lastRefreshed')}</span>
                 <span>{new Date(quotaData.updated_at).toLocaleString()}</span>
               </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* DeepSeek-web Credentials Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('settings.deepseekWebTitle')}</CardTitle>
+          <CardDescription>{t('settings.deepseekWebDesc')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between text-sm">
+              <span>{t('settings.deepseekConfigured')}</span>
+              <span className={[
+                'px-2 py-0.5 rounded text-xs font-medium',
+                deepseekConfigured
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-gray-100 text-gray-600',
+              ].join(' ')}>
+                {deepseekConfigured ? t('settings.configured') : t('settings.notConfigured')}
+              </span>
+            </div>
+
+            {deepseekConfigured ? (
+              <div className="space-y-3">
+                <Button
+                  onClick={async () => {
+                    setDeepseekLoading(true)
+                    try {
+                      await deepseekApi.refresh()
+                      setDeepseekConfigured(false)
+                      setConfigureMessage(null)
+                      setConfigureError(null)
+                    } catch {
+                      // ignore
+                    } finally {
+                      setDeepseekLoading(false)
+                    }
+                  }}
+                  disabled={deepseekLoading}
+                  size="sm"
+                  variant="outline"
+                >
+                  {deepseekLoading ? t('common.refreshing') : t('settings.deepseekClearCredentials')}
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.deepseekClearDesc')}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label htmlFor="ds_session_id">{t('settings.deepseekSessionId')}</Label>
+                  <input
+                    id="ds_session_id"
+                    type="text"
+                    value={dsSessionId}
+                    onChange={(e) => setDsSessionId(e.target.value)}
+                    placeholder={t('settings.deepseekSessionIdPlaceholder')}
+                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
+                    disabled={deepseekLoading}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.deepseekSessionIdHelp')}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="auth_token">{t('settings.deepseekAuthToken')}</Label>
+                  <input
+                    id="auth_token"
+                    type="text"
+                    value={authToken}
+                    onChange={(e) => setAuthToken(e.target.value)}
+                    placeholder={t('settings.deepseekAuthTokenPlaceholder')}
+                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
+                    disabled={deepseekLoading}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.deepseekAuthTokenHelp')}
+                  </p>
+                </div>
+                {configureError && (
+                  <Alert variant="destructive">
+                    <AlertTitle>{t('settings.deepseekConfigError')}</AlertTitle>
+                    <AlertDescription>{configureError}</AlertDescription>
+                  </Alert>
+                )}
+                {configureMessage && (
+                  <Alert variant="default">
+                    <AlertTitle>{t('settings.deepseekConfigSuccess')}</AlertTitle>
+                    <AlertDescription>{configureMessage}</AlertDescription>
+                  </Alert>
+                )}
+                <Button
+                  onClick={async () => {
+                    setConfigureError(null)
+                    setConfigureMessage(null)
+                    if (!dsSessionId || !authToken) {
+                      setConfigureError(t('settings.deepseekBothFieldsRequired'))
+                      return
+                    }
+                    setDeepseekLoading(true)
+                    try {
+                      const result = await deepseekApi.configure({
+                        ds_session_id: dsSessionId,
+                        authorization_token: authToken,
+                      })
+                      setConfigureMessage(result.message)
+                      setDeepseekConfigured(true)
+                      setDsSessionId('')
+                      setAuthToken('')
+                    } catch (e) {
+                      const err = e as { response?: { data?: { detail?: string } } };
+                      setConfigureError(err?.response?.data?.detail || t('settings.deepseekConfigFailed'))
+                    } finally {
+                      setDeepseekLoading(false)
+                    }
+                  }}
+                  disabled={deepseekLoading || !dsSessionId || !authToken}
+                >
+                  {deepseekLoading ? t('common.saving') : t('settings.deepseekConfigure')}
+                </Button>
+              </div>
+            )}
+
+            {deepseekStatus?.pow_required && (
+              <Alert variant="destructive">
+                <AlertTitle>{t('settings.deepseekPowRequired')}</AlertTitle>
+                <AlertDescription>{t('settings.deepseekPowRequiredDesc')}</AlertDescription>
+              </Alert>
             )}
           </div>
         </CardContent>
