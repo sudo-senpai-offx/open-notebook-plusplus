@@ -70,6 +70,7 @@ async def main() -> None:
             or _shutil.which("chromium-browser")
             or _shutil.which("/data/data/com.termux/files/usr/bin/carbon")
             or _shutil.which("/data/data/com.termux/files/usr/bin/carbon-browser")
+            or _shutil.which("carbonyl")
         )
 
         if not chrome_path:
