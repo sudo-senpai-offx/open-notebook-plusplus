@@ -204,7 +204,7 @@ class DeepSeekWebService:
             env["ONB_DEEPSEEK_PERSIST_SESSION"] = "1" if persist_session else "0"
             # browser_use may require BROWSER_USE_API_KEY; set empty string
             # to allow local operation without cloud features
-            env.setdefault("BROWSER_USE_API_KEY", "")
+            env.setdefault("BROWSER_USE_API_KEY", "dummy")
 
             # Run as subprocess — sync call within the request
             proc = subprocess.run(
