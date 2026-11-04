@@ -49,9 +49,33 @@ async def main() -> None:
     manual_login_required = False
     rate_limited = False
 
+async def main() -> None:
+    result_text = ""
+    error_text = ""
+    manual_login_required = False
+    rate_limited = False
+
     try:
+        import shutil as _shutil
+
+        chrome_path = (
+            _shutil.which("chromium")
+            or _shutil.which("chromium-browser")
+            or _shutil.which("google-chrome")
+            or _shutil.which("google-chrome-stable")
+            or _shutil.which("msedge")
+        )
+
+        if not chrome_path:
+            error_text = (
+                "browser-use error: Chrome/Chromium not found in PATH. "
+                "Install it in Termux: pkg install chromium"
+            )
+            raise RuntimeError(error_text)
+
         browser = Browser(
             headless=HEADLESS,
+            executable_path=chrome_path,
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
