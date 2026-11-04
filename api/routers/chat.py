@@ -28,6 +28,8 @@ from open_notebook.exceptions import (
     OpenNotebookError,
 )
 from open_notebook.graphs.chat import graph as chat_graph
+from open_notebook.services.deepseek_web_service import deepseek_web_service
+from open_notebook.services.prompter_service import prompter_service
 from open_notebook.services.quota_tracker import quota_tracker
 from open_notebook.utils import token_count
 from open_notebook.utils.context_builder import (
@@ -511,35 +513,112 @@ async def execute_chat(request: ExecuteChatRequest):
         user_message = HumanMessage(content=request.message, id=str(uuid4()))
         state_values["messages"].append(user_message)
 
-        # --- Quota check for cloud providers ---
-        # If the selected model is a cloud provider (DeepSeek), verify quota
-        # before sending. If exceeded, auto-switch to local processing when
-        # allowed, otherwise return 429 with a clear message.
-        is_cloud_model = bool(model_override) and (
-            "deepseek" in str(model_override).lower()
-            or "gpt" in str(model_override).lower()
-            or "claude" in str(model_override).lower()
-            or "gemini" in str(model_override).lower()
-        )
-        if is_cloud_model:
-            provider = "deepseek"  # DeepSeek is the primary cloud provider
-            if not await quota_tracker.can_request(provider):
-                # Quota exceeded — try local fallback
+        # --- DeepSeek-web (browser-use) routing ---
+        # If the user selected deepseek-web, route through browser-use session
+        # capture instead of the LangGraph graph. This accesses chat.deepseek.com
+        # directly via a headed/headless browser, no API key required.
+        if model_override == "deepseek-web":
+            # Quota check for deepseek-web
+            if not await quota_tracker.can_request("deepseek"):
                 flags = await ProcessingFlags.get_instance()
                 if flags.allow_local_processing:
-                    model_override = "llama"  # local llama-server at :8080
+                    model_override = "llama"
                     logger.info(
-                        f"Quota exceeded for {provider}; switching to local llama"
+                        "Quota exceeded for deepseek-web; switching to local llama"
                     )
                 else:
                     raise HTTPException(
                         status_code=429,
                         detail=(
-                            f"Cloud quota exhausted for {provider}. "
+                            "DeepSeek-web quota exhausted. "
                             "Enable 'Allow local processing' in Settings to use "
                             "local models, or wait for quota reset."
                         ),
                     )
+
+            # Transform message through prompter (session-aware)
+            transformed_prompt = await prompter_service.transform(
+                raw_message=request.message,
+                session_id=request.session_id,
+                notebook_id=notebook.id if notebook else None,
+                message_type="chat",
+            )
+
+            # Run browser-use subprocess
+            ds_result = deepseek_web_service.run_deepseek(
+                message=transformed_prompt,
+                headless=True,
+                timeout=120.0,
+            )
+
+            # Handle errors
+            if ds_result.get("manual_login_required"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "DeepSeek-web session expired. Manual login required: "
+                        "open chat.deepseek.com in a browser, log in, and the session "
+                        "cookies will be persisted for future requests."
+                    ),
+                )
+
+            if ds_result.get("rate_limited"):
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "DeepSeek-web rate limited. "
+                        "Wait for quota reset or enable 'Allow local processing' "
+                        "in Settings to use local models."
+                    ),
+                )
+
+            response_text = ds_result.get("response") or ""
+            if not response_text and ds_result.get("error"):
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"DeepSeek-web error: {ds_result['error']}",
+                )
+
+            # Increment quota
+            await quota_tracker.increment("deepseek", 1)
+
+            # Build assistant message
+            from langchain_core.messages import AIMessage
+
+            assistant_message = AIMessage(
+                content=response_text, id=str(uuid4())
+            )
+            state_values["messages"].append(assistant_message)
+
+            # Persist the turn
+            await session.save()
+            turn_messages = [user_message, assistant_message]
+            try:
+                added = await persist_chat_messages(
+                    full_session_id, turn_messages
+                )
+                if added:
+                    logger.info(
+                        f"Persisted {added} chat message(s) for {full_session_id}"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"Could not persist chat messages for {full_session_id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+            messages = extract_chat_messages(turn_messages)
+
+            return ExecuteChatResponse(
+                session_id=request.session_id,
+                messages=messages,
+                history_selection=HistorySelectionReport(
+                    kept_exchanges=1,
+                    dropped_exchanges=0,
+                    total_exchanges=1,
+                    reason="deepseek-web browser-use",
+                ),
+            )
 
         # Execute chat graph in a thread so the synchronous LangGraph invoke
         # (SqliteSaver checkpoints are sync) doesn't block the event loop and
@@ -547,6 +626,31 @@ async def execute_chat(request: ExecuteChatRequest):
         # get_state() calls above.
         # invoke_chat_turn also drops the question from the checkpoint when the
         # turn fails, so a retry doesn't add it twice.
+        #
+        # Quota check for non-deepseek-web cloud providers.
+        is_cloud_model = bool(model_override) and (
+            "gpt" in str(model_override).lower()
+            or "claude" in str(model_override).lower()
+            or "gemini" in str(model_override).lower()
+        )
+        if is_cloud_model:
+            if not await quota_tracker.can_request("deepseek"):
+                flags = await ProcessingFlags.get_instance()
+                if flags.allow_local_processing:
+                    model_override = "llama"
+                    logger.info(
+                        "Quota exceeded for gpt/claude/gemini; switching to local llama"
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            "Cloud quota exhausted. "
+                            "Enable 'Allow local processing' in Settings to use "
+                            "local models, or wait for quota reset."
+                        ),
+                    )
+
         result = await asyncio.to_thread(
             invoke_chat_turn,
             chat_graph,
@@ -583,13 +687,6 @@ async def execute_chat(request: ExecuteChatRequest):
 
         # Convert messages to response format
         messages = extract_chat_messages(turn_messages)
-
-        # Increment quota for cloud provider used
-        if is_cloud_model and model_override != "llama":
-            try:
-                await quota_tracker.increment("deepseek", 1)
-            except Exception:  # noqa: BLE001
-                pass
 
         return ExecuteChatResponse(
             session_id=request.session_id,
