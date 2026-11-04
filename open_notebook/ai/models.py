@@ -203,8 +203,15 @@ class ProcessingFlags(RecordModel):
     """Global processing flag configuration — controls whether local resources
     (LLM, embeddings, STT, TTS) may be used. Persisted in SurrealDB as
     `open_notebook:processing_flags`; a single record with one boolean field."""
+
     record_id: ClassVar[str] = "open_notebook:processing_flags"
     allow_local_processing: bool = False
+    # DeepSeek-web direct API credentials (session-cookie based, no browser needed).
+    # Obtained by logging into chat.deepseek.com in a browser and copying:
+    #   1. ds_session_id cookie value
+    #   2. authorization Bearer token from request headers
+    deepseek_ds_session_id: Optional[str] = None
+    deepseek_authorization_token: Optional[str] = None
 
     @classmethod
     async def get_instance(cls) -> "ProcessingFlags":
@@ -233,10 +240,11 @@ class ProcessingFlags(RecordModel):
 
 class SessionState(RecordModel):
     """Hybrid session management (Option C): client session ID + server state.
-    
+
     Tracks session metadata for browser/Playwright capture-based processing,
     including rate limit state per provider and whether local processing
     resources are available."""
+
     record_id: ClassVar[str] = "open_notebook:session_state"
     session_id: str = ""
     local_processing_enabled: bool = False
@@ -278,6 +286,7 @@ class SyncConflict(RecordModel):
     `updated` timestamps differ, *and* the full record content differs.
     Both versions are stored so the user can pick a winner or merge.
     """
+
     record_id: ClassVar[str] = "open_notebook:sync_conflict"
 
     collection: str = ""
@@ -319,6 +328,7 @@ class SyncOptOut(RecordModel):
     collections or individual records the operator wants to keep
     device-local.
     """
+
     record_id: ClassVar[str] = "open_notebook:sync_optout"
 
     collections: List[str] = []
@@ -344,6 +354,8 @@ class SyncOptOut(RecordModel):
         object.__setattr__(instance, "__dict__", {})
         super(RecordModel, instance).__init__(**data)
         return instance
+
+
 class ModelManager:
     def __init__(self):
         pass  # No caching needed
@@ -609,10 +621,16 @@ class JobCheckpoint:
         else:
             data = {
                 "command_id": command_id,
-                "checkpoint": checkpoint if checkpoint is not None else existing.checkpoint,
-                "attempt_count": (existing.attempt_count + 1) if increment_attempt else existing.attempt_count,
+                "checkpoint": checkpoint
+                if checkpoint is not None
+                else existing.checkpoint,
+                "attempt_count": (existing.attempt_count + 1)
+                if increment_attempt
+                else existing.attempt_count,
                 "max_attempts": existing.max_attempts,
-                "last_attempt_at": now if increment_attempt else existing.last_attempt_at,
+                "last_attempt_at": now
+                if increment_attempt
+                else existing.last_attempt_at,
                 "created_at": existing.created_at,
                 "updated_at": now,
             }
@@ -762,7 +780,9 @@ class QuotaCounters:
         """True if a cloud request to `provider` is within quota."""
         return not self.provider_exceeded(provider) and not self.cumulative_exceeded()
 
-    def set_limit(self, provider: str, limit: int, reset_at: Optional[str] = None) -> None:
+    def set_limit(
+        self, provider: str, limit: int, reset_at: Optional[str] = None
+    ) -> None:
         """Set the request limit for a provider."""
         now = datetime.now(timezone.utc).isoformat()
         p = self.providers.get(provider, {})
