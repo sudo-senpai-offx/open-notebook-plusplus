@@ -33,7 +33,7 @@ import json
 import os
 import sys
 
-from browser_use import Agent, Browser, BrowserConfig
+from browser_use import Agent, Browser, BrowserProfile
 from browser_use.agent.views import AgentHistoryList
 
 SESSION_FILE = os.environ.get("ONB_DEEPSEEK_SESSION_FILE", "")
