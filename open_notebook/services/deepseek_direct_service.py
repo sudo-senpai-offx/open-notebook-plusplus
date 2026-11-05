@@ -10,6 +10,11 @@ Requires two tokens from the user's DeepSeek web session:
 No Chromium, no Playwright, no browser-use — just HTTP requests with the
 user's session cookies. Works on low-RAM devices (Snapdragon 439, 3 GB RAM).
 
+If DeepSeek requires a Proof-of-Work challenge (x-ds-pow-response header),
+direct mode cannot solve it yet. Use the PC browser-use fallback instead:
+run `onb-stack up` on your PC with browser-use installed, or use the
+browser-use service on any x86 machine.
+
 WARNING: This reverse-engineers DeepSeek's web interface and may violate
 DeepSeek's Terms of Service. Use at your own risk.
 """
