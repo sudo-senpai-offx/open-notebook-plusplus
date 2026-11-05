@@ -29,6 +29,9 @@ async def get_settings():
             docling_vision=settings.docling_vision,
             youtube_preferred_languages=settings.youtube_preferred_languages,
             allow_local_processing=flags.allow_local_processing,
+            deepseek_ds_session_id=flags.deepseek_ds_session_id,
+            deepseek_authorization_token=flags.deepseek_authorization_token,
+            deepseek_pc_url=flags.deepseek_pc_url,
         )
     except HTTPException:
         raise
@@ -86,6 +89,16 @@ async def update_settings(settings_update: SettingsUpdate):
                 settings_update.youtube_preferred_languages
             )
 
+        # Update DeepSeek-web credentials in ProcessingFlags record
+        if settings_update.deepseek_ds_session_id is not None:
+            flags.deepseek_ds_session_id = settings_update.deepseek_ds_session_id
+        if settings_update.deepseek_authorization_token is not None:
+            flags.deepseek_authorization_token = (
+                settings_update.deepseek_authorization_token
+            )
+        if settings_update.deepseek_pc_url is not None:
+            flags.deepseek_pc_url = settings_update.deepseek_pc_url
+
         # Update allow_local_processing in ProcessingFlags record
         if settings_update.allow_local_processing is not None:
             flags = await ProcessingFlags.get_instance()
@@ -115,6 +128,9 @@ async def update_settings(settings_update: SettingsUpdate):
             docling_vision=settings.docling_vision,
             youtube_preferred_languages=settings.youtube_preferred_languages,
             allow_local_processing=flags.allow_local_processing,
+            deepseek_ds_session_id=flags.deepseek_ds_session_id,
+            deepseek_authorization_token=flags.deepseek_authorization_token,
+            deepseek_pc_url=flags.deepseek_pc_url,
         )
     except HTTPException:
         raise

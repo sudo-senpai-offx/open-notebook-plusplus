@@ -183,6 +183,7 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
                 pc_result = await _run_pc_browser_use(
                     message=transformed_prompt,
                     thinking_enabled=request.thinking_enabled or False,
+                    pc_url=flags.deepseek_pc_url,
                     session_id=request.session_id,
                     notebook_id=request.notebook_id,
                 )
@@ -249,26 +250,53 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
 async def _run_pc_browser_use(
     message: str,
     thinking_enabled: bool,
+    pc_url: Optional[str] = None,
     session_id: Optional[str] = None,
     notebook_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run browser-use on PC for DeepSeek-web fallback.
 
-    This delegates to the browser_use_service which runs Chromium automation.
-    On PC (x86), Chromium is available and browser-use works correctly.
+    Calls the PC's API endpoint (pc_url) which runs browser-use with Chromium.
+    On phone (ARM), browser-use cannot run Chromium, so we delegate to PC.
     """
-    try:
-        result = browser_use_service.run_deepseek(
-            message=message,
-            headless=True,
-            timeout=180.0,
-        )
+    import httpx
+
+    if not pc_url:
         return {
-            "response": result.get("response"),
-            "error": result.get("error"),
-            "manual_login_required": result.get("manual_login_required", False),
-            "rate_limited": result.get("rate_limited", False),
+            "response": None,
+            "error": "PC fallback URL not configured. Set deepseek_pc_url in Settings.",
+            "manual_login_required": False,
+            "rate_limited": False,
         }
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
+            resp = await client.post(
+                f"{pc_url.rstrip('/')}/api/chat/deepseek-web/pc-fallback",
+                json={
+                    "message": message,
+                    "thinking_enabled": thinking_enabled,
+                    "session_id": session_id,
+                    "notebook_id": notebook_id,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    "response": data.get("response"),
+                    "error": data.get("error"),
+                    "manual_login_required": data.get(
+                        "manual_login_required", False
+                    ),
+                    "rate_limited": data.get("rate_limited", False),
+                }
+            else:
+                return {
+                    "response": None,
+                    "error": f"PC fallback returned HTTP {resp.status_code}: {resp.text[:200]}",
+                    "manual_login_required": False,
+                    "rate_limited": False,
+                }
     except Exception as exc:  # noqa: BLE001
         logger.error(f"PC browser-use fallback error: {exc}")
         return {

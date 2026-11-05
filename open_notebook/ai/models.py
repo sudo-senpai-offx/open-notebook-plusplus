@@ -212,6 +212,9 @@ class ProcessingFlags(RecordModel):
     #   2. authorization Bearer token from request headers
     deepseek_ds_session_id: Optional[str] = None
     deepseek_authorization_token: Optional[str] = None
+    # PC fallback URL for browser-use automation (x86 machine with Chromium).
+    # When PoW solving fails locally, the phone delegates to the PC's API.
+    deepseek_pc_url: Optional[str] = None
 
     @classmethod
     async def get_instance(cls) -> "ProcessingFlags":

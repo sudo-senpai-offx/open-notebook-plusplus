@@ -310,6 +310,9 @@ class SettingsResponse(BaseModel):
     docling_vision: Optional[bool] = None
     youtube_preferred_languages: Optional[List[str]] = None
     allow_local_processing: Optional[bool] = None
+    deepseek_ds_session_id: Optional[str] = None
+    deepseek_authorization_token: Optional[str] = None
+    deepseek_pc_url: Optional[str] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -322,6 +325,9 @@ class SettingsUpdate(BaseModel):
     docling_vision: Optional[bool] = None
     youtube_preferred_languages: Optional[List[str]] = None
     allow_local_processing: Optional[bool] = None
+    deepseek_ds_session_id: Optional[str] = None
+    deepseek_authorization_token: Optional[str] = None
+    deepseek_pc_url: Optional[str] = None
 
 
 # Sources API models
