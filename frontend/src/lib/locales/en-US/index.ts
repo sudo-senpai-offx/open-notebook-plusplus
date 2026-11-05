@@ -935,7 +935,9 @@ export const enUS = {
     deepseekConfigSuccess: "Configuration Success",
     deepseekConfigFailed: "Failed to configure credentials",
     deepseekPowRequired: "Proof-of-Work Required",
-    deepseekPowRequiredDesc: "DeepSeek-web requires a Proof-of-Work challenge response. Direct API mode does not yet support PoW solving.",
+    deepseekPowRequiredDesc: "DeepSeek-web requires a Proof-of-Work challenge response. Direct API mode does not yet support PoW solving. PC fallback: run browser-use on your x86 machine.",
+    deepseekSetupNeeded: "Setup Needed",
+    deepseekSetupNeededDesc: "Configure DeepSeek-web credentials below. Log in to chat.deepseek.com in a browser, copy the ds_session_id cookie and authorization Bearer token from DevTools Network tab, then enter them above.",
   },
   advanced: {
     title: "AdvancedTools",

@@ -742,6 +742,12 @@ const [hasResetForm, setHasResetForm] = useState(false)
                 <AlertDescription>{t('settings.deepseekPowRequiredDesc')}</AlertDescription>
               </Alert>
             )}
+            {!deepseekConfigured && !deepseekStatus?.pow_required && (
+              <Alert variant="default">
+                <AlertTitle>{t('settings.deepseekSetupNeeded')}</AlertTitle>
+                <AlertDescription>{t('settings.deepseekSetupNeededDesc')}</AlertDescription>
+              </Alert>
+            )}
           </div>
         </CardContent>
       </Card>

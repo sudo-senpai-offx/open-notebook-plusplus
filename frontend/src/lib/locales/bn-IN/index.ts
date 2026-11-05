@@ -938,6 +938,8 @@ export const bnIN = {
     deepseekConfigFailed: "Failed to configure credentials",
     deepseekPowRequired: "Proof-of-Work Required",
     deepseekPowRequiredDesc: "DeepSeek-web requires a Proof-of-Work challenge response. Direct API mode does not yet support PoW solving.",
+    deepseekSetupNeededDesc: "Configure DeepSeek-web credentials below. Log in to chat.deepseek.com in a browser, copy the ds_session_id cookie and authorization Bearer token from DevTools Network tab, then enter them above.",
+    deepseekSetupNeeded: "Setup Needed",
   },
   advanced: {
     title: "উন্নত টুলস",
