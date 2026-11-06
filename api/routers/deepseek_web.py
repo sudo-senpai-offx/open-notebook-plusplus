@@ -196,9 +196,7 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
                 return DeepSeekWebResponse(
                     response=pc_result.get("response"),
                     error=pc_result.get("error"),
-                    manual_login_required=pc_result.get(
-                        "manual_login_required", False
-                    ),
+                    manual_login_required=pc_result.get("manual_login_required", False),
                     rate_limited=pc_result.get("rate_limited", False),
                     pow_required=True,
                     pow_solved=False,
@@ -254,19 +252,29 @@ async def _run_pc_browser_use(
     session_id: Optional[str] = None,
     notebook_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Run browser-use on PC for DeepSeek-web fallback.
+    """Run browser-use for DeepSeek-web fallback.
 
-    Calls the PC's API endpoint (pc_url) which runs browser-use with Chromium.
-    On phone (ARM), browser-use cannot run Chromium, so we delegate to PC.
+    With ``pc_url`` set, this machine is the phone: forward the request to the
+    PC's API, which runs browser-use with Chromium. Without it, this machine
+    *is* the PC, so run browser-use locally instead of refusing — the endpoint
+    used to require a URL pointing at itself.
     """
+    import asyncio
+
     import httpx
 
     if not pc_url:
+        result = await asyncio.to_thread(
+            browser_use_service.run_deepseek,
+            message,
+            True,
+            180.0,
+        )
         return {
-            "response": None,
-            "error": "PC fallback URL not configured. Set deepseek_pc_url in Settings.",
-            "manual_login_required": False,
-            "rate_limited": False,
+            "response": result.get("response"),
+            "error": result.get("error"),
+            "manual_login_required": result.get("manual_login_required", False),
+            "rate_limited": result.get("rate_limited", False),
         }
 
     try:
@@ -285,9 +293,7 @@ async def _run_pc_browser_use(
                 return {
                     "response": data.get("response"),
                     "error": data.get("error"),
-                    "manual_login_required": data.get(
-                        "manual_login_required", False
-                    ),
+                    "manual_login_required": data.get("manual_login_required", False),
                     "rate_limited": data.get("rate_limited", False),
                 }
             else:
@@ -376,9 +382,7 @@ async def deepseek_web_pc_fallback(
         return DeepSeekWebResponse(
             response=pc_result.get("response"),
             error=pc_result.get("error"),
-            manual_login_required=pc_result.get(
-                "manual_login_required", False
-            ),
+            manual_login_required=pc_result.get("manual_login_required", False),
             rate_limited=pc_result.get("rate_limited", False),
             pow_required=False,
             pow_solved=False,

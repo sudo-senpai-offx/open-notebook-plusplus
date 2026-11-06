@@ -8,12 +8,16 @@ Requires two tokens from the user's DeepSeek web session:
 2. authorization_token — Bearer token from request headers in DevTools
 
 No Chromium, no Playwright, no browser-use — just HTTP requests with the
-user's session cookies. Works on low-RAM devices (Snapdragon 439, 3 GB RAM).
+user's session cookies plus the reverse-engineered ``DeepSeekHashV1``
+proof-of-work answer. Works on low-RAM devices (Snapdragon 439, 3 GB RAM),
+because the PoW is solved by a small WebAssembly module run through
+``wasmtime`` (~0.1 s per challenge).
 
-If DeepSeek requires a Proof-of-Work challenge (x-ds-pow-response header),
-direct mode cannot solve it yet. Use the PC browser-use fallback instead:
-run `onb-stack up` on your PC with browser-use installed, or use the
-browser-use service on any x86 machine.
+Flow per message:
+1. ``POST /api/v0/chat_session/create`` — one chat session per conversation.
+2. ``POST /api/v0/chat/create_pow_challenge`` — challenge for the target path.
+3. Solve it, base64-JSON the answer into ``x-ds-pow-response``.
+4. ``POST /api/v0/chat/completion`` — SSE stream, reassembled below.
 
 WARNING: This reverse-engineers DeepSeek's web interface and may violate
 DeepSeek's Terms of Service. Use at your own risk.
@@ -21,13 +25,15 @@ DeepSeek's Terms of Service. Use at your own risk.
 
 from __future__ import annotations
 
+import base64
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from loguru import logger
 
 DEEPSEEK_BASE_URL = "https://chat.deepseek.com"
+COMPLETION_PATH = "/api/v0/chat/completion"
 
 # Headers that the DeepSeek web frontend sends with every request.
 _BASE_HEADERS = {
@@ -40,21 +46,61 @@ _BASE_HEADERS = {
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
     "x-app-version": "20241129.1",
-    "x-client-locale": "en_US",
+    "x-client-bundle-id": "com.deepseek.chat",
+    "x-client-locale": "en",
     "x-client-platform": "web",
-    "x-client-version": "1.5.0",
-    "user-agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
+    "x-client-version": "2.7.0",
+    "user-agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+    ),
 }
 
 
-class DeepSeekDirectService:
-    """Direct API client for DeepSeek-web using session credentials.
+def _solve_pow(challenge_data: Dict[str, Any]) -> Optional[str]:
+    """Solve a ``DeepSeekHashV1`` challenge and return the header value.
 
-    Attempts to call the completion endpoint directly. If DeepSeek requires
-    a Proof-of-Work challenge response (x-ds-pow-response header), the request
-    will fail with a clear error message telling the user to use the
-    browser-use fallback or solve the PoW challenge.
+    Returns the base64-encoded JSON body expected in ``x-ds-pow-response``,
+    or None when the solver is unavailable or the algorithm is unknown.
     """
+    try:
+        from deepseek_pow import Challenge, registry
+    except ImportError:
+        logger.warning(
+            "deepseek-pow is not installed; DeepSeek PoW cannot be solved. "
+            "Install it with: pip install deepseek-pow wasmtime"
+        )
+        return None
+
+    algorithm = challenge_data.get("algorithm") or "DeepSeekHashV1"
+    try:
+        challenge = Challenge(
+            algorithm=algorithm,
+            challenge=challenge_data["challenge"],
+            salt=challenge_data["salt"],
+            difficulty=challenge_data["difficulty"],
+            expire_at=challenge_data["expire_at"],
+            signature=challenge_data.get("signature"),
+        )
+        solution = registry.get(algorithm).solve(challenge)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"DeepSeek PoW solve failed: {exc}")
+        return None
+
+    payload = {
+        "algorithm": algorithm,
+        "challenge": challenge.challenge,
+        "salt": challenge.salt,
+        "answer": int(solution.answer),
+        "expire_at": challenge.expire_at,
+        "signature": challenge.signature,
+        "target_path": challenge_data.get("target_path", COMPLETION_PATH),
+    }
+    return base64.b64encode(json.dumps(payload).encode()).decode()
+
+
+class DeepSeekDirectService:
+    """Direct API client for DeepSeek-web using session credentials."""
 
     def __init__(
         self,
@@ -71,7 +117,15 @@ class DeepSeekDirectService:
             sess = requests.Session()
             sess.headers.update(_BASE_HEADERS)
             if self.ds_session_id:
-                sess.cookies.set("ds_session_id", self.ds_session_id)
+                # A pasted DevTools cookie string ("a=1; b=2") carries more
+                # than ds_session_id: aws-waf-token and smidV2 matter too.
+                if "=" in self.ds_session_id:
+                    for pair in self.ds_session_id.split(";"):
+                        name, _, value = pair.strip().partition("=")
+                        if name and value:
+                            sess.cookies.set(name.strip(), value.strip())
+                else:
+                    sess.cookies.set("ds_session_id", self.ds_session_id)
             if self.authorization_token:
                 sess.headers["authorization"] = self.authorization_token
             self._session = sess
@@ -84,12 +138,15 @@ class DeepSeekDirectService:
         try:
             sess = self._get_session()
             url = f"{DEEPSEEK_BASE_URL}/api/v0/chat_session/create"
-            resp = sess.post(url, data="{}", timeout=30)
+            resp = sess.post(url, json={"character_id": None}, timeout=30)
             if resp.status_code == 200:
                 data: Dict[str, Any] = resp.json()
                 if data.get("code") == 0:
-                    self._chat_session_id = data["data"]["biz_data"]["id"]
-                    return True
+                    biz = (data.get("data") or {}).get("biz_data") or {}
+                    chat_session = biz.get("chat_session") or {}
+                    self._chat_session_id = chat_session.get("id")
+                    if self._chat_session_id:
+                        return True
             logger.warning(
                 f"Failed to create DeepSeek chat session: HTTP {resp.status_code}"
             )
@@ -97,6 +154,25 @@ class DeepSeekDirectService:
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"DeepSeek chat session creation error: {exc}")
             return False
+
+    def _pow_header(self, timeout: float = 30.0) -> Optional[str]:
+        """Fetch a challenge and return the solved ``x-ds-pow-response``."""
+        sess = self._get_session()
+        resp = sess.post(
+            f"{DEEPSEEK_BASE_URL}/api/v0/chat/create_pow_challenge",
+            json={"target_path": COMPLETION_PATH},
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            logger.warning(f"DeepSeek PoW challenge failed: HTTP {resp.status_code}")
+            return None
+        data = resp.json()
+        try:
+            challenge_data = data["data"]["biz_data"]["challenge"]
+        except (KeyError, TypeError):
+            logger.warning(f"DeepSeek PoW challenge shape unexpected: {data}")
+            return None
+        return _solve_pow(challenge_data)
 
     def send_message(
         self,
@@ -111,7 +187,8 @@ class DeepSeekDirectService:
           - error: str | None — error message if any
           - manual_login_required: bool — session credentials may be invalid
           - rate_limited: bool — DeepSeek rate-limited the request
-          - pow_required: bool — Proof-of-Work challenge is required
+          - pow_required: bool — a Proof-of-Work challenge was issued
+          - pow_solved: bool — the challenge was answered
         """
         if not self.ds_session_id or not self.authorization_token:
             return {
@@ -124,6 +201,7 @@ class DeepSeekDirectService:
                 "manual_login_required": True,
                 "rate_limited": False,
                 "pow_required": False,
+                "pow_solved": False,
             }
 
         # 1. Ensure chat session exists
@@ -134,16 +212,34 @@ class DeepSeekDirectService:
                 "manual_login_required": True,
                 "rate_limited": False,
                 "pow_required": False,
+                "pow_solved": False,
             }
 
-        # 2. Call completion endpoint directly (no PoW for now — try without first)
+        # 2. Solve the proof-of-work challenge for the completion endpoint
+        pow_header = self._pow_header()
+        if not pow_header:
+            return {
+                "response": None,
+                "error": (
+                    "DeepSeek-web issued a Proof-of-Work challenge that could "
+                    "not be solved. Install the solver: pip install deepseek-pow "
+                    "wasmtime."
+                ),
+                "manual_login_required": False,
+                "rate_limited": False,
+                "pow_required": True,
+                "pow_solved": False,
+            }
+
+        # 3. Call completion endpoint
         try:
             sess = self._get_session()
-            url = f"{DEEPSEEK_BASE_URL}/api/v0/chat/completion"
+            url = f"{DEEPSEEK_BASE_URL}{COMPLETION_PATH}"
 
             headers = {
-                "accept": "text/event-stream",
-                "referrer": f"{DEEPSEEK_BASE_URL}/a/chat/s/{self._chat_session_id}",
+                "accept": "*/*",
+                "referer": f"{DEEPSEEK_BASE_URL}/a/chat/s/{self._chat_session_id}",
+                "x-ds-pow-response": pow_header,
             }
 
             data: Dict[str, Any] = {
@@ -161,7 +257,7 @@ class DeepSeekDirectService:
             resp = sess.post(
                 url,
                 headers=headers,
-                data=json.dumps(data),
+                json=data,
                 timeout=timeout,
                 stream=True,
             )
@@ -172,7 +268,8 @@ class DeepSeekDirectService:
                     "error": "DeepSeek-web session expired or invalid credentials.",
                     "manual_login_required": True,
                     "rate_limited": False,
-                    "pow_required": False,
+                    "pow_required": True,
+                    "pow_solved": True,
                 }
 
             if resp.status_code == 429:
@@ -181,67 +278,39 @@ class DeepSeekDirectService:
                     "error": "DeepSeek-web rate limited.",
                     "manual_login_required": False,
                     "rate_limited": True,
-                    "pow_required": False,
+                    "pow_required": True,
+                    "pow_solved": True,
                 }
 
             if resp.status_code != 200:
-                # Check if PoW is required (DeepSeek may return a PoW challenge)
-                body = resp.text[:500]
-                if "pow" in body.lower() or "proof" in body.lower():
-                    return {
-                        "response": None,
-                        "error": (
-                            "DeepSeek-web requires Proof-of-Work challenge response. "
-                            "This is not yet supported in direct mode. "
-                            "Use browser-use fallback or solve the PoW challenge."
-                        ),
-                        "manual_login_required": False,
-                        "rate_limited": False,
-                        "pow_required": True,
-                    }
                 return {
                     "response": None,
-                    "error": f"DeepSeek-web error: HTTP {resp.status_code} — {body}",
+                    "error": (
+                        f"DeepSeek-web error: HTTP {resp.status_code} — "
+                        f"{resp.text[:500]}"
+                    ),
                     "manual_login_required": False,
                     "rate_limited": False,
-                    "pow_required": False,
+                    "pow_required": True,
+                    "pow_solved": True,
                 }
 
-            # 3. Parse Server-Sent Events (SSE) response
             content_type = resp.headers.get("content-type", "")
             if "text/event-stream" not in content_type:
-                body = resp.text[:500]
+                body = resp.text[:800]
+                # The web API reports application-level failures as JSON
+                # with HTTP 200, e.g. {"code":40300,"msg":"MISSING_HEADER"}.
                 return {
                     "response": None,
-                    "error": f"Unexpected response format: {body}",
-                    "manual_login_required": False,
-                    "rate_limited": False,
-                    "pow_required": False,
+                    "error": self._describe_json_error(body),
+                    "manual_login_required": "invalid chat session" in body
+                    or "expired" in body.lower(),
+                    "rate_limited": "RATE_LIMIT" in body or "TOO_MANY" in body,
+                    "pow_required": True,
+                    "pow_solved": True,
                 }
 
-            response_parts = []
-            current_event = None
-
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
-                if line.startswith("event: "):
-                    current_event = line[7:]
-                elif line.startswith("data: "):
-                    try:
-                        payload = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
-
-                    if current_event == "update_session" and isinstance(payload, dict):
-                        # Extract text content from SSE data
-                        text = self._extract_text(payload)
-                        if text:
-                            response_parts.append(text)
-                    elif current_event in ("finish", "close"):
-                        break
-
-            response_text = "".join(response_parts).strip()
+            response_text = self._read_sse(resp)
 
             if not response_text:
                 return {
@@ -249,7 +318,8 @@ class DeepSeekDirectService:
                     "error": "Empty response from DeepSeek-web.",
                     "manual_login_required": False,
                     "rate_limited": False,
-                    "pow_required": False,
+                    "pow_required": True,
+                    "pow_solved": True,
                 }
 
             return {
@@ -257,7 +327,8 @@ class DeepSeekDirectService:
                 "error": None,
                 "manual_login_required": False,
                 "rate_limited": False,
-                "pow_required": False,
+                "pow_required": True,
+                "pow_solved": True,
             }
 
         except requests.Timeout:
@@ -266,7 +337,8 @@ class DeepSeekDirectService:
                 "error": f"DeepSeek-web request timed out after {timeout}s.",
                 "manual_login_required": False,
                 "rate_limited": False,
-                "pow_required": False,
+                "pow_required": True,
+                "pow_solved": True,
             }
         except Exception as exc:  # noqa: BLE001
             logger.error(f"DeepSeek-direct error: {exc}")
@@ -276,40 +348,107 @@ class DeepSeekDirectService:
                 "manual_login_required": False,
                 "rate_limited": False,
                 "pow_required": False,
+                "pow_solved": False,
             }
 
     @staticmethod
-    def _extract_text(payload: dict) -> str:
-        """Extract text content from an SSE data payload dict."""
-        if not isinstance(payload, dict):
-            return ""
-        # DeepSeek SSE wraps content in various shapes; walk common keys.
-        if "v" in payload and len(payload) == 1:
-            inner = payload["v"]
-            if isinstance(inner, str):
-                return inner
-            if isinstance(inner, list):
-                return "".join(
-                    DeepSeekDirectService._extract_text(item)
-                    if isinstance(item, dict)
-                    else str(item)
-                    for item in inner
-                )
-        if "response" in payload and len(payload) == 1:
-            return DeepSeekDirectService._extract_text(payload["response"])
-        if "type" in payload and payload["type"] in ("THINK", "RESPONSE"):
-            if "content" in payload:
-                content = payload["content"]
-                if isinstance(content, str):
-                    return content
-                if isinstance(content, list):
-                    return "".join(
-                        DeepSeekDirectService._extract_text(item)
-                        if isinstance(item, dict)
-                        else str(item)
-                        for item in content
-                    )
-        return ""
+    def _describe_json_error(body: str) -> str:
+        """Turn DeepSeek's JSON error envelope into a readable message."""
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return f"Unexpected response format: {body}"
+        code = payload.get("code")
+        msg = payload.get("msg") or "unknown error"
+        biz_msg = ((payload.get("data") or {}).get("biz_msg")) or ""
+        detail = ": ".join(part for part in (msg, biz_msg) if part)
+        return f"DeepSeek-web rejected the request (code {code}): {detail}"
+
+    @staticmethod
+    def _read_sse(resp: requests.Response) -> str:
+        """Reassemble the assistant's text from DeepSeek's SSE stream.
+
+        The stream sends a full snapshot once (``{"v": {"response": ...}}``)
+        and then incremental patches, e.g.
+        ``{"p": "response/fragments/-1/content", "o": "APPEND", "v": "..."}``.
+        Only ``RESPONSE`` fragments are kept; ``THINK`` fragments are the
+        model's reasoning and are not part of the answer.
+        """
+        fragments: Dict[str, List[str]] = {}
+        order: List[str] = []
+        response_fragment_ids: set[str] = set()
+
+        def apply_patch(path: str, op: str, value: Any) -> None:
+            parts = path.split("/")
+            if len(parts) < 3 or parts[0] != "response" or parts[1] != "fragments":
+                return
+            ref = parts[2]
+            if ref == "-1":
+                if not order:
+                    return
+                fid = order[-1]
+            else:
+                fid = ref
+            if fid not in fragments:
+                fragments[fid] = [""]
+                order.append(fid)
+            if not isinstance(value, str):
+                return
+            if op == "APPEND":
+                fragments[fid].append(value)
+            else:
+                fragments[fid] = [value]
+
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            # requests types iter_lines() as bytes even when decode_unicode
+            # is set, so normalise here rather than casting at every use.
+            line = raw_line.decode() if isinstance(raw_line, bytes) else raw_line
+            if not line or not line.startswith("data: "):
+                continue
+            try:
+                payload = json.loads(line[6:])
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            snapshot = payload.get("v")
+            if isinstance(snapshot, dict) and "response" in snapshot:
+                inner = snapshot["response"] or {}
+                for fragment in inner.get("fragments") or []:
+                    if not isinstance(fragment, dict):
+                        continue
+                    fid = str(fragment.get("id"))
+                    if fid not in fragments:
+                        order.append(fid)
+                    fragments[fid] = [fragment.get("content") or ""]
+                    if fragment.get("type") == "RESPONSE":
+                        response_fragment_ids.add(fid)
+
+            path = payload.get("p")
+            if isinstance(path, str):
+                op = payload.get("o") or "SET"
+                value = payload.get("v")
+                if op == "BATCH" and isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict) and isinstance(item.get("p"), str):
+                            apply_patch(
+                                item["p"],
+                                item.get("o") or "SET",
+                                item.get("v"),
+                            )
+                else:
+                    apply_patch(path, op, value)
+
+            if payload.get("p") == "response/status" and payload.get("v") == "FINISHED":
+                break
+
+        # When the snapshot never named fragment types, fall back to every
+        # fragment: an untyped stream is better than an empty answer.
+        selected = response_fragment_ids or set(order)
+        return "".join(
+            "".join(fragments[fid]) for fid in order if fid in selected
+        ).strip()
 
 
 # Singleton instance (credentials set via configure())
