@@ -19,6 +19,9 @@ from pydantic import BaseModel, Field
 from open_notebook.ai.models import ProcessingFlags
 from open_notebook.exceptions import OpenNotebookError
 from open_notebook.services.stt_service import stt_service
+from open_notebook.services.transcript_post_processor import (
+    transcript_post_processor,
+)
 from open_notebook.services.tts_service import tts_service
 from open_notebook.speech.client import available as speech_available
 
@@ -190,6 +193,50 @@ async def stt_languages():
     except Exception as e:  # noqa: BLE001
         logger.error(f"STT languages error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list languages: {e}")
+
+
+class TranscriptPostProcessRequest(BaseModel):
+    transcript: str = Field(..., description="Raw STT transcript to clean up")
+    notebook_id: str = Field(..., description="Notebook ID for the DeepSeek session")
+    language: str = Field(default="en", description="BCP-47 language tag")
+
+
+class TranscriptPostProcessResponse(BaseModel):
+    ok: bool
+    cleaned_transcript: Optional[str] = None
+    original_length: int = 0
+    cleaned_length: int = 0
+    error: Optional[str] = None
+
+
+@router.post("/stt/postprocess", response_model=TranscriptPostProcessResponse)
+async def stt_postprocess(request: TranscriptPostProcessRequest):
+    """Post-process an STT transcript via DeepSeek-web (C13).
+
+    Cleans up punctuation, casing, filler words, false starts, and
+    formats numbers/dates. Session-aware via the notebook's DeepSeek
+    session series.
+    """
+    try:
+        result = await transcript_post_processor.postprocess(
+            transcript=request.transcript,
+            notebook_id=request.notebook_id,
+            language=request.language,
+        )
+        return TranscriptPostProcessResponse(
+            ok=result.ok,
+            cleaned_transcript=result.cleaned_transcript,
+            original_length=result.original_length,
+            cleaned_length=result.cleaned_length,
+            error=result.error,
+        )
+    except OpenNotebookError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"transcript post-process error: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Transcript post-processing failed: {e}"
+        )
 
 
 @router.get("/tts/status", response_model=Dict[str, Any])
