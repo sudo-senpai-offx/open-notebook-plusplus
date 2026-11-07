@@ -371,21 +371,36 @@ class DeepSeekDirectService:
         The stream sends a full snapshot once (``{"v": {"response": ...}}``)
         and then incremental patches, e.g.
         ``{"p": "response/fragments/-1/content", "o": "APPEND", "v": "..."}``.
+
+        Continuation patches drop ``p`` entirely and send only
+        ``{"v": "..."}``. The client is expected to append to the fragment
+        content it touched last; treating those as noise truncated every
+        answer at the first continuation - "one two three four five" came
+        back as "one two".
+
         Only ``RESPONSE`` fragments are kept; ``THINK`` fragments are the
         model's reasoning and are not part of the answer.
         """
         fragments: Dict[str, List[str]] = {}
         order: List[str] = []
         response_fragment_ids: set[str] = set()
+        # Concrete path of the last fragment a patch wrote to. It is the
+        # only safe target for the p-less continuation events; ``None``
+        # until something has been written.
+        active_content_path: Optional[str] = None
 
-        def apply_patch(path: str, op: str, value: Any) -> None:
+        def content_path(fid: str) -> str:
+            return f"response/fragments/{fid}/content"
+
+        def apply_patch(path: str, op: str, value: Any) -> Optional[str]:
+            """Apply one patch, returning the fragment path it touched."""
             parts = path.split("/")
             if len(parts) < 3 or parts[0] != "response" or parts[1] != "fragments":
-                return
+                return None
             ref = parts[2]
             if ref == "-1":
                 if not order:
-                    return
+                    return None
                 fid = order[-1]
             else:
                 fid = ref
@@ -393,11 +408,12 @@ class DeepSeekDirectService:
                 fragments[fid] = [""]
                 order.append(fid)
             if not isinstance(value, str):
-                return
+                return None
             if op == "APPEND":
                 fragments[fid].append(value)
             else:
                 fragments[fid] = [value]
+            return content_path(fid)
 
         for raw_line in resp.iter_lines(decode_unicode=True):
             # requests types iter_lines() as bytes even when decode_unicode
@@ -424,6 +440,10 @@ class DeepSeekDirectService:
                     fragments[fid] = [fragment.get("content") or ""]
                     if fragment.get("type") == "RESPONSE":
                         response_fragment_ids.add(fid)
+                    # A snapshot may be followed straight by p-less
+                    # continuations, so the last fragment it named is the
+                    # target from the very first one.
+                    active_content_path = content_path(fid)
 
             path = payload.get("p")
             if isinstance(path, str):
@@ -432,13 +452,21 @@ class DeepSeekDirectService:
                 if op == "BATCH" and isinstance(value, list):
                     for item in value:
                         if isinstance(item, dict) and isinstance(item.get("p"), str):
-                            apply_patch(
+                            touched = apply_patch(
                                 item["p"],
                                 item.get("o") or "SET",
                                 item.get("v"),
                             )
+                            active_content_path = touched or active_content_path
                 else:
-                    apply_patch(path, op, value)
+                    touched = apply_patch(path, op, value)
+                    active_content_path = touched or active_content_path
+            elif active_content_path and isinstance(payload.get("v"), str):
+                # Spatial shorthand: no ``p`` means "same fragment as the
+                # patch before this one". Non-fragment patches (status,
+                # token usage, the BATCH on ``response``) never become
+                # active, so they cannot swallow streamed text.
+                apply_patch(active_content_path, "APPEND", payload["v"])
 
             if payload.get("p") == "response/status" and payload.get("v") == "FINISHED":
                 break

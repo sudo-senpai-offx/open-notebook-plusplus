@@ -208,10 +208,11 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        "DeepSeek-web requires Proof-of-Work challenge response. "
-                        "Direct API mode does not yet support PoW solving. "
-                        "Enable pc_fallback=true to use browser-use on PC, "
-                        "or re-log in to chat.deepseek.com and refresh credentials."
+                        "DeepSeek-web issued a Proof-of-Work challenge that "
+                        "could not be solved. Install the solver on this "
+                        "device (pip install deepseek-pow wasmtime), enable "
+                        "pc_fallback=true to use browser-use on the PC, or "
+                        "re-log in to chat.deepseek.com and refresh credentials."
                     ),
                 )
 
