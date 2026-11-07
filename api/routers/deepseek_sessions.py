@@ -4,6 +4,8 @@ Endpoints:
   POST   /api/deepseek-sessions        — list or create a DeepSeek session
   DELETE /api/deepseek-sessions/{id}   — one-way cascade: archive ON++ row
                                          + delete DeepSeek web session
+  POST   /api/deepseek-sessions/synthetic-data — generate synthetic training
+                                         pairs via DeepSeek-web (C10)
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from open_notebook.exceptions import OpenNotebookError
 from open_notebook.services.deepseek_session_service import (
     deepseek_session_service,
 )
+from open_notebook.services.synthetic_data_generator import synthetic_data_generator
 
 router = APIRouter()
 
@@ -135,4 +138,49 @@ async def delete_deepseek_session(session_id: str):
         logger.error(f"Delete deepseek session {session_id} error: {e}")
         raise HTTPException(
             status_code=500, detail=f"Failed to delete deepseek session: {e}"
+        )
+
+
+class SyntheticDataRequest(BaseModel):
+    notebook_id: str = Field(..., description="Notebook ID for the DeepSeek session")
+    topic: str = Field(..., description="Topic for synthetic data generation")
+    difficulty: int = Field(default=3, ge=1, le=5, description="1=beginner, 5=expert")
+    count: int = Field(
+        default=20, ge=1, le=100, description="Number of pairs to generate"
+    )
+
+
+class SyntheticDataResponse(BaseModel):
+    ok: bool
+    pairs: List[dict] = Field(default_factory=list)
+    count: int = 0
+    error: Optional[str] = None
+
+
+@router.post("/deepseek-sessions/synthetic-data", response_model=SyntheticDataResponse)
+async def generate_synthetic_data(request: SyntheticDataRequest):
+    """Generate synthetic training pairs via DeepSeek-web (C10).
+
+    Uses the notebook's DeepSeek session series (classification: tiny_training).
+    Output: JSON array of {instruction, response} objects for tiny training.
+    """
+    try:
+        result = await synthetic_data_generator.generate(
+            topic=request.topic,
+            notebook_id=request.notebook_id,
+            difficulty=request.difficulty,
+            count=request.count,
+        )
+        return SyntheticDataResponse(
+            ok=result.ok,
+            pairs=result.pairs,
+            count=result.count,
+            error=result.error,
+        )
+    except OpenNotebookError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"synthetic data error: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Synthetic data generation failed: {e}"
         )
