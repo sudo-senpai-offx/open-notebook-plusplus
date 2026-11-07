@@ -29,6 +29,7 @@ from open_notebook.exceptions import (
     NotFoundError,
     OpenNotebookError,
 )
+from open_notebook.services.deepseek_direct_service import pow_solver_available
 
 router = APIRouter()
 
@@ -182,7 +183,7 @@ async def get_models(
         else:
             models = await Model.get_all()
 
-        return [
+        result = [
             ModelResponse(
                 id=model.id,
                 name=model.name,
@@ -194,6 +195,32 @@ async def get_models(
             )
             for model in models
         ]
+
+        # Append deepseek-web as a virtual language model when the device can
+        # actually serve it (credentials configured + PoW solver available).
+        # This makes it selectable in the ModelSelector for notebook chat.
+        if type is None or type == "language":
+            try:
+                flags = await ProcessingFlags.get_instance()
+                configured = bool(
+                    flags.deepseek_ds_session_id and flags.deepseek_authorization_token
+                )
+                if configured and pow_solver_available():
+                    result.append(
+                        ModelResponse(
+                            id="deepseek-web",
+                            name="DeepSeek-web (free)",
+                            provider="deepseek-web",
+                            type="language",
+                            credential=None,
+                            created="",
+                            updated="",
+                        )
+                    )
+            except Exception:  # noqa: BLE001
+                logger.debug("deepseek-web virtual model not added")
+
+        return result
     except HTTPException:
         raise
     except OpenNotebookError:
@@ -375,7 +402,6 @@ async def update_default_models(defaults_data: DefaultModelsResponse):
             default_tools_model=defaults.default_tools_model,  # type: ignore[attr-defined]
         )
 
-
     except HTTPException:
         raise
     except OpenNotebookError:
@@ -385,6 +411,7 @@ async def update_default_models(defaults_data: DefaultModelsResponse):
         raise HTTPException(
             status_code=500, detail=f"Error updating default models: {str(e)}"
         )
+
 
 @router.get("/processing-flags", response_model=dict)
 async def get_processing_flags():
@@ -456,7 +483,9 @@ async def refresh_session():
 
         now = datetime.now(timezone.utc).isoformat()
 
-        session.session_id = session.session_id or f"onb-{int(datetime.now(timezone.utc).timestamp())}"
+        session.session_id = (
+            session.session_id or f"onb-{int(datetime.now(timezone.utc).timestamp())}"
+        )
         session.last_refresh_at = now
         session.updated_at = now
 
