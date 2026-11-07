@@ -935,7 +935,7 @@ export const ptBR = {
     deepseekConfigSuccess: "Configuration Success",
     deepseekConfigFailed: "Failed to configure credentials",
     deepseekPowRequired: "Proof-of-Work Required",
-    deepseekPowRequiredDesc: "DeepSeek-web requires a Proof-of-Work challenge response. Direct API mode does not yet support PoW solving.",
+    deepseekPowRequiredDesc: "DeepSeek-web requires a Proof-of-Work challenge that this device cannot solve. Install the solver with pip install deepseek-pow wasmtime, or use PC fallback (browser-use on your x86 machine).",
     deepseekSetupNeededDesc: "Configure DeepSeek-web credentials below. Log in to chat.deepseek.com in a browser, copy the ds_session_id cookie and authorization Bearer token from DevTools Network tab, then enter them above.",
     sessionStatus: "Browser Session Status",
     sessionStatusDesc: "Processing and session state for this device.",

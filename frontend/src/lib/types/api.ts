@@ -305,6 +305,7 @@ export interface DeepSeekSessionStatus {
   manual_login_required: boolean
   rate_limited: boolean
   pow_required: boolean
+  pow_solver_available: boolean
 }
 
 export interface DeepSeekConfigureRequest {

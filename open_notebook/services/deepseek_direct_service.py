@@ -57,6 +57,23 @@ _BASE_HEADERS = {
 }
 
 
+def pow_solver_available() -> bool:
+    """Return whether this interpreter can solve DeepSeek HashV1 challenges.
+
+    A phone installed without the optional solver looks identical to a
+    working one until the first challenge, so the session endpoint asks
+    here instead of assuming. Importing the package is the check: the
+    registry builds its solvers at import time and the HashV1 solver
+    imports ``wasmtime``, so either missing dependency raises ImportError.
+    """
+    try:
+        import deepseek_pow  # noqa: F401
+        import wasmtime  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _solve_pow(challenge_data: Dict[str, Any]) -> Optional[str]:
     """Solve a ``DeepSeekHashV1`` challenge and return the header value.
 
@@ -380,6 +397,12 @@ class DeepSeekDirectService:
 
         Only ``RESPONSE`` fragments are kept; ``THINK`` fragments are the
         model's reasoning and are not part of the answer.
+
+        With thinking enabled the snapshot can carry only a ``THINK``
+        fragment and the answer arrives later as a whole fragment via
+        ``{"p": "response/fragments", "o": "APPEND", "v": [{"id": ...}]}``.
+        That path names no single fragment, so it used to be discarded and
+        the answer came back empty.
         """
         fragments: Dict[str, List[str]] = {}
         order: List[str] = []
@@ -391,6 +414,23 @@ class DeepSeekDirectService:
 
         def content_path(fid: str) -> str:
             return f"response/fragments/{fid}/content"
+
+        def record_fragment(fragment: Any, replace: bool) -> Optional[str]:
+            """Register one fragment from a snapshot or a list append."""
+            if not isinstance(fragment, dict) or fragment.get("id") is None:
+                return None
+            fid = str(fragment["id"])
+            if fid not in fragments:
+                fragments[fid] = [""]
+                order.append(fid)
+            content = fragment.get("content") or ""
+            if replace:
+                fragments[fid] = [content]
+            else:
+                fragments[fid].append(content)
+            if fragment.get("type") == "RESPONSE":
+                response_fragment_ids.add(fid)
+            return content_path(fid)
 
         def apply_patch(path: str, op: str, value: Any) -> Optional[str]:
             """Apply one patch, returning the fragment path it touched."""
@@ -432,24 +472,27 @@ class DeepSeekDirectService:
             if isinstance(snapshot, dict) and "response" in snapshot:
                 inner = snapshot["response"] or {}
                 for fragment in inner.get("fragments") or []:
-                    if not isinstance(fragment, dict):
-                        continue
-                    fid = str(fragment.get("id"))
-                    if fid not in fragments:
-                        order.append(fid)
-                    fragments[fid] = [fragment.get("content") or ""]
-                    if fragment.get("type") == "RESPONSE":
-                        response_fragment_ids.add(fid)
+                    touched = record_fragment(fragment, replace=True)
                     # A snapshot may be followed straight by p-less
                     # continuations, so the last fragment it named is the
                     # target from the very first one.
-                    active_content_path = content_path(fid)
+                    active_content_path = touched or active_content_path
 
             path = payload.get("p")
             if isinstance(path, str):
                 op = payload.get("o") or "SET"
                 value = payload.get("v")
-                if op == "BATCH" and isinstance(value, list):
+                if (
+                    path == "response/fragments"
+                    and op == "APPEND"
+                    and isinstance(value, list)
+                ):
+                    # Whole fragments appended after the snapshot - how the
+                    # answer arrives when the snapshot held only THINK.
+                    for fragment in value:
+                        touched = record_fragment(fragment, replace=False)
+                        active_content_path = touched or active_content_path
+                elif op == "BATCH" and isinstance(value, list):
                     for item in value:
                         if isinstance(item, dict) and isinstance(item.get("p"), str):
                             touched = apply_patch(

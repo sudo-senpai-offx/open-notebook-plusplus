@@ -116,6 +116,36 @@ def test_read_sse_skips_thinking_fragments() -> None:
     assert DeepSeekDirectService._read_sse(_StubResponse(lines)) == "answer"
 
 
+def test_read_sse_appends_whole_fragment_after_thinking_snapshot() -> None:
+    """Thinking mode: the snapshot holds only THINK, the answer comes later.
+
+    The answer arrives as a whole fragment on the collection path, which
+    names no single fragment. Ignoring it returned an empty answer.
+    """
+    lines = [
+        'data: {"v":{"response":{"fragments":['
+        '{"id":1,"type":"THINK","content":"weighing options"}]}}}',
+        'data: {"p":"response/fragments","o":"APPEND","v":['
+        '{"id":2,"type":"RESPONSE","content":"the answer"}]}',
+        'data: {"v":" plus more"}',
+        'data: {"p":"response/status","o":"SET","v":"FINISHED"}',
+    ]
+    assert (
+        DeepSeekDirectService._read_sse(_StubResponse(lines)) == "the answer plus more"
+    )
+
+
+def test_read_sse_fragment_append_without_id_is_ignored() -> None:
+    """A malformed append must not create a phantom "None" fragment."""
+    lines = [
+        'data: {"v":{"response":{"fragments":['
+        '{"id":2,"type":"RESPONSE","content":"kept"}]}}}',
+        'data: {"p":"response/fragments","o":"APPEND","v":['
+        '{"type":"RESPONSE","content":"dropped"}]}',
+    ]
+    assert DeepSeekDirectService._read_sse(_StubResponse(lines)) == "kept"
+
+
 def test_read_sse_untyped_fragments_are_kept() -> None:
     lines = [
         'data: {"v":{"response":{"fragments":[{"id":1,"content":"plain"}]}}}',

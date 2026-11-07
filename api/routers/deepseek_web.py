@@ -32,6 +32,7 @@ from open_notebook.services.deepseek_direct_service import (
 )
 from open_notebook.services.deepseek_direct_service import (
     deepseek_direct_service,
+    pow_solver_available,
 )
 from open_notebook.services.prompter_service import prompter_service
 from open_notebook.services.quota_tracker import quota_tracker
@@ -71,7 +72,10 @@ class DeepSeekWebSessionStatus(BaseModel):
     credentials_configured: bool
     manual_login_required: bool
     rate_limited: bool
+    # True only when a challenge would arrive and this device cannot answer
+    # it. Credentials alone are not a usable session.
     pow_required: bool
+    pow_solver_available: bool
 
 
 class DeepSeekCredentials(BaseModel):
@@ -403,17 +407,24 @@ async def deepseek_web_pc_fallback(
 
 @router.get("/chat/deepseek-web/session", response_model=DeepSeekWebSessionStatus)
 async def deepseek_web_session_status() -> DeepSeekWebSessionStatus:
-    """Return current DeepSeek-web session/credential status."""
+    """Return current DeepSeek-web session/credential status.
+
+    ``pow_required`` used to be hardcoded false, which told the UI that
+    everything was fine even on a device where the solver was missing and
+    every chat would fail at the challenge. Report the real capability.
+    """
     try:
         flags = await ProcessingFlags.get_instance()
         configured = bool(
             flags.deepseek_ds_session_id and flags.deepseek_authorization_token
         )
+        solver = pow_solver_available()
         return DeepSeekWebSessionStatus(
             credentials_configured=configured,
             manual_login_required=not configured,
             rate_limited=False,
-            pow_required=False,
+            pow_required=configured and not solver,
+            pow_solver_available=solver,
         )
     except Exception as e:  # noqa: BLE001
         logger.error(f"DeepSeek-web session status error: {e}")
