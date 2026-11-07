@@ -29,13 +29,11 @@ from open_notebook.exceptions import (
 )
 from open_notebook.graphs.chat import graph as chat_graph
 from open_notebook.services.deepseek_direct_service import (
-    configure as configure_direct,
-)
-from open_notebook.services.deepseek_direct_service import (
-    deepseek_direct_service,
     pow_solver_available,
 )
-from open_notebook.services.deepseek_web_service import deepseek_web_service
+from open_notebook.services.deepseek_session_service import (
+    deepseek_session_service,
+)
 from open_notebook.services.prompter_service import prompter_service
 from open_notebook.services.quota_tracker import quota_tracker
 from open_notebook.utils import token_count
@@ -520,12 +518,11 @@ async def execute_chat(request: ExecuteChatRequest):
         user_message = HumanMessage(content=request.message, id=str(uuid4()))
         state_values["messages"].append(user_message)
 
-        # --- DeepSeek-web routing ---
-        # Prefer the direct session-cookie + Proof-of-Work path
-        # (deepseek_direct_service) which works on this device without a
-        # browser. Falls back to browser-use (run_deepseek) only when the
-        # PoW solver is unavailable, e.g. on a PC or a phone without the
-        # optional deepseek-pow/wasmtime sidecar.
+        # --- DeepSeek-web routing via deepseek_session_service (A1, A3, A5) ---
+        # The service manages the session series lifecycle: lazy creation,
+        # token budget tracking (1M cap per DeepSeek session), continuation
+        # (warn at 80%, new session at 95%), auto-delete of retired sessions,
+        # and rate limiting (max 1-2 concurrent).
         if model_override == "deepseek-web":
             # Quota check for deepseek-web
             if not await quota_tracker.can_request("deepseek"):
@@ -553,62 +550,75 @@ async def execute_chat(request: ExecuteChatRequest):
                 message_type="chat",
             )
 
-            flags = await ProcessingFlags.get_instance()
-            use_solver = pow_solver_available()
-
-            if (
-                use_solver
-                and flags.deepseek_ds_session_id
-                and flags.deepseek_authorization_token
-            ):
-                # Direct session-cookie + PoW path (works on this device).
-                configure_direct(
-                    flags.deepseek_ds_session_id,
-                    flags.deepseek_authorization_token,
-                )
-                ds_result = deepseek_direct_service.send_message(
-                    message=transformed_prompt,
-                    thinking_enabled=False,
-                    timeout=120.0,
-                )
-            else:
-                # Browser-use path (needs Chromium; PC fallback).
-                ds_result = deepseek_web_service.run_deepseek(
-                    message=transformed_prompt,
-                    headless=True,
-                    timeout=180.0,
-                )
-
-            # Handle errors (common to both paths)
-            if ds_result.get("manual_login_required"):
+            # PoW solver must be available on this device; no PC browser-use
+            # fallback here (that path stays in /api/chat/deepseek-web/pc-fallback).
+            if not pow_solver_available():
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        "DeepSeek-web session expired. Manual login required: "
-                        "open chat.deepseek.com in a browser, log in, and the session "
-                        "cookies will be persisted for future requests."
+                        "DeepSeek PoW solver unavailable on this device. "
+                        "Install deepseek-pow + wasmtime, or use a different model."
                     ),
                 )
 
-            if ds_result.get("rate_limited"):
+            try:
+                nb_id = str(notebook.id) if notebook and notebook.id else ""
+                send_result = await deepseek_session_service.send_message(
+                    notebook_id=nb_id,
+                    classification="chat",
+                    message=transformed_prompt,
+                    chat_session_id=request.session_id,
+                    thinking_enabled=False,
+                    timeout=120.0,
+                )
+            except OpenNotebookError as exc:
+                msg = str(exc)
+                if "rate limited" in msg.lower():
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            "DeepSeek-web rate limited. "
+                            "Wait for quota reset or enable 'Allow local processing' "
+                            "in Settings to use local models."
+                        ),
+                    )
+                if "expired" in msg.lower() or "login" in msg.lower():
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(
+                            "DeepSeek-web session expired. Manual login required: "
+                            "open chat.deepseek.com in a browser, log in, and the session "
+                            "cookies will be persisted for future requests."
+                        ),
+                    )
                 raise HTTPException(
-                    status_code=429,
-                    detail=(
-                        "DeepSeek-web rate limited. "
-                        "Wait for quota reset or enable 'Allow local processing' "
-                        "in Settings to use local models."
-                    ),
+                    status_code=502, detail=f"DeepSeek-web error: {msg}"
                 )
 
-            response_text = ds_result.get("response") or ""
-            if not response_text and ds_result.get("error"):
+            response_text = send_result.response
+            if not response_text:
                 raise HTTPException(
                     status_code=502,
-                    detail=f"DeepSeek-web error: {ds_result['error']}",
+                    detail="Empty response from DeepSeek-web.",
                 )
 
             # Increment quota
             await quota_tracker.increment("deepseek", 1)
+
+            # Link the ON++ chat session to its DeepSeek session series.
+            try:
+                nb_query = await repo_query(
+                    "SELECT out FROM refers_to WHERE in = $sid",
+                    {"sid": ensure_record_id(full_session_id)},
+                )
+                if nb_query:
+                    # Ensure chat_session has deepseek_session_series_id set.
+                    session.deepseek_session_series_id = (
+                        send_result.deepseek_session_id or ""
+                    )
+                    await session.save()
+            except Exception as exc:  # noqa: BLE001 - never fail a turn over this
+                logger.warning(f"Could not link chat session to deepseek series: {exc}")
 
             # Build assistant message
             from langchain_core.messages import AIMessage
@@ -640,7 +650,11 @@ async def execute_chat(request: ExecuteChatRequest):
                     kept_exchanges=1,
                     dropped_exchanges=0,
                     total_exchanges=1,
-                    reason="deepseek-web browser-use",
+                    reason=(
+                        "deepseek-web continuation"
+                        if send_result.is_continuation
+                        else "deepseek-web"
+                    ),
                 ),
             )
 

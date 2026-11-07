@@ -36,6 +36,7 @@ from api.routers import (
     chat,
     config,
     credentials,
+    deepseek_sessions,
     deepseek_web,
     embedding,
     embedding_rebuild,
@@ -293,9 +294,7 @@ async def lifespan(app: FastAPI):
                     increment_attempt=True,
                     checkpoint=checkpoint.checkpoint if checkpoint else {},
                 )
-                logger.info(
-                    f"resume: re-queued {cmd_id} (attempt {attempts + 1}/3)"
-                )
+                logger.info(f"resume: re-queued {cmd_id} (attempt {attempts + 1}/3)")
             else:
                 await JobCheckpoint.upsert_for_command(
                     cmd_id,
@@ -496,6 +495,7 @@ app.include_router(notebooks.router, prefix="/api", tags=["notebooks"])
 app.include_router(search.router, prefix="/api", tags=["search"])
 app.include_router(services.router, prefix="/api", tags=["services"])
 app.include_router(deepseek_web.router, prefix="/api", tags=["deepseek-web"])
+app.include_router(deepseek_sessions.router, prefix="/api", tags=["deepseek-sessions"])
 app.include_router(models.router, prefix="/api", tags=["models"])
 app.include_router(transformations.router, prefix="/api", tags=["transformations"])
 app.include_router(notes.router, prefix="/api", tags=["notes"])
