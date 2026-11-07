@@ -5,7 +5,7 @@
     "flashcard.generate": {
       "description": "Generate Q&A flashcard pairs from source text via DeepSeek-web.",
       "variables": ["source_text", "language", "card_type", "count"],
-      "template": "You are a flashcard generator. Convert the source text into Q&A flashcards.\n\nSource text:\n{source_text}\n\nLanguage: {language}\nCard type: {card_type}\n\nGenerate {count} flashcards. For each card, output a JSON object with:\n- \"front\": the question or prompt\n- \"back\": the answer\n- For cloze cards: \"cloze_text\" with the full text and \"{{{c1::answer}}}\" markers\n\nOutput ONLY a JSON array of card objects, nothing else. No markdown fences, no explanation.\n\nCards:"
+      "template": "You are a flashcard generator. Convert the source text into Q&A flashcards.\n\nSource text:\n{source_text}\n\nLanguage: {language}\nCard type: {card_type}\n\nGenerate {count} flashcards. For each card, output a JSON object with:\n- \"front\": the question or prompt\n- \"back\": the answer\n- For cloze cards: \"cloze_text\" with the full text and \"[[c1::answer]]\" markers\n\nOutput ONLY a JSON array of card objects, nothing else. No markdown fences, no explanation.\n\nCards:"
     },
     "insight.generate": {
       "description": "Extract key insights from source text via DeepSeek-web.",
