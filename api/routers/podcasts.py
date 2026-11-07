@@ -3,7 +3,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.podcast_service import (
     PodcastGenerationRequest,
@@ -14,6 +14,7 @@ from open_notebook.ai.models import Model
 from open_notebook.exceptions import OpenNotebookError
 from open_notebook.podcasts.audio_paths import resolve_contained_audio_path
 from open_notebook.podcasts.models import PodcastEpisode
+from open_notebook.services.podcast_script_service import podcast_script_generator
 
 router = APIRouter()
 
@@ -395,6 +396,51 @@ async def retry_podcast_episode(episode_id: str):
     except Exception as e:
         logger.error(f"Error retrying podcast episode: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to retry episode")
+
+
+class PodcastScriptRequest(BaseModel):
+    notebook_id: str = Field(..., description="Notebook ID for the DeepSeek session")
+    source_text: str = Field(..., description="Source text for the podcast script")
+    tone: str = Field(default="conversational", description="Script tone")
+    duration: int = Field(
+        default=10, ge=1, le=120, description="Target duration in minutes"
+    )
+    speakers: str = Field(default="Host, Guest", description="Speaker names")
+
+
+class PodcastScriptResponse(BaseModel):
+    ok: bool
+    script: Optional[str] = None
+    error: Optional[str] = None
+
+
+@router.post("/podcasts/script", response_model=PodcastScriptResponse)
+async def generate_podcast_script(request: PodcastScriptRequest):
+    """Generate a podcast script via DeepSeek-web → TTS render (C11).
+
+    Writes a multi-speaker conversational script from source text. Uses
+    the notebook's DeepSeek session series (classification: podcast).
+    """
+    try:
+        result = await podcast_script_generator.generate(
+            source_text=request.source_text,
+            notebook_id=request.notebook_id,
+            tone=request.tone,
+            duration=request.duration,
+            speakers=request.speakers,
+        )
+        return PodcastScriptResponse(
+            ok=result.ok,
+            script=result.script,
+            error=result.error,
+        )
+    except OpenNotebookError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"podcast script error: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Podcast script generation failed: {e}"
+        )
 
 
 @router.delete("/podcasts/episodes/{episode_id}")

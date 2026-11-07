@@ -51,7 +51,9 @@ from api.routers import (
     notebooks,
     notes,
     podcasts,
+    preprocessor,
     processing,
+    prompt_library,
     providers,
     review,
     search,
@@ -63,6 +65,7 @@ from api.routers import (
     speaker_profiles,
     sync,
     transformations,
+    tts_stt,
 )
 from api.routers import commands as commands_router
 from open_notebook.database.async_migrate import AsyncMigrationManager
@@ -496,6 +499,7 @@ app.include_router(search.router, prefix="/api", tags=["search"])
 app.include_router(services.router, prefix="/api", tags=["services"])
 app.include_router(deepseek_web.router, prefix="/api", tags=["deepseek-web"])
 app.include_router(deepseek_sessions.router, prefix="/api", tags=["deepseek-sessions"])
+app.include_router(tts_stt.router, prefix="/api", tags=["tts-stt"])
 app.include_router(models.router, prefix="/api", tags=["models"])
 app.include_router(transformations.router, prefix="/api", tags=["transformations"])
 app.include_router(notes.router, prefix="/api", tags=["notes"])
@@ -516,6 +520,8 @@ app.include_router(sites.router, prefix="/api", tags=["sites"])
 app.include_router(insights.router, prefix="/api", tags=["insights"])
 app.include_router(commands_router.router, prefix="/api", tags=["commands"])
 app.include_router(podcasts.router, prefix="/api", tags=["podcasts"])
+app.include_router(preprocessor.router, prefix="/api", tags=["preprocessor"])
+app.include_router(prompt_library.router, prefix="/api", tags=["prompt-library"])
 app.include_router(episode_profiles.router, prefix="/api", tags=["episode-profiles"])
 app.include_router(speaker_profiles.router, prefix="/api", tags=["speaker-profiles"])
 app.include_router(chat.router, prefix="/api", tags=["chat"])

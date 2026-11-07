@@ -1,0 +1,46 @@
+{
+  "version": "1.0.0",
+  "description": "Versioned prompt library for open-notebook-plusplus v1.16.",
+  "prompts": {
+    "flashcard.generate": {
+      "description": "Generate Q&A flashcard pairs from source text via DeepSeek-web.",
+      "variables": ["source_text", "language", "card_type", "count"],
+      "template": "You are a flashcard generator. Convert the source text into Q&A flashcards.\n\nSource text:\n{source_text}\n\nLanguage: {language}\nCard type: {card_type}\n\nGenerate {count} flashcards. For each card, output a JSON object with:\n- \"front\": the question or prompt\n- \"back\": the answer\n- For cloze cards: \"cloze_text\" with the full text and \"{{{c1::answer}}}\" markers\n\nOutput ONLY a JSON array of card objects, nothing else. No markdown fences, no explanation.\n\nCards:"
+    },
+    "insight.generate": {
+      "description": "Extract key insights from source text via DeepSeek-web.",
+      "variables": ["source_text", "depth_level"],
+      "template": "You are an insight analyst. Extract the key insights from the source text below.\n\nSource text:\n{source_text}\n\nDepth level: {depth_level} (1=surface, 3=deep)\n\nOutput a JSON array of insight objects, each with:\n- \"insight_type\": one of \"Key Finding\", \"Surprise\", \"Pattern\", \"Implication\", \"Question\"\n- \"content\": the insight text, one sentence\n- \"confidence\": 0.0 to 1.0\n\nOutput ONLY the JSON array, nothing else.\n\nInsights:"
+    },
+    "podcast.script": {
+      "description": "Write a multi-speaker podcast script from source text via DeepSeek-web.",
+      "variables": ["source_text", "tone", "duration", "speakers"],
+      "template": "You are a podcast scriptwriter. Convert the source text into a natural, conversational podcast script.\n\nSource text:\n{source_text}\n\nTone: {tone}\nTarget duration: {duration} minutes\nSpeakers: {speakers}\n\nWrite a script with speaker labels (e.g., \"HOST:\", \"GUEST:\") marking each turn. Include stage directions in brackets where helpful (e.g., [intro music], [laughter], [pause]). Make it sound spoken, not written: contractions, fragments, natural transitions.\n\nOutput ONLY the script, nothing else. No markdown fences, no introduction, no conclusion.\n\nScript:"
+    },
+    "transformation.apply": {
+      "description": "Rewrite/summarize/analyze source text via DeepSeek-web.",
+      "variables": ["source_text", "transform_type", "target_audience"],
+      "template": "You are an editor. Apply the following transformation to the source text.\n\nSource text:\n{source_text}\n\nTransform type: {transform_type}\nTarget audience: {target_audience}\n\nOutput ONLY the transformed text, nothing else. No preamble, no explanation.\n\nResult:"
+    },
+    "source.summarize": {
+      "description": "Summarize a document via DeepSeek-web.",
+      "variables": ["source_text", "max_length"],
+      "template": "You are a summarizer. Summarize the source text below.\n\nSource text:\n{source_text}\n\nMaximum length: {max_length} words\n\nOutput ONLY the summary, nothing else. No preamble, no explanation.\n\nSummary:"
+    },
+    "preprocess.extract": {
+      "description": "Extract Markdown from file content via DeepSeek-web (context preprocessing).",
+      "variables": ["file_content", "file_type", "ocr_language"],
+      "template": "You are a document extractor. Convert the following file content into clean Markdown.\n\nFile type: {file_type}\nOCR language: {ocr_language}\n\nFile content:\n{file_content}\n\nOutput ONLY the Markdown, nothing else. Preserve structure: headings, lists, tables. Do not add commentary.\n\nMarkdown:"
+    },
+    "training.synthetic": {
+      "description": "Generate synthetic instruction/response pairs for model training via DeepSeek-web.",
+      "variables": ["topic", "difficulty", "count"],
+      "template": "You are a synthetic data generator. Create instruction/response training pairs.\n\nTopic: {topic}\nDifficulty: {difficulty} (1=beginner, 5=expert)\nCount: {count}\n\nOutput ONLY a JSON array of objects with \"instruction\" and \"response\" fields, nothing else.\n\nPairs:"
+    },
+    "transcript.postprocess": {
+      "description": "Clean up STT transcript via DeepSeek-web (punctuation, casing, fillers).",
+      "variables": ["transcript", "language"],
+      "template": "You are a transcript editor. Clean up the following speech-to-text transcript.\n\nTranscript:\n{transcript}\nLanguage: {language}\n\nTasks:\n- Restore punctuation and capitalization\n- Remove filler words (um, uh, like, you know)\n- Fix false starts and self-corrections\n- Format numbers and dates\n- Split into paragraphs\n\nOutput ONLY the cleaned transcript, nothing else.\n\nCleaned transcript:"
+    }
+  }
+}

@@ -11,6 +11,7 @@ from open_notebook.exceptions import (
     NotFoundError,
     OpenNotebookError,
 )
+from open_notebook.services.flashcard_generator import flashcard_generator
 
 router = APIRouter()
 
@@ -286,3 +287,54 @@ async def tombstone_card(card_id: str):
     except Exception as e:
         logger.warning(f"flashcard tombstone failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to tombstone card")
+
+
+class FlashcardGenerateRequest(BaseModel):
+    notebook_id: str = Field(..., description="Notebook ID for the DeepSeek session")
+    source_id: Optional[str] = Field(
+        None, description="Optional source ID to link cards to"
+    )
+    source_text: str = Field(..., description="Source text to generate cards from")
+    language: str = Field(default="en", description="BCP-47 language tag")
+    card_type: str = Field(
+        default="basic", pattern="^(basic|cloze)$", description="basic or cloze"
+    )
+    count: int = Field(
+        default=10, ge=1, le=50, description="Number of cards to generate"
+    )
+
+
+class FlashcardGenerateResponse(BaseModel):
+    ok: bool
+    cards: List[dict] = Field(default_factory=list)
+    count: int = 0
+    error: Optional[str] = None
+
+
+@router.post("/flashcards/generate", response_model=FlashcardGenerateResponse)
+async def generate_cards(request: FlashcardGenerateRequest):
+    """Generate flashcards from source text via DeepSeek-web → local FSRS.
+
+    Cards land as drafts for the approval gate. Uses the notebook's
+    DeepSeek session series (classification: flashcard).
+    """
+    try:
+        result = await flashcard_generator.generate(
+            source_text=request.source_text,
+            notebook_id=request.notebook_id,
+            source_id=request.source_id,
+            language=request.language,
+            card_type=request.card_type,  # type: ignore[arg-type]
+            count=request.count,
+        )
+        return FlashcardGenerateResponse(
+            ok=result.ok,
+            cards=result.cards,
+            count=result.count,
+            error=result.error,
+        )
+    except OpenNotebookError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"flashcard generate error: {e}")
+        raise HTTPException(status_code=500, detail=f"Flashcard generation failed: {e}")
