@@ -1,0 +1,40 @@
+-- Migration 37: DeepSeek session series (A1) + one-way delete (A3).
+--
+-- Why
+--
+-- open-notebook-plusplus wires DeepSeek-web (free tier) as the primary
+-- inference path for notebook chat and other classified sessions
+-- (insight, embedding, tiny_training, podcast, flashcard, stt, tts,
+-- search, source_chat). Each ON++ session maps to a *series* of DeepSeek
+-- web sessions (~1M token cap each). When a session approaches the cap,
+-- a continuation session is spun up and the old DeepSeek session is
+-- auto-deleted (A3 one-way delete: ON++ delete cascades to DeepSeek,
+-- never the reverse).
+--
+-- This table tracks the mapping ON++ session <-> DeepSeek web session,
+-- token budget per DeepSeek session, and the continuation chain.
+-- `chat_session` gains `deepseek_session_series_id` pointing at the root
+-- DeepSeek session of the series.
+
+DEFINE TABLE IF NOT EXISTS deepseek_sessions SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS notebook_id ON deepseek_sessions TYPE string;
+DEFINE FIELD IF NOT EXISTS deepseek_session_id ON deepseek_sessions TYPE string;
+DEFINE FIELD IF NOT EXISTS classification ON deepseek_sessions TYPE string;
+DEFINE FIELD IF NOT EXISTS token_count ON deepseek_sessions TYPE number DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS parent_deepseek_session_id ON deepseek_sessions TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON deepseek_sessions TYPE string DEFAULT 'active';
+DEFINE FIELD IF NOT EXISTS created_at ON deepseek_sessions TYPE datetime
+    DEFAULT time::now() VALUE time::now();
+DEFINE FIELD IF NOT EXISTS last_used_at ON deepseek_sessions TYPE datetime
+    DEFAULT time::now() VALUE time::now();
+
+DEFINE INDEX IF NOT EXISTS deepseek_sessions_notebook ON deepseek_sessions FIELDS notebook_id;
+DEFINE INDEX IF NOT EXISTS deepseek_sessions_classification ON deepseek_sessions FIELDS classification;
+DEFINE INDEX IF NOT EXISTS deepseek_sessions_parent ON deepseek_sessions FIELDS parent_deepseek_session_id;
+
+-- One row per (notebook_id, deepseek_session_id): no duplicate series rows.
+DEFINE INDEX IF NOT EXISTS deepseek_sessions_unique ON deepseek_sessions FIELDS deepseek_session_id UNIQUE;
+
+-- Link each chat session to its DeepSeek session series root.
+DEFINE FIELD IF NOT EXISTS deepseek_session_series_id ON chat_session TYPE option<string>;
