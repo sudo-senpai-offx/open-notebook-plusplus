@@ -14,7 +14,7 @@ from typing import Optional
 
 from loguru import logger
 
-PROMPTS_PATH = Path(__file__).resolve().parent.parent / "prompts" / "library.json"
+PROMPTS_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "library.json"
 
 
 @dataclass
