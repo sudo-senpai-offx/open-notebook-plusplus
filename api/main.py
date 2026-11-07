@@ -32,6 +32,7 @@ from api.auth import PasswordAuthMiddleware, enforce_require_auth
 from api.middleware import MaxBodySizeMiddleware, get_max_upload_size_bytes
 from api.routers import (
     auth,
+    browser_ai,
     capabilities,
     chat,
     config,
@@ -493,6 +494,7 @@ async def open_notebook_error_handler(request: Request, exc: OpenNotebookError):
 
 # Include routers
 app.include_router(auth.router, prefix="/api", tags=["auth"])
+app.include_router(browser_ai.router, prefix="/api", tags=["browser-ai"])
 app.include_router(config.router, prefix="/api", tags=["config"])
 app.include_router(notebooks.router, prefix="/api", tags=["notebooks"])
 app.include_router(search.router, prefix="/api", tags=["search"])
