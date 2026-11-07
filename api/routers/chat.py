@@ -28,6 +28,13 @@ from open_notebook.exceptions import (
     OpenNotebookError,
 )
 from open_notebook.graphs.chat import graph as chat_graph
+from open_notebook.services.deepseek_direct_service import (
+    configure as configure_direct,
+)
+from open_notebook.services.deepseek_direct_service import (
+    deepseek_direct_service,
+    pow_solver_available,
+)
 from open_notebook.services.deepseek_web_service import deepseek_web_service
 from open_notebook.services.prompter_service import prompter_service
 from open_notebook.services.quota_tracker import quota_tracker
@@ -513,10 +520,12 @@ async def execute_chat(request: ExecuteChatRequest):
         user_message = HumanMessage(content=request.message, id=str(uuid4()))
         state_values["messages"].append(user_message)
 
-        # --- DeepSeek-web (browser-use) routing ---
-        # If the user selected deepseek-web, route through browser-use session
-        # capture instead of the LangGraph graph. This accesses chat.deepseek.com
-        # directly via a headed/headless browser, no API key required.
+        # --- DeepSeek-web routing ---
+        # Prefer the direct session-cookie + Proof-of-Work path
+        # (deepseek_direct_service) which works on this device without a
+        # browser. Falls back to browser-use (run_deepseek) only when the
+        # PoW solver is unavailable, e.g. on a PC or a phone without the
+        # optional deepseek-pow/wasmtime sidecar.
         if model_override == "deepseek-web":
             # Quota check for deepseek-web
             if not await quota_tracker.can_request("deepseek"):
@@ -544,14 +553,33 @@ async def execute_chat(request: ExecuteChatRequest):
                 message_type="chat",
             )
 
-            # Run browser-use subprocess
-            ds_result = deepseek_web_service.run_deepseek(
-                message=transformed_prompt,
-                headless=True,
-                timeout=180.0,
-            )
+            flags = await ProcessingFlags.get_instance()
+            use_solver = pow_solver_available()
 
-            # Handle errors
+            if (
+                use_solver
+                and flags.deepseek_ds_session_id
+                and flags.deepseek_authorization_token
+            ):
+                # Direct session-cookie + PoW path (works on this device).
+                configure_direct(
+                    flags.deepseek_ds_session_id,
+                    flags.deepseek_authorization_token,
+                )
+                ds_result = deepseek_direct_service.send_message(
+                    message=transformed_prompt,
+                    thinking_enabled=False,
+                    timeout=120.0,
+                )
+            else:
+                # Browser-use path (needs Chromium; PC fallback).
+                ds_result = deepseek_web_service.run_deepseek(
+                    message=transformed_prompt,
+                    headless=True,
+                    timeout=180.0,
+                )
+
+            # Handle errors (common to both paths)
             if ds_result.get("manual_login_required"):
                 raise HTTPException(
                     status_code=403,
@@ -585,18 +613,14 @@ async def execute_chat(request: ExecuteChatRequest):
             # Build assistant message
             from langchain_core.messages import AIMessage
 
-            assistant_message = AIMessage(
-                content=response_text, id=str(uuid4())
-            )
+            assistant_message = AIMessage(content=response_text, id=str(uuid4()))
             state_values["messages"].append(assistant_message)
 
             # Persist the turn
             await session.save()
             turn_messages = [user_message, assistant_message]
             try:
-                added = await persist_chat_messages(
-                    full_session_id, turn_messages
-                )
+                added = await persist_chat_messages(full_session_id, turn_messages)
                 if added:
                     logger.info(
                         f"Persisted {added} chat message(s) for {full_session_id}"

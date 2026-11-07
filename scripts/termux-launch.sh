@@ -693,6 +693,13 @@ case "${1:-up}" in
     # shellcheck disable=SC2034
     export ONB_ALLOW_LOCAL="$_ALLOW_LOCAL"
 
+    # Optional launch flag for new profiles (P8): `onb up <profile>` selects
+    # the episode/speaker profile the guest stack activates. Exported into the
+    # guest so termux-stack.sh can apply it (OPEN_NOTEBOOK_PROFILE).
+    # shellcheck disable=SC2034
+    export ONB_PROFILE="${2:-}"
+    [ -n "$ONB_PROFILE" ] && echo "[onb] profile: $ONB_PROFILE"
+
     # Bring up the guest stack, then block so --kill-on-exit has something
     # to reap when Ctrl+C arrives.
     proot-distro login ubuntu -- bash -c '
@@ -790,7 +797,7 @@ case "${1:-up}" in
     sh "$HOME/bin/onb-embed" down >/dev/null 2>&1 || true
     ;;
   *)
-    echo "usage: $0 [up|stop|chat-up|chat-down|chat-status|model-path]"
+    echo "usage: $0 [up [<profile>]|stop|chat-up|chat-down|chat-status|model-path]"
     exit 1
     ;;
 esac

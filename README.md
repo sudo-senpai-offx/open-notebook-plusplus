@@ -438,7 +438,7 @@ This fork builds on the following projects:
 
 ### Bundle Delivery
 
-Bundles are delivered to `/data/local/tmp/plusplus.bundle` on the device and merged via `sh ~/bin/onb-update`. Current bundle: #10 (commit `ff525fd`).
+Bundles are delivered to `/data/local/tmp/plusplus.bundle` on the device and merged via `sh ~/bin/onb-update`. Current bundle: #11 (commit `4376590`).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
