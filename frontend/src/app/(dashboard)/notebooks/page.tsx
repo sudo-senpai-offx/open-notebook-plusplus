@@ -11,6 +11,7 @@ import { Plus, RefreshCw, LayoutGrid, List } from 'lucide-react'
 import { useNotebooks } from '@/lib/hooks/use-notebooks'
 import { CreateNotebookDialog } from '@/components/notebooks/CreateNotebookDialog'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { useNotebookViewStore } from '@/lib/stores/notebook-view-store'
 import { cn } from '@/lib/utils'
@@ -105,34 +106,24 @@ export default function NotebooksPage() {
             </Button>
           </div>
           
-          {/* Field filter chips */}
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant={selectedField === null ? 'secondary' : 'outline'}
-              size="sm"
-              onClick={() => setSelectedField(null)}
-              className="px-3 py-1.5"
+          {/* Field filter Select */}
+          <div className="flex items-center gap-2">
+            <Select
+              value={selectedField ?? ""}
+              onValueChange={(v) => setSelectedField(v === "" ? null : v)}
             >
-              {t('settings.allFields')}
-            </Button>
-            {FIELD_OPTIONS.map((option: { value: string; label: string }) => (
-              <Button
-                key={option.value}
-                variant={
-                  selectedField === option.value ? 'secondary' : 'outline'
-                }
-                size="sm"
-                onClick={() => setSelectedField(option.value)}
-                className={cn(
-                  "px-3 py-1.5",
-                  selectedField === option.value
-                    ? getFieldColor(option.value).badge
-                    : ""
-                )}
-              >
-                {option.label}
-              </Button>
-            ))}
+              <SelectTrigger className="w-48">
+                <SelectValue placeholder={t('settings.fieldPlaceholder')} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">{t('settings.allFields')}</SelectItem>
+                {FIELD_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
         </div>
         

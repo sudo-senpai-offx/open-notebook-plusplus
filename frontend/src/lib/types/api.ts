@@ -561,3 +561,93 @@ export interface TranscriptPostProcessResponse {
   cleaned_length?: number
   error?: string | null
 }
+
+// Study OS — Assessments (Phase 3)
+export interface AssessmentCreate {
+  notebook_id: string
+  field: string
+  type: 'quiz' | 'exam' | 'mock'
+  score: number
+  total_questions?: number
+  correct_answers?: number
+  notes?: string
+}
+
+export interface AssessmentResponse {
+  id: string
+  notebook_id: string
+  field: string
+  type: string
+  score: number
+  total_questions?: number | null
+  correct_answers?: number | null
+  notes?: string | null
+  created_at: string
+}
+
+export interface SpiderwebMetric {
+  field: string
+  score: number
+  quiz: number
+  exam: number
+  reflection: number
+}
+
+export interface SpiderwebMetricsResponse {
+  fields: SpiderwebMetric[]
+}
+
+// Study OS — Timetable (Phase 3)
+export interface TimetableBlockCreate {
+  notebook_id?: string | null
+  title: string
+  activity_type: 'study' | 'flashcard' | 'assessment' | 'break'
+  field?: string | null
+  start_time: string
+  end_time: string
+  is_high_intensity: boolean
+}
+
+export interface TimetableBlockResponse {
+  id: string
+  notebook_id?: string | null
+  title: string
+  activity_type: string
+  field?: string | null
+  start_time: string
+  end_time: string
+  is_high_intensity: boolean
+  created_at: string
+}
+
+export interface BurnoutCheckResponse {
+  date: string
+  high_intensity_hours: number
+  overloaded: boolean
+  limit_hours: number
+  message: string
+}
+
+// Study OS — Dynamic Course Creation (Phase 3)
+export interface DynamicCourseCreate {
+  topic: string
+  field: string
+  estimated_duration_days?: number | null
+  user_preferences?: string | null
+}
+
+export interface DynamicCourseModule {
+  module_title: string
+  module_description: string
+  estimated_hours: number
+  lessons: string[]
+}
+
+export interface DynamicCourseResponse {
+  notebook_id: string
+  topic: string
+  field: string
+  estimated_duration_days: number
+  modules: DynamicCourseModule[]
+  exam_mock_topics: string[]
+}

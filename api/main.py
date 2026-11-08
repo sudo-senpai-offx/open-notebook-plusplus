@@ -31,6 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from api.auth import PasswordAuthMiddleware, enforce_require_auth
 from api.middleware import MaxBodySizeMiddleware, get_max_upload_size_bytes
 from api.routers import (
+    assessments,
     auth,
     browser_ai,
     capabilities,
@@ -517,6 +518,7 @@ app.include_router(processing.router, prefix="/api", tags=["processing"])
 app.include_router(review.router, prefix="/api", tags=["review"])
 app.include_router(metrics.router, prefix="/api", tags=["metrics"])
 app.include_router(settings.router, prefix="/api", tags=["settings"])
+app.include_router(assessments.router, prefix="/api", tags=["assessments"])
 app.include_router(sources.router, prefix="/api", tags=["sources"])
 app.include_router(sites.router, prefix="/api", tags=["sites"])
 app.include_router(insights.router, prefix="/api", tags=["insights"])

@@ -31,6 +31,14 @@ import {
   SyntheticDataResponse,
   TranscriptPostProcessRequest,
   TranscriptPostProcessResponse,
+  AssessmentCreate,
+  AssessmentResponse,
+  SpiderwebMetricsResponse,
+  TimetableBlockCreate,
+  TimetableBlockResponse,
+  BurnoutCheckResponse,
+  DynamicCourseCreate,
+  DynamicCourseResponse,
 } from '@/lib/types/api'
 
 export const settingsApi = {
@@ -238,6 +246,54 @@ export const podcastApi = {
 export const trainingApi = {
   generateSyntheticData: async (data: SyntheticDataRequest) => {
     const response = await apiClient.post<SyntheticDataResponse>('/deepseek-sessions/synthetic-data', data)
+    return response.data
+  },
+}
+
+export const assessmentApi = {
+  create: async (data: AssessmentCreate) => {
+    const response = await apiClient.post<AssessmentResponse>('/assessments', data)
+    return response.data
+  },
+
+  list: async (params?: { notebook_id?: string; field?: string; limit?: number }) => {
+    const searchParams = new URLSearchParams()
+    if (params?.notebook_id) searchParams.set('notebook_id', params.notebook_id)
+    if (params?.field) searchParams.set('field', params.field)
+    if (params?.limit) searchParams.set('limit', String(params.limit))
+    const response = await apiClient.get<AssessmentResponse[]>(`/assessments?${searchParams.toString()}`)
+    return response.data
+  },
+
+  spiderweb: async () => {
+    const response = await apiClient.get<SpiderwebMetricsResponse>('/assessments/spiderweb')
+    return response.data
+  },
+}
+
+export const timetableApi = {
+  create: async (data: TimetableBlockCreate) => {
+    const response = await apiClient.post<TimetableBlockResponse>('/timetable', data)
+    return response.data
+  },
+
+  list: async (params?: { date?: string; notebook_id?: string }) => {
+    const searchParams = new URLSearchParams()
+    if (params?.date) searchParams.set('date', params.date)
+    if (params?.notebook_id) searchParams.set('notebook_id', params.notebook_id)
+    const response = await apiClient.get<TimetableBlockResponse[]>(`/timetable?${searchParams.toString()}`)
+    return response.data
+  },
+
+  burnoutCheck: async (date: string) => {
+    const response = await apiClient.get<BurnoutCheckResponse>(`/timetable/burnout-check?date=${date}`)
+    return response.data
+  },
+}
+
+export const dynamicCourseApi = {
+  create: async (data: DynamicCourseCreate) => {
+    const response = await apiClient.post<DynamicCourseResponse>('/dynamic-course', data)
     return response.data
   },
 }

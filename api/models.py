@@ -991,3 +991,88 @@ class NotebookDeleteResponse(BaseModel):
     deleted_chat_sessions: int = Field(
         ..., description="Number of chat sessions deleted"
     )
+
+
+# Study OS — Assessments (Phase 3)
+class AssessmentCreate(BaseModel):
+    notebook_id: str = Field(..., description="Notebook (course) being assessed")
+    field: str = Field(
+        ...,
+        description="Field of study: art|music|biology|astronomy|geography|general|cultural|custom|unused",
+    )
+    type: Literal["quiz", "exam", "mock"] = Field(..., description="Assessment type")
+    score: int = Field(..., ge=0, le=100, description="Score 0-100")
+    total_questions: Optional[int] = Field(
+        None, ge=1, description="Total number of questions"
+    )
+    correct_answers: Optional[int] = Field(
+        None, ge=0, description="Number of correct answers"
+    )
+    notes: Optional[str] = Field(None, description="Post-completion reflection notes")
+
+
+class AssessmentResponse(BaseModel):
+    id: str
+    notebook_id: str
+    field: str
+    type: str
+    score: int
+    total_questions: Optional[int]
+    correct_answers: Optional[int]
+    notes: Optional[str]
+    created_at: str
+
+
+# Study OS — Timetable (Phase 3)
+class TimetableBlockCreate(BaseModel):
+    notebook_id: Optional[str] = Field(
+        None, description="Notebook (course) for this block"
+    )
+    title: str = Field(..., description="Block title")
+    activity_type: Literal["study", "flashcard", "assessment", "break"] = Field(
+        ..., description="Activity type"
+    )
+    field: Optional[str] = Field(None, description="Field of study")
+    start_time: str = Field(..., description="ISO start datetime")
+    end_time: str = Field(..., description="ISO end datetime")
+    is_high_intensity: bool = Field(False, description="High-intensity focus block")
+
+
+class TimetableBlockResponse(BaseModel):
+    id: str
+    notebook_id: Optional[str]
+    title: str
+    activity_type: str
+    field: Optional[str]
+    start_time: str
+    end_time: str
+    is_high_intensity: bool
+    created_at: str
+
+
+# Study OS — Dynamic Course Creation (Phase 3)
+class DynamicCourseCreate(BaseModel):
+    topic: str = Field(..., description="What the user wants to learn/master")
+    field: str = Field(..., description="Field of study")
+    estimated_duration_days: Optional[int] = Field(
+        None, description="Target completion time in days"
+    )
+    user_preferences: Optional[str] = Field(
+        None, description="User preferences for customization"
+    )
+
+
+class DynamicCourseModule(BaseModel):
+    module_title: str
+    module_description: str
+    estimated_hours: float
+    lessons: List[str]
+
+
+class DynamicCourseResponse(BaseModel):
+    notebook_id: str
+    topic: str
+    field: str
+    estimated_duration_days: int
+    modules: List[DynamicCourseModule]
+    exam_mock_topics: List[str]
