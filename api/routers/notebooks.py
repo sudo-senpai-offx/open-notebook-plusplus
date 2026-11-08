@@ -61,6 +61,7 @@ def _recently_viewed_source(row: dict) -> RecentlyViewedResponse:
 @router.get("/notebooks", response_model=List[NotebookResponse])
 async def get_notebooks(
     archived: Optional[bool] = Query(None, description="Filter by archived status"),
+    field: Optional[str] = Query(None, description="Filter by field of study"),
     order_by: str = Query("updated desc", description="Order by field and direction"),
 ):
     """Get all notebooks with optional filtering and ordering."""
@@ -101,6 +102,10 @@ async def get_notebooks(
         if archived is not None:
             result = [nb for nb in result if nb.get("archived") == archived]
 
+        # Filter by field if specified
+        if field is not None:
+            result = [nb for nb in result if nb.get("field") == field]
+
         return [
             NotebookResponse(
                 id=str(nb.get("id", "")),
@@ -111,6 +116,9 @@ async def get_notebooks(
                 updated=str(nb.get("updated", "")),
                 source_count=nb.get("source_count", 0),
                 note_count=nb.get("note_count", 0),
+                field=nb.get("field"),
+                expected_completion_duration=nb.get("expected_completion_duration"),
+                curated=nb.get("curated"),
             )
             for nb in result
         ]
@@ -132,6 +140,9 @@ async def create_notebook(notebook: NotebookCreate):
         new_notebook = Notebook(
             name=notebook.name,
             description=notebook.description,
+            field=notebook.field,
+            expected_completion_duration=notebook.expected_completion_duration,
+            curated=notebook.curated,
         )
         await new_notebook.save()
 
@@ -144,6 +155,9 @@ async def create_notebook(notebook: NotebookCreate):
             updated=str(new_notebook.updated),
             source_count=0,  # New notebook has no sources
             note_count=0,  # New notebook has no notes
+            field=new_notebook.field,
+            expected_completion_duration=new_notebook.expected_completion_duration,
+            curated=new_notebook.curated,
         )
     except InvalidInputError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -263,6 +277,9 @@ async def get_notebook(notebook_id: str):
             updated=str(nb.get("updated", "")),
             source_count=nb.get("source_count", 0),
             note_count=nb.get("note_count", 0),
+            field=nb.get("field"),
+            expected_completion_duration=nb.get("expected_completion_duration"),
+            curated=nb.get("curated"),
         )
     except HTTPException:
         raise
@@ -290,6 +307,14 @@ async def update_notebook(notebook_id: str, notebook_update: NotebookUpdate):
             notebook.description = notebook_update.description or ""
         if notebook_update.archived is not None:
             notebook.archived = notebook_update.archived
+        if "field" in notebook_update.model_fields_set:
+            notebook.field = notebook_update.field
+        if "expected_completion_duration" in notebook_update.model_fields_set:
+            notebook.expected_completion_duration = (
+                notebook_update.expected_completion_duration
+            )
+        if "curated" in notebook_update.model_fields_set:
+            notebook.curated = notebook_update.curated
 
         await notebook.save()
 
@@ -325,6 +350,9 @@ async def update_notebook(notebook_id: str, notebook_update: NotebookUpdate):
             updated=str(notebook.updated),
             source_count=0,
             note_count=0,
+            field=notebook.field,
+            expected_completion_duration=notebook.expected_completion_duration,
+            curated=notebook.curated,
         )
     except HTTPException:
         raise

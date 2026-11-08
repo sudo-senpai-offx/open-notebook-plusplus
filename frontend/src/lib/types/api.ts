@@ -7,6 +7,10 @@ export interface NotebookResponse {
   updated: string
   source_count: number
   note_count: number
+  // Study OS course classification (Phase 2)
+  field?: string
+  expected_completion_duration?: number
+  curated?: boolean
 }
 
 export interface NoteResponse {
@@ -81,12 +85,18 @@ export interface Capabilities {
 export interface CreateNotebookRequest {
   name: string
   description?: string
+  field?: string
+  expected_completion_duration?: number
+  curated?: boolean
 }
 
 export interface UpdateNotebookRequest {
   name?: string
   description?: string
   archived?: boolean
+  field?: string
+  expected_completion_duration?: number
+  curated?: boolean
 }
 
 export interface NotebookDeletePreview {

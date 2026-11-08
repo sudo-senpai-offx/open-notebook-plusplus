@@ -11,7 +11,6 @@ import { registerSW } from '@/lib/sw-register'
 export function ServiceWorkerRegister() {
   useEffect(() => {
     if (typeof window === 'undefined') return
-    if (!('serviceWorker' in navigator)) return
 
     registerSW()
   }, [])

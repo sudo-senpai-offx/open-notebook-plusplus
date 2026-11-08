@@ -993,6 +993,16 @@ export const enUS = {
 
     restartRequiredTitle: "Restart Required",
     restartRequiredDesc: "Save your changes, then restart the Open Notebook API for this setting to take effect.",
+    // Notebook library (Phase 2 - course classification)
+    fieldOfStudy: "Field of Study",
+    fieldPlaceholder: "Select field",
+    fieldNone: "None",
+    fieldUnused: "Unused",
+    expectedDuration: "Expected Duration (days)",
+    durationPlaceholder: "e.g. 90",
+    curatedCourse: "Curated course (ON++ dynamic)",
+    allFields: "All Fields",
+
 
     // Settings tabs (merged Settings + Advanced)
     tabGeneral: "General",
@@ -1300,4 +1310,5 @@ export const enUS = {
 // Compile-time shape of the en-US translations. Every other locale must
 // `satisfies` this type so missing or extra keys fail `tsc`, not just the
 // runtime parity test.
+
 export type TranslationShape = typeof enUS;

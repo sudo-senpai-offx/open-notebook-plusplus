@@ -1,0 +1,21 @@
+-- Migration 38: Notebook as course (Phase 2)
+--
+-- Why
+--
+-- open-notebook-plusplus treats notebooks as courses/subjects. Each notebook
+-- gains a field classification (art, music, biology, astronomy, geography,
+-- general, cultural, custom, unused), an expected completion duration, and a
+-- curated flag distinguishing ON++ dynamic courses from custom freeform ones.
+-- Custom (non-curated) courses are excluded from spiderweb chart metrics.
+
+-- Field classification for notebook-as-course
+DEFINE FIELD IF NOT EXISTS field ON TABLE notebook TYPE option<string>;
+
+-- Expected completion duration in days
+DEFINE FIELD IF NOT EXISTS expected_completion_duration ON TABLE notebook TYPE option<number>;
+
+-- Curated flag: True = ON++ dynamic course, False = custom freeform course
+DEFINE FIELD IF NOT EXISTS curated ON TABLE notebook TYPE option<bool>;
+
+-- Index for field-based filtering (course library browse by field)
+DEFINE INDEX IF NOT EXISTS idx_notebook_field ON TABLE notebook FIELDS field CONCURRENTLY;

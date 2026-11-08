@@ -18,6 +18,9 @@ import { NotebookDeleteDialog } from './NotebookDeleteDialog'
 import { useState } from 'react'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { getDateLocale } from '@/lib/utils/date-locale'
+import { cn } from '@/lib/utils'
+import { ProgressRing } from '@/components/ui/progress-ring'
+import { getFieldColor, getFieldLabel } from '@/lib/field-colors'
 interface NotebookCardProps {
   notebook: NotebookResponse
 }
@@ -57,6 +60,21 @@ export function NotebookCard({ notebook }: NotebookCardProps) {
                 {notebook.archived && (
                   <Badge variant="secondary" className="mt-1">
                     {t('notebooks.archived')}
+                  </Badge>
+                )}
+                {notebook.field && (
+                  <Badge
+                    className={cn(
+                      "mt-1",
+                      getFieldColor(notebook.field).badge
+                    )}
+                  >
+                    {getFieldLabel(notebook.field)}
+                  </Badge>
+                )}
+                {!notebook.field && (
+                  <Badge variant="outline" className="mt-1 text-muted-foreground">
+                    {t('settings.fieldUnused')}
                   </Badge>
                 )}
               </div>
@@ -123,6 +141,25 @@ export function NotebookCard({ notebook }: NotebookCardProps) {
                 <StickyNote className="h-3 w-3" />
                 <span>{notebook.note_count}</span>
               </span>
+              {notebook.expected_completion_duration && (
+                <div className="ml-2 flex items-center gap-1">
+                  <ProgressRing
+                    value={
+                      Math.min(
+                        100,
+                        Math.round(
+                          (notebook.source_count /
+                            notebook.expected_completion_duration) *
+                            100
+                        )
+                      )
+                    }
+                    size={16}
+                    strokeWidth={2}
+                    showLabel={false}
+                  />
+                </div>
+              )}
             </div>
           </CardContent>
       </Card>

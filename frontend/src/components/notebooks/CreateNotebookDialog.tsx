@@ -17,12 +17,28 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useCreateNotebook } from '@/lib/hooks/use-notebooks'
 import { useTranslation } from '@/lib/hooks/use-translation'
+
+
+const FIELD_OPTIONS = [
+  { value: 'art', label: 'Art' },
+  { value: 'music', label: 'Music' },
+  { value: 'biology', label: 'Biology' },
+  { value: 'astronomy', label: 'Astronomy' },
+  { value: 'geography', label: 'Geography' },
+  { value: 'general', label: 'General' },
+  { value: 'cultural', label: 'Cultural' },
+  { value: 'custom', label: 'Custom' },
+]
 
 const createNotebookSchema = z.object({
   name: z.string().min(1, 'Name is required'),
   description: z.string().optional(),
+  field: z.string().optional(),
+  expected_completion_duration: z.number().min(1).optional(),
+  curated: z.boolean().optional(),
 })
 
 type CreateNotebookFormData = z.infer<typeof createNotebookSchema>
@@ -95,6 +111,49 @@ export function CreateNotebookDialog({ open, onOpenChange }: CreateNotebookDialo
               placeholder={t('notebooks.descPlaceholder')}
               rows={4}
             />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="notebook-field">{t('settings.fieldOfStudy')}</Label>
+            <Select
+              {...register('field')}
+              defaultValue=""
+            >
+              <SelectTrigger id="notebook-field-select" className="w-full">
+                <SelectValue placeholder={t('settings.fieldPlaceholder')} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">— {t('settings.fieldNone')} —</SelectItem>
+                {FIELD_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="notebook-duration">{t('settings.expectedDuration')}</Label>
+            <Input
+              id="notebook-duration"
+              type="number"
+              {...register('expected_completion_duration')}
+              placeholder={t('settings.durationPlaceholder')}
+            />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              id="notebook-curated"
+              type="checkbox"
+              {...register('curated')}
+              defaultChecked={false}
+              className="h-4 w-4 shrink-0 rounded border-input bg-background text-primary"
+            />
+            <Label htmlFor="notebook-curated" className="text-sm">
+              {t('settings.curatedCourse')}
+            </Label>
           </div>
 
           <DialogFooter className="gap-2 sm:gap-0">

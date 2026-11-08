@@ -18,6 +18,9 @@ import { NotebookDeleteDialog } from './NotebookDeleteDialog'
 import { useState } from 'react'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { getDateLocale } from '@/lib/utils/date-locale'
+import { cn } from '@/lib/utils'
+import { ProgressRing } from '@/components/ui/progress-ring'
+import { getFieldColor, getFieldLabel } from '@/lib/field-colors'
 
 interface NotebookRowProps {
   notebook: NotebookResponse
@@ -65,6 +68,21 @@ export function NotebookRow({ notebook }: NotebookRowProps) {
                 {t('notebooks.archived')}
               </Badge>
             )}
+            {notebook.field && (
+              <Badge
+                className={cn(
+                  "ml-1",
+                  getFieldColor(notebook.field).badge
+                )}
+              >
+                {getFieldLabel(notebook.field)}
+              </Badge>
+            )}
+            {!notebook.field && (
+              <Badge variant="outline" className="ml-1 text-muted-foreground">
+                {t('settings.fieldUnused')}
+              </Badge>
+            )}
           </div>
           {notebook.description && (
             <p className="text-sm text-muted-foreground truncate">
@@ -82,6 +100,25 @@ export function NotebookRow({ notebook }: NotebookRowProps) {
             <StickyNote className="h-3 w-3" />
             <span>{notebook.note_count}</span>
           </span>
+          {notebook.expected_completion_duration && (
+            <div className="ml-2 flex items-center gap-1">
+              <ProgressRing
+                value={
+                  Math.min(
+                    100,
+                    Math.round(
+                      (notebook.source_count /
+                        notebook.expected_completion_duration) *
+                        100
+                    )
+                  )
+                }
+                size={14}
+                strokeWidth={2}
+                showLabel={false}
+              />
+            </div>
+          )}
         </div>
 
         <div className="hidden sm:block w-40 shrink-0 text-right text-xs text-muted-foreground">

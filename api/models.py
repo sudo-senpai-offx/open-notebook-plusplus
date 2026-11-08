@@ -7,6 +7,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class NotebookCreate(BaseModel):
     name: str = Field(..., description="Name of the notebook")
     description: str = Field(default="", description="Description of the notebook")
+    field: Optional[str] = Field(
+        None,
+        description="Field of study: art|music|biology|astronomy|geography|general|cultural|custom|unused",
+    )
+    expected_completion_duration: Optional[int] = Field(
+        None, description="Expected completion duration in days"
+    )
+    curated: Optional[bool] = Field(
+        None,
+        description="True = ON++ dynamic course, False = custom freeform course",
+    )
 
 
 class NotebookUpdate(BaseModel):
@@ -14,6 +25,17 @@ class NotebookUpdate(BaseModel):
     description: Optional[str] = Field(None, description="Description of the notebook")
     archived: Optional[bool] = Field(
         None, description="Whether the notebook is archived"
+    )
+    field: Optional[str] = Field(
+        None,
+        description="Field of study: art|music|biology|astronomy|geography|general|cultural|custom|unused",
+    )
+    expected_completion_duration: Optional[int] = Field(
+        None, description="Expected completion duration in days"
+    )
+    curated: Optional[bool] = Field(
+        None,
+        description="True = ON++ dynamic course, False = custom freeform course",
     )
 
 
@@ -26,6 +48,9 @@ class NotebookResponse(BaseModel):
     updated: str
     source_count: int
     note_count: int
+    field: Optional[str] = None
+    expected_completion_duration: Optional[int] = None
+    curated: Optional[bool] = None
 
 
 class RecentlyViewedResponse(BaseModel):

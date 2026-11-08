@@ -995,6 +995,16 @@ export const deDE = {
     localProcessingEnabledNotice: "Cloud requests fall back to on-device models when quota is exhausted. Uses more battery and memory.",
     restartRequiredTitle: "Restart Required",
     restartRequiredDesc: "Save your changes, then restart the Open Notebook API for this setting to take effect.",
+    // Notebook library (Phase 2 - course classification)
+    fieldOfStudy: "Field of Study",
+    fieldPlaceholder: "Select field",
+    fieldNone: "None",
+    fieldUnused: "Unused",
+    expectedDuration: "Expected Duration (days)",
+    durationPlaceholder: "e.g. 90",
+    curatedCourse: "Curated course (ON++ dynamic)",
+    allFields: "All Fields",
+
     // Settings tabs (merged Settings + Advanced)
     tabGeneral: "General",
     tabTtsStt: "TTS & STT",
@@ -1298,4 +1308,5 @@ export const deDE = {
     goToSettings: "Zu den Einstellungen",
     viewDocs: "Dokumentation anzeigen",
   },
-} satisfies TranslationShape;;
+
+} satisfies TranslationShape;

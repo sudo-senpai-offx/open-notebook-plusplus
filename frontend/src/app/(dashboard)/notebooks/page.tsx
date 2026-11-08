@@ -13,11 +13,14 @@ import { CreateNotebookDialog } from '@/components/notebooks/CreateNotebookDialo
 import { Input } from '@/components/ui/input'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { useNotebookViewStore } from '@/lib/stores/notebook-view-store'
+import { cn } from '@/lib/utils'
+import { FIELD_OPTIONS, getFieldColor } from '@/lib/field-colors'
 
 export default function NotebooksPage() {
   const { t } = useTranslation()
   const [createDialogOpen, setCreateDialogOpen] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
+  const [selectedField, setSelectedField] = useState<string | null>(null)
   const viewMode = useNotebookViewStore((state) => state.viewMode)
   const setViewMode = useNotebookViewStore((state) => state.setViewMode)
   const { data: notebooks, isLoading, refetch } = useNotebooks(false)
@@ -29,25 +32,25 @@ export default function NotebooksPage() {
     if (!notebooks) {
       return undefined
     }
-    if (!normalizedQuery) {
-      return notebooks
-    }
-    return notebooks.filter((notebook) =>
-      notebook.name.toLowerCase().includes(normalizedQuery)
-    )
-  }, [notebooks, normalizedQuery])
+    return notebooks.filter((notebook) => {
+      const matchesSearch = !normalizedQuery ||
+        notebook.name.toLowerCase().includes(normalizedQuery)
+      const matchesField = !selectedField || notebook.field === selectedField
+      return matchesSearch && matchesField
+    })
+  }, [notebooks, normalizedQuery, selectedField])
 
   const filteredArchived = useMemo(() => {
     if (!archivedNotebooks) {
       return undefined
     }
-    if (!normalizedQuery) {
-      return archivedNotebooks
-    }
-    return archivedNotebooks.filter((notebook) =>
-      notebook.name.toLowerCase().includes(normalizedQuery)
-    )
-  }, [archivedNotebooks, normalizedQuery])
+    return archivedNotebooks.filter((notebook) => {
+      const matchesSearch = !normalizedQuery ||
+        notebook.name.toLowerCase().includes(normalizedQuery)
+      const matchesField = !selectedField || notebook.field === selectedField
+      return matchesSearch && matchesField
+    })
+  }, [archivedNotebooks, normalizedQuery, selectedField])
 
   const hasArchived = (archivedNotebooks?.length ?? 0) > 0
   const isSearching = normalizedQuery.length > 0
@@ -100,6 +103,36 @@ export default function NotebooksPage() {
               <Plus className="h-4 w-4 mr-2" />
               {t('notebooks.newNotebook')}
             </Button>
+          </div>
+          
+          {/* Field filter chips */}
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant={selectedField === null ? 'secondary' : 'outline'}
+              size="sm"
+              onClick={() => setSelectedField(null)}
+              className="px-3 py-1.5"
+            >
+              {t('settings.allFields')}
+            </Button>
+            {FIELD_OPTIONS.map((option: { value: string; label: string }) => (
+              <Button
+                key={option.value}
+                variant={
+                  selectedField === option.value ? 'secondary' : 'outline'
+                }
+                size="sm"
+                onClick={() => setSelectedField(option.value)}
+                className={cn(
+                  "px-3 py-1.5",
+                  selectedField === option.value
+                    ? getFieldColor(option.value).badge
+                    : ""
+                )}
+              >
+                {option.label}
+              </Button>
+            ))}
           </div>
         </div>
         

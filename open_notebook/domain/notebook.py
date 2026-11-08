@@ -26,6 +26,14 @@ class Notebook(ObjectModel):
     description: str
     archived: Optional[bool] = False
     last_viewed_at: Optional[datetime] = None
+    # Study OS course classification (Phase 2)
+    field: Optional[str] = (
+        None  # art|music|biology|astronomy|geography|general|cultural|custom|unused
+    )
+    expected_completion_duration: Optional[int] = None  # days
+    curated: Optional[bool] = (
+        None  # True = ON++ dynamic course, False = custom freeform
+    )
 
     @field_validator("name")
     @classmethod
