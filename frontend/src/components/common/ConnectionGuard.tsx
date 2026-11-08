@@ -5,6 +5,7 @@ import { ConnectionError } from '@/lib/types/config'
 import { ConnectionErrorOverlay } from '@/components/errors/ConnectionErrorOverlay'
 import { getConfig, resetConfig } from '@/lib/config'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 
 interface ConnectionGuardProps {
   children: React.ReactNode
@@ -106,9 +107,13 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
     return <ConnectionErrorOverlay error={error} onRetry={checkConnection} />
   }
 
-  // Show nothing while checking (prevents flash of content)
+  // Show a loading indicator while checking (prevents white screen)
   if (isChecking) {
-    return null
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <LoadingSpinner size="lg" />
+      </div>
+    )
   }
 
   // Render children if connection is good; draining shows a banner only.

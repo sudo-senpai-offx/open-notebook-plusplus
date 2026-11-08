@@ -1,83 +1,71 @@
 /**
  * ON++ Study OS Service Worker
  *
- * Caches the app shell for offline-first loading:
- * - HTML, CSS, JS, images, fonts — Cache API
- * - Dynamic data (notebooks, assessments, etc.) — IndexedDB (via offline-storage.ts)
- *
- * Strategy: Cache-first for app shell assets, network-first for API calls,
- * falling back to IndexedDB cache when offline.
+ * Minimal, safe service worker for offline-first operation.
+ * Does NOT precache directory patterns (which fail silently).
+ * Uses runtime caching only. Includes cache versioning and
+ * automatic reload when a new version is deployed.
  */
 
-const CACHE_NAME = "onpp-shell-v1"
-const ASSETS = [
-  "/",
-  "/_next/static/css/",
-  "/_next/static/js/",
-  "/_next/static/media/",
-  "/favicon.ico",
-  "/manifest.json",
-]
+const CACHE_NAME = "onpp-shell-v2"
 
-// Install: precache app shell
+// Install: claim immediately, no precaching (avoids stale chunk issues)
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(ASSETS.filter(Boolean))
-    }),
-  )
   self.skipWaiting()
 })
 
-// Activate: clean up old caches
+// Activate: delete ALL old caches to prevent stale JS chunk serving,
+// then claim all clients so the new SW takes control immediately.
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
-        cacheNames
-          .filter((name) => name !== CACHE_NAME && name.startsWith("onpp-"))
-          .map((name) => caches.delete(name)),
+        cacheNames.map((name) => caches.delete(name)),
       )
+    }).then(() => {
+      return self.clients.claim()
     }),
   )
-  self.clients.claim()
 })
 
-// Fetch: serve from cache first, fall back to network
+// Notify all clients that a new SW has activated (page should reload)
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    self.clients.matchAll({ includeUncontrolled: true }).then((clients) => {
+      clients.forEach((client) => {
+        client.postMessage({ type: "NEW_SW_ACTIVE" })
+      })
+    }),
+  )
+})
+
+// Fetch: network-first for API, cache-first for static assets (runtime only)
 self.addEventListener("fetch", (event) => {
   const { request } = event
   const url = new URL(request.url)
 
-  // Skip non-GET requests and chrome-extension / other schemes
+  // Skip non-GET requests and non-http schemes
   if (request.method !== "GET" || !url.protocol.startsWith("http")) {
     return
   }
 
-  // API calls: network-first, fall back to nothing (offline data handled by IndexedDB in app)
+  // API calls: always go to network (config, models, etc. must be fresh)
   if (url.pathname.startsWith("/api/")) {
-    event.respondWith(
-      fetch(request).catch(() => {
-        // Return a minimal offline response so the app can handle it gracefully
-        return new Response(
-          JSON.stringify({ offline: true, message: "You are offline. Cached data is available." }),
-          { status: 503, headers: { "Content-Type": "application/json" } },
-        )
-      }),
-    )
+    event.respondWith(fetch(request))
     return
   }
 
-  // App shell: cache-first
+  // Static assets: cache-first with network fallback (runtime caching only)
   event.respondWith(
     caches.match(request).then((cached) => {
       if (cached) {
         return cached
       }
       return fetch(request).then((response) => {
-        // Cache dynamic assets for future offline use
+        // Only cache successful responses for Next.js static assets
         if (
           response.ok &&
-          (url.pathname.startsWith("/_next/") ||
+          (url.pathname.startsWith("/_next/static/") ||
             url.pathname.startsWith("/static/"))
         ) {
           const responseClone = response.clone()
@@ -91,10 +79,9 @@ self.addEventListener("fetch", (event) => {
   )
 })
 
-// Background sync: when online again, sync pending writes
+// Message handler: notify clients of online status or new SW
 self.addEventListener("message", (event) => {
   if (event.data === "sync-online") {
-    // Notify all clients that we're back online
     self.clients.matchAll().then((clients) => {
       clients.forEach((client) => {
         client.postMessage({ type: "ONLINE" })

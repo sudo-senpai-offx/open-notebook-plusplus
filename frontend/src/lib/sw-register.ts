@@ -1,8 +1,10 @@
 /**
  * Service Worker registration for ON++ Study OS
  *
- * Registers sw.js on page load. On mobile browsers (Termux/Chrome/Android
- * WebView) this enables offline app shell caching. On desktop it does the same.
+ * Unregisters ALL existing service workers first (to eliminate stale
+ * cached JS chunks that cause white screen / hydration mismatch), then
+ * registers the new minimal SW. Listens for NEW_SW_ACTIVE and reloads
+ * the page so the fresh build takes effect immediately.
  */
 
 let registered = false
@@ -16,18 +18,33 @@ export function registerSW(): ServiceWorkerRegistration | null {
 
   registered = true
 
+  // Step 1: Unregister ALL existing service workers to clear stale caches
+  navigator.serviceWorker.getRegistrations().then((registrations) => {
+    registrations.forEach((registration) => {
+      registration.unregister().then((success) => {
+        if (success) {
+          console.log("[sw] Unregistered old service worker:", registration.scope)
+        }
+      })
+    })
+  })
+
+  // Step 2: Register the new minimal SW
   navigator.serviceWorker
     .register("/sw.js", { scope: "/" })
     .then(() => {
-      // Listen for online events from the SW
+      // Listen for messages from the SW
       navigator.serviceWorker.addEventListener("message", (event) => {
+        if (event.data?.type === "NEW_SW_ACTIVE") {
+          // A new SW has activated — reload to pick up fresh build
+          window.location.reload()
+        }
         if (event.data?.type === "ONLINE") {
-          // Dispatch a custom event that the app can listen to
           window.dispatchEvent(new CustomEvent("onpp-online"))
         }
       })
 
-      // Request persistent storage so cache isn't evicted under pressure
+      // Request persistent storage
       if ("storage" in navigator && navigator.storage.persist) {
         navigator.storage.persist().then((persisted) => {
           if (persisted) {
