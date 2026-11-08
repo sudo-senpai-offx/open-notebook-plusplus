@@ -119,6 +119,72 @@
   --color-ctx-insights: var(--ctx-insights);
   --color-ctx-insights-tint: var(--ctx-insights-tint);
 
+  /* STUDY OS — field hues */
+  --color-field-art: var(--field-art);
+  --color-field-music: var(--field-music);
+  --color-field-biology: var(--field-biology);
+  --color-field-astronomy: var(--field-astronomy);
+  --color-field-geography: var(--field-geography);
+  --color-field-general: var(--field-general);
+  --color-field-cultural: var(--field-cultural);
+  --color-field-unused: var(--field-unused);
+  --color-field-art-soft: var(--field-art-soft);
+  --color-field-music-soft: var(--field-music-soft);
+  --color-field-biology-soft: var(--field-biology-soft);
+  --color-field-astronomy-soft: var(--field-astronomy-soft);
+  --color-field-geography-soft: var(--field-geography-soft);
+  --color-field-general-soft: var(--field-general-soft);
+  --color-field-cultural-soft: var(--field-cultural-soft);
+  --color-field-unused-soft: var(--field-unused-soft);
+
+  /* STUDY OS — spiderweb chart */
+  --color-spider-grid: var(--spider-grid);
+  --color-spider-grid-strong: var(--spider-grid-strong);
+  --color-spider-polygon-fill: var(--spider-polygon-fill);
+  --color-spider-polygon-stroke: var(--spider-polygon-stroke);
+  --color-spider-vertex: var(--spider-vertex);
+  --color-spider-label: var(--spider-label);
+  --color-spider-label-active: var(--spider-label-active);
+
+  /* STUDY OS — timetable */
+  --color-tt-block: var(--tt-block);
+  --color-tt-block-border: var(--tt-block-border);
+  --color-tt-block-hover: var(--tt-block-hover);
+  --color-tt-text: var(--tt-text);
+  --color-tt-text-muted: var(--tt-text-muted);
+  --color-tt-weekend: var(--tt-weekend);
+  --color-tt-today-ring: var(--tt-today-ring);
+  --color-tt-overload-bg: var(--tt-overload-bg);
+  --color-tt-overload-text: var(--tt-overload-text);
+  --color-tt-break: var(--tt-break);
+  --color-tt-break-text: var(--tt-break-text);
+
+  /* STUDY OS — burnout guardrail */
+  --color-burnout-safe: var(--burnout-safe);
+  --color-burnout-warn: var(--burnout-warn);
+  --color-burnout-critical: var(--burnout-critical);
+
+  /* STUDY OS — daily dose */
+  --color-dose-card-bg: var(--dose-card-bg);
+  --color-dose-card-border: var(--dose-card-border);
+  --color-dose-due-ring: var(--dose-due-ring);
+  --color-dose-upcoming: var(--dose-upcoming);
+  --color-dose-completed: var(--dose-completed);
+
+  /* STUDY OS — progress / ultralearning */
+  --color-progress-ring-bg: var(--progress-ring-bg);
+  --color-progress-ring-track: var(--progress-ring-track);
+  --color-progress-ring-fill: var(--progress-ring-fill);
+  --color-progress-text: var(--progress-text);
+  --color-progress-muted: var(--progress-muted);
+
+  /* STUDY OS — offline / cache */
+  --color-offline-chip-bg: var(--offline-chip-bg);
+  --color-offline-chip-text: var(--offline-chip-text);
+  --color-offline-chip-text-online: var(--offline-chip-text-online);
+  --color-cache-size: var(--cache-size);
+  --color-cache-removable: var(--cache-removable);
+
   /* shape — squared: instrument, not toy; floor is 4px */
   --radius-sm: 4px;
   --radius-md: 5px;
@@ -258,6 +324,78 @@
   --motion-fast: 0.12s;
   --motion-base: 0.15s;
   --motion-slow: 0.25s;
+
+  /* ============================================================================
+     STUDY OS — DESIGN TOKENS (Approach C UI Overhaul)
+     Field hues for course classification, spiderweb chart, timetable, burnout
+     guardrails. These layer on top of the Quiet Green foundation.
+     ========================================================================== */
+
+  /* field hues — course/subject classification (7 fields) */
+  --field-art: var(--plum);
+  --field-art-soft: var(--plum-tint);
+  --field-music: var(--gold);
+  --field-music-soft: var(--gold-tint);
+  --field-biology: var(--fern);
+  --field-biology-soft: var(--fern-tint);
+  --field-astronomy: var(--slate);
+  --field-astronomy-soft: var(--slate-tint);
+  --field-geography: var(--teal);
+  --field-geography-soft: var(--teal-tint);
+  --field-general: var(--slate-hue);
+  --field-general-soft: var(--slate-hue-tint);
+  --field-cultural: var(--mauve);
+  --field-cultural-soft: var(--mauve-tint);
+  --field-unused: var(--ink-faint);
+  --field-unused-soft: var(--muted);
+
+  /* spiderweb chart — capability axes */
+  --spider-grid: var(--line-soft);
+  --spider-grid-strong: var(--line);
+  --spider-polygon-fill: var(--teal-tint);
+  --spider-polygon-stroke: var(--teal);
+  --spider-vertex: var(--teal-deep);
+  --spider-label: var(--ink-soft);
+  --spider-label-active: var(--teal);
+
+  /* timetable */
+  --tt-block: var(--surface);
+  --tt-block-border: var(--line);
+  --tt-block-hover: var(--surface-sunken);
+  --tt-text: var(--ink);
+  --tt-text-muted: var(--ink-soft);
+  --tt-weekend: var(--surface-recessed);
+  --tt-today-ring: var(--teal);
+  --tt-overload-bg: var(--clay-tint);
+  --tt-overload-text: var(--clay-deep);
+  --tt-break: var(--sage-tint);
+  --tt-break-text: var(--sage-deep);
+
+  /* burnout guardrail */
+  --burnout-safe: var(--fern);
+  --burnout-warn: var(--gold);
+  --burnout-critical: var(--clay);
+
+  /* daily dose */
+  --dose-card-bg: var(--surface);
+  --dose-card-border: var(--line);
+  --dose-due-ring: var(--teal);
+  --dose-upcoming: var(--ink-soft);
+  --dose-completed: var(--fern-deep);
+
+  /* progress / ultralearning */
+  --progress-ring-bg: var(--line-soft);
+  --progress-ring-track: var(--line);
+  --progress-ring-fill: var(--primary);
+  --progress-text: var(--ink);
+  --progress-muted: var(--ink-soft);
+
+  /* offline / cache */
+  --offline-chip-bg: var(--surface-recessed);
+  --offline-chip-text: var(--ink-soft);
+  --offline-chip-text-online: var(--fern-deep);
+  --cache-size: var(--ink-soft);
+  --cache-removable: var(--clay);
 
   /* --------------------------------------------------------------
      shadcn semantic slots — the contract existing components use

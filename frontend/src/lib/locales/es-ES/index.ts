@@ -993,6 +993,25 @@ export const esES = {
     localProcessingEnabledNotice: "Cloud requests fall back to on-device models when quota is exhausted. Uses more battery and memory.",
     restartRequiredTitle: "Restart Required",
     restartRequiredDesc: "Save your changes, then restart the Open Notebook API for this setting to take effect.",
+    // Settings tabs (merged Settings + Advanced)
+    tabGeneral: "General",
+    tabTtsStt: "TTS & STT",
+    tabPreprocessor: "Preprocessor",
+    tabBrowserAi: "Browser AI",
+    tabDeepseek: "DeepSeek Sessions",
+    tabCacheOffline: "Cache & Offline",
+    tabAdvanced: "Advanced",
+
+    // Cache & Offline
+    cacheOfflineTitle: "Cache & Offline Storage",
+    cacheOfflineDesc: "Manage offline cache for cached resources. Everything is cacheable with later sync when back online.",
+    cacheUsage: "Cache usage",
+    online: "Online",
+    offline: "Offline",
+    clearCacheTitle: "Clear all cache",
+    clearCacheDesc: "Removes all cached resources and offline data. You will need to re-fetch materials when back online.",
+    clearCacheConfirm: "Clear cache",
+
     deepseekSetupNeeded: "Setup Needed",
   },
   advanced: {
@@ -1277,4 +1296,4 @@ export const esES = {
     goToSettings: "Ir a configuración",
     viewDocs: "Ver documentación",
   },
-} satisfies TranslationShape;
+} satisfies TranslationShape;;

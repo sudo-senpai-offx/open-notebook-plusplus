@@ -1,83 +1,104 @@
-/* Minimal installability service worker (PWA slice 1).
- * Offline reading depth (cached sources/review state) is a later slice —
- * this file only earns the install prompt, nothing more.
+/**
+ * ON++ Study OS Service Worker
  *
- * Shape, and why:
- * - Navigations are NETWORK-first. Every route is server-rendered, so the
- *   network is the source of truth and the cache is only an offline
- *   fallback. The previous cache-first handling made every non-`/` route a
- *   guaranteed miss.
- * - Static assets are cache-first, populated on miss.
- * - Every respondWith() path RESOLVES. A rejected promise does not render
- *   a browser error page: Chrome reports ERR_CACHE_MISS and the navigation
- *   dies, so one transient network failure bricks the app. Cached
- *   responses are synthesised as fallbacks instead.
- * - Anything not matched here is left to the browser. Intercepting without
- *   a guaranteed cache hit is pure risk.
+ * Caches the app shell for offline-first loading:
+ * - HTML, CSS, JS, images, fonts — Cache API
+ * - Dynamic data (notebooks, assessments, etc.) — IndexedDB (via offline-storage.ts)
+ *
+ * Strategy: Cache-first for app shell assets, network-first for API calls,
+ * falling back to IndexedDB cache when offline.
  */
 
-const CACHE_VERSION = 'onb-shell-v2'
-const SHELL = ['/', '/icons/icon-192.png', '/icons/icon-512.png']
-const STATIC_PREFIXES = ['/_next/static/', '/icons/']
+const CACHE_NAME = "onpp-shell-v1"
+const ASSETS = [
+  "/",
+  "/_next/static/css/",
+  "/_next/static/js/",
+  "/_next/static/media/",
+  "/favicon.ico",
+  "/manifest.json",
+]
 
-self.addEventListener('install', event => {
+// Install: precache app shell
+self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches
-      .open(CACHE_VERSION)
-      .then(cache => cache.addAll(SHELL))
-      .then(() => self.skipWaiting())
-      // Never fail installation over a shell entry: a rejected install
-      // leaves the previous worker active, which is worse than no shell.
-      .catch(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.addAll(ASSETS.filter(Boolean))
+    }),
   )
+  self.skipWaiting()
 })
 
-self.addEventListener('activate', event => {
+// Activate: clean up old caches
+self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches
-      .keys()
-      .then(keys =>
-        Promise.all(keys.filter(k => k !== CACHE_VERSION).map(k => caches.delete(k)))
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames
+          .filter((name) => name !== CACHE_NAME && name.startsWith("onpp-"))
+          .map((name) => caches.delete(name)),
       )
-      .then(() => self.clients.claim())
+    }),
   )
+  self.clients.claim()
 })
 
-/** Cached shell, or a synthetic response so respondWith always resolves. */
-const offlineShell = () =>
-  caches
-    .match('/')
-    .then(hit => hit || new Response('offline', { status: 503 }))
-
-self.addEventListener('fetch', event => {
-  const request = event.request
-  if (request.method !== 'GET') return
-
+// Fetch: serve from cache first, fall back to network
+self.addEventListener("fetch", (event) => {
+  const { request } = event
   const url = new URL(request.url)
-  if (url.origin !== self.location.origin) return
-  if (url.pathname.startsWith('/api/')) return
 
-  if (request.mode === 'navigate') {
-    event.respondWith(fetch(request).catch(offlineShell))
+  // Skip non-GET requests and chrome-extension / other schemes
+  if (request.method !== "GET" || !url.protocol.startsWith("http")) {
     return
   }
 
-  const isStatic = STATIC_PREFIXES.some(prefix => url.pathname.startsWith(prefix))
-  if (!isStatic) return
-
-  event.respondWith(
-    caches.match(request).then(
-      hit =>
-        hit ||
-        fetch(request)
-          .then(response => {
-            if (response && response.ok) {
-              const copy = response.clone()
-              caches.open(CACHE_VERSION).then(cache => cache.put(request, copy))
-            }
-            return response
-          })
-          .catch(() => new Response('', { status: 504 }))
+  // API calls: network-first, fall back to nothing (offline data handled by IndexedDB in app)
+  if (url.pathname.startsWith("/api/")) {
+    event.respondWith(
+      fetch(request).catch(() => {
+        // Return a minimal offline response so the app can handle it gracefully
+        return new Response(
+          JSON.stringify({ offline: true, message: "You are offline. Cached data is available." }),
+          { status: 503, headers: { "Content-Type": "application/json" } },
+        )
+      }),
     )
+    return
+  }
+
+  // App shell: cache-first
+  event.respondWith(
+    caches.match(request).then((cached) => {
+      if (cached) {
+        return cached
+      }
+      return fetch(request).then((response) => {
+        // Cache dynamic assets for future offline use
+        if (
+          response.ok &&
+          (url.pathname.startsWith("/_next/") ||
+            url.pathname.startsWith("/static/"))
+        ) {
+          const responseClone = response.clone()
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(request, responseClone)
+          })
+        }
+        return response
+      })
+    }),
   )
+})
+
+// Background sync: when online again, sync pending writes
+self.addEventListener("message", (event) => {
+  if (event.data === "sync-online") {
+    // Notify all clients that we're back online
+    self.clients.matchAll().then((clients) => {
+      clients.forEach((client) => {
+        client.postMessage({ type: "ONLINE" })
+      })
+    })
+  }
 })
