@@ -1,0 +1,3 @@
+{
+  "/(dashboard)/advanced/page": "app/(dashboard)/advanced/page.js"
+}

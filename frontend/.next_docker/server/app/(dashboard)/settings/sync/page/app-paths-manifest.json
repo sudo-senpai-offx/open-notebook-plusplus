@@ -1,0 +1,3 @@
+{
+  "/(dashboard)/settings/sync/page": "app/(dashboard)/settings/sync/page.js"
+}

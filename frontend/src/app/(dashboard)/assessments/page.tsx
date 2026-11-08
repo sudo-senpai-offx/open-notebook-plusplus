@@ -4,9 +4,13 @@ import { useEffect, useState } from "react"
 import { AppShell } from "@/components/layout/AppShell"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useTranslation } from "@/lib/hooks/use-translation"
 import { assessmentApi } from "@/lib/api/settings"
+import { notebooksApi } from "@/lib/api/notebooks"
 import type { SpiderwebMetric } from "@/lib/types/api"
+import type { NotebookResponse } from "@/lib/types/api"
 import { MasteryRadar } from "@/components/ui/mastery-radar"
 import { AssessmentInput } from "@/components/assessments/AssessmentInput"
 
@@ -14,6 +18,8 @@ export default function AssessmentsPage() {
   const { t } = useTranslation()
   const [metrics, setMetrics] = useState<SpiderwebMetric[]>([])
   const [loading, setLoading] = useState(true)
+  const [notebooks, setNotebooks] = useState<NotebookResponse[]>([])
+  const [selectedNotebookId, setSelectedNotebookId] = useState<string | null>(null)
 
   useEffect(() => {
     assessmentApi.spiderweb().then((data) => {
@@ -21,6 +27,12 @@ export default function AssessmentsPage() {
       setLoading(false)
     }).catch(() => {
       setLoading(false)
+    })
+
+    notebooksApi.list().then((data) => {
+      setNotebooks(data)
+    }).catch(() => {
+      setNotebooks([])
     })
   }, [])
 
@@ -115,11 +127,33 @@ export default function AssessmentsPage() {
               <CardTitle>{t("settings.recordAssessment")}</CardTitle>
             </CardHeader>
             <CardContent>
-              <AssessmentInput
-                onAssessmentCreated={() => {
-                  assessmentApi.spiderweb().then((data) => setMetrics(data.fields))
-                }}
-              />
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="assessment-notebook">{t("settings.notebook")}</Label>
+                  <Select
+                    value={selectedNotebookId ?? ""}
+                    onValueChange={(v) => setSelectedNotebookId(v === "" ? null : v)}
+                  >
+                    <SelectTrigger id="assessment-notebook" className="w-full">
+                      <SelectValue placeholder={t("settings.selectNotebook")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">{t("settings.fieldNone")}</SelectItem>
+                      {notebooks.map((nb) => (
+                        <SelectItem key={nb.id} value={nb.id}>
+                          {nb.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <AssessmentInput
+                  notebookId={selectedNotebookId}
+                  onAssessmentCreated={() => {
+                    assessmentApi.spiderweb().then((data) => setMetrics(data.fields))
+                  }}
+                />
+              </div>
             </CardContent>
           </Card>
         </div>

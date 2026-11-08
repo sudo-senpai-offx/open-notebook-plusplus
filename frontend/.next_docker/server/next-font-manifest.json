@@ -1,0 +1,127 @@
+{
+  "app": {
+    "[project]/src/app/(auth)/login/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/advanced/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/assessments/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/dynamic-course/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/focus/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/notebooks/[id]/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/notebooks/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/podcasts/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/review/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/search/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/settings/models/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/settings/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/settings/sync/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/sites/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/sources/[id]/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/sources/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/study/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/timetable/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/training/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/(dashboard)/transformations/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/_not-found/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/dev/design/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ],
+    "[project]/src/app/page": [
+      "static/media/f06bf9da926bae75-s.p.2874ccu1_u7jf.woff2",
+      "static/media/017d9bea37084d9b-s.p.41rroleoq1br7.woff2",
+      "static/media/d2d62b05021c6286-s.p.2d9e_tvweuz-y.woff2"
+    ]
+  },
+  "appUsingSizeAdjust": true,
+  "pages": {},
+  "pagesUsingSizeAdjust": false
+}

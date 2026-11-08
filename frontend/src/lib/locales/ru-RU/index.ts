@@ -231,6 +231,7 @@ export const ruRU = {
     transformation: "Трансформация",
     settings: "Настройки",
     advanced: "Дополнительно",
+    governor: "Governor",
     nav: "Навигация",
     language: "Переключить язык",
     theme: "Тема",
@@ -1001,6 +1002,8 @@ export const ruRU = {
     durationPlaceholder: "e.g. 90",
     curatedCourse: "Curated course (ON++ dynamic)",
     allFields: "All Fields",
+    notebook: "Notebook",
+    selectNotebook: "Select notebook",
 
     // Settings tabs (merged Settings + Advanced)
     tabGeneral: "General",
@@ -1075,6 +1078,25 @@ export const ruRU = {
     hours: "hrs",
     examMockTopics: "Exam Mock Topics",
     days: "days",
+    // Governor (T3 - hibernate)
+    governorTitle: "Governor & Hibernate",
+    governorDesc: "The governor idles the worker when there is no work for the configured idle window, and wakes it on demand.",
+    governorStatus: "Status",
+    governorControls: "Controls",
+    governorWorker: "Worker",
+    governorAwake: "Awake",
+    governorAsleep: "Asleep (hibernated)",
+    governorDraining: "Draining",
+    governorDrainingStatus: "Managed by governor",
+    governorPolicy: "Hibernate policy",
+    governorPolicyEnabled: "Enabled",
+    governorWake: "Wake Worker",
+    governorWakeDesc: "Restart the worker after governor hibernation. Only available when asleep.",
+    governorWakeButton: "Wake",
+    governorWakeDisabled: "Not asleep",
+    governorAlreadyAwake: "Worker is already awake",
+    governorWoke: "Worker woke successfully",
+    governorWakeFailed: "Failed to wake worker",
 
 
     deepseekSetupNeeded: "Setup Needed",

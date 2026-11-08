@@ -1,0 +1,3 @@
+{
+  "/(dashboard)/transformations/page": "app/(dashboard)/transformations/page.js"
+}

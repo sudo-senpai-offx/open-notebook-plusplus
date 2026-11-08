@@ -1,0 +1,239 @@
+{
+  "version": 3,
+  "pages404": true,
+  "appType": "app",
+  "caseSensitive": false,
+  "basePath": "",
+  "redirects": [
+    {
+      "source": "/:path+/",
+      "destination": "/:path+",
+      "internal": true,
+      "priority": true,
+      "statusCode": 308,
+      "regex": "^(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))/$"
+    },
+    {
+      "source": "/settings/api-keys",
+      "destination": "/settings/models",
+      "statusCode": 308,
+      "regex": "^(?!/_next)/settings/api-keys(?:/)?$"
+    }
+  ],
+  "headers": [],
+  "onMatchHeaders": [],
+  "rewrites": {
+    "beforeFiles": [],
+    "afterFiles": [
+      {
+        "source": "/api/:path*",
+        "destination": "http://localhost:5055/api/:path*",
+        "regex": "^/api(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))?(?:/)?$"
+      }
+    ],
+    "fallback": []
+  },
+  "dynamicRoutes": [
+    {
+      "page": "/api/sources/[sourceId]/chat/sessions/[sessionId]/messages",
+      "regex": "^/api/sources/([^/]+?)/chat/sessions/([^/]+?)/messages(?:/)?$",
+      "routeKeys": {
+        "nxtPsourceId": "nxtPsourceId",
+        "nxtPsessionId": "nxtPsessionId"
+      },
+      "namedRegex": "^/api/sources/(?<nxtPsourceId>[^/]+?)/chat/sessions/(?<nxtPsessionId>[^/]+?)/messages(?:/)?$"
+    },
+    {
+      "page": "/notebooks/[id]",
+      "regex": "^/notebooks/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/notebooks/(?<nxtPid>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/sources/[id]",
+      "regex": "^/sources/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/sources/(?<nxtPid>[^/]+?)(?:/)?$"
+    }
+  ],
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_global-error",
+      "regex": "^/_global\\-error(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_global\\-error(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/advanced",
+      "regex": "^/advanced(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/advanced(?:/)?$"
+    },
+    {
+      "page": "/api/search/ask",
+      "regex": "^/api/search/ask(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/search/ask(?:/)?$"
+    },
+    {
+      "page": "/assessments",
+      "regex": "^/assessments(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/assessments(?:/)?$"
+    },
+    {
+      "page": "/config",
+      "regex": "^/config(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/config(?:/)?$"
+    },
+    {
+      "page": "/dev/design",
+      "regex": "^/dev/design(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dev/design(?:/)?$"
+    },
+    {
+      "page": "/dynamic-course",
+      "regex": "^/dynamic\\-course(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dynamic\\-course(?:/)?$"
+    },
+    {
+      "page": "/favicon.ico",
+      "regex": "^/favicon\\.ico(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/favicon\\.ico(?:/)?$"
+    },
+    {
+      "page": "/focus",
+      "regex": "^/focus(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/focus(?:/)?$"
+    },
+    {
+      "page": "/login",
+      "regex": "^/login(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/login(?:/)?$"
+    },
+    {
+      "page": "/manifest.webmanifest",
+      "regex": "^/manifest\\.webmanifest(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/manifest\\.webmanifest(?:/)?$"
+    },
+    {
+      "page": "/notebooks",
+      "regex": "^/notebooks(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/notebooks(?:/)?$"
+    },
+    {
+      "page": "/podcasts",
+      "regex": "^/podcasts(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/podcasts(?:/)?$"
+    },
+    {
+      "page": "/review",
+      "regex": "^/review(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/review(?:/)?$"
+    },
+    {
+      "page": "/search",
+      "regex": "^/search(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/search(?:/)?$"
+    },
+    {
+      "page": "/settings",
+      "regex": "^/settings(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings(?:/)?$"
+    },
+    {
+      "page": "/settings/models",
+      "regex": "^/settings/models(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/models(?:/)?$"
+    },
+    {
+      "page": "/settings/sync",
+      "regex": "^/settings/sync(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/settings/sync(?:/)?$"
+    },
+    {
+      "page": "/sites",
+      "regex": "^/sites(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/sites(?:/)?$"
+    },
+    {
+      "page": "/sources",
+      "regex": "^/sources(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/sources(?:/)?$"
+    },
+    {
+      "page": "/study",
+      "regex": "^/study(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/study(?:/)?$"
+    },
+    {
+      "page": "/timetable",
+      "regex": "^/timetable(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/timetable(?:/)?$"
+    },
+    {
+      "page": "/training",
+      "regex": "^/training(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/training(?:/)?$"
+    },
+    {
+      "page": "/transformations",
+      "regex": "^/transformations(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/transformations(?:/)?$"
+    }
+  ],
+  "dataRoutes": [],
+  "rsc": {
+    "header": "rsc",
+    "varyHeader": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+    "prefetchHeader": "next-router-prefetch",
+    "didPostponeHeader": "x-nextjs-postponed",
+    "contentTypeHeader": "text/x-component",
+    "suffix": ".rsc",
+    "prefetchSegmentHeader": "next-router-segment-prefetch",
+    "prefetchSegmentSuffix": ".segment.rsc",
+    "prefetchSegmentDirSuffix": ".segments",
+    "clientParamParsing": false,
+    "dynamicRSCPrerender": false
+  },
+  "rewriteHeaders": {
+    "pathHeader": "x-nextjs-rewritten-path",
+    "queryHeader": "x-nextjs-rewritten-query"
+  }
+}

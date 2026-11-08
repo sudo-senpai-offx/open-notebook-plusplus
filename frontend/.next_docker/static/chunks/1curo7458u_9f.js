@@ -1,0 +1,1 @@
+(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push(["object"==typeof document?document.currentScript:void 0,94815,t=>{"use strict";var a=t.i(61238);t.s(["commandsApi",0,{queueDepth:async()=>{try{let t=await a.default.get("/commands/jobs?status_filter=new");return Array.isArray(t.data)?t.data.length:0}catch{return 0}}}])}]);

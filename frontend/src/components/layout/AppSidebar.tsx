@@ -42,6 +42,7 @@ import {
   Menu,
   FileText,
   Plus,
+  Power,
   Globe,
   Wrench,
   Command,
@@ -79,6 +80,7 @@ const getNavigation = (t: TFunction) => [
       { name: t('navigation.transformations'), href: '/transformations', icon: Shuffle, iconClass: undefined },
       { name: t('navigation.settings'), href: '/settings', icon: Settings, iconClass: undefined },
       { name: t('navigation.advanced'), href: '/advanced', icon: Wrench, iconClass: undefined },
+      { name: t('navigation.governor'), href: '/governor', icon: Power, iconClass: undefined },
     ],
   },
 ] as const
