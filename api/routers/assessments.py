@@ -126,25 +126,16 @@ async def spiderweb_metrics():
     Custom (non-curated) courses are excluded from metrics.
     """
     try:
-        rows = await repo_query(
-            """
-            SELECT field,
-                   type,
-                   AVG(score) as avg_score,
-                   COUNT(*) as count
-            FROM assessment
-            GROUP BY field, type
-            """
-        )
+        rows = await repo_query("SELECT * FROM assessment ORDER BY created_at DESC")
         # Aggregate into per-field scores
         field_data: dict = {}
         for r in rows or []:
             f = r.get("field")
             t = r.get("type")
-            avg = float(r.get("avg_score") or 0)
+            score = float(r.get("score") or 0)
             if f not in field_data:
                 field_data[f] = {"quiz": [], "exam": [], "mock": []}
-            field_data[f][t].append(avg)
+            field_data[f][t].append(score)
 
         result = []
         for field, data in field_data.items():
