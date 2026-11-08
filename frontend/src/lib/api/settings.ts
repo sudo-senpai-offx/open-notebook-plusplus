@@ -1,5 +1,37 @@
 import apiClient from './client'
-import { SettingsResponse, DeepSeekSessionStatus, DeepSeekConfigureRequest, DeepSeekConfigureResponse, DeepSeekRefreshResponse, DeepSeekAvailableResponse, DeepSeekChatRequest, DeepSeekChatResponse } from '@/lib/types/api'
+import {
+  SettingsResponse,
+  DeepSeekSessionStatus,
+  DeepSeekConfigureRequest,
+  DeepSeekConfigureResponse,
+  DeepSeekRefreshResponse,
+  DeepSeekAvailableResponse,
+  DeepSeekChatRequest,
+  DeepSeekChatResponse,
+  TTSRequest,
+  TTSResponse,
+  STTResponse,
+  VoiceList,
+  SupportedLanguages,
+  PreprocessRequest,
+  PreprocessResponse,
+  PreprocessGroups,
+  PromptInfo,
+  PromptRenderResponse,
+  GoogleAIModeRequest,
+  GoogleAIModeResponse,
+  DuckAIRequest,
+  DuckAIResponse,
+  BrowserAIStatus,
+  FlashcardGenerateRequest,
+  FlashcardGenerateResponse,
+  PodcastScriptRequest,
+  PodcastScriptResponse,
+  SyntheticDataRequest,
+  SyntheticDataResponse,
+  TranscriptPostProcessRequest,
+  TranscriptPostProcessResponse,
+} from '@/lib/types/api'
 
 export const settingsApi = {
   get: async () => {
@@ -99,6 +131,113 @@ export const deepseekApi = {
 
   chat: async (data: DeepSeekChatRequest) => {
     const response = await apiClient.post<DeepSeekChatResponse>('/chat/deepseek-web', data)
+    return response.data
+  },
+}
+
+export const ttsSttApi = {
+  synthesize: async (data: TTSRequest) => {
+    const response = await apiClient.post<TTSResponse>('/tts/synthesize', data)
+    return response.data
+  },
+
+  voices: async () => {
+    const response = await apiClient.get<VoiceList>('/tts/voices')
+    return response.data
+  },
+
+  transcribe: async (file: File, language?: string) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (language) formData.append('language', language)
+    const response = await apiClient.post<STTResponse>('/stt/transcribe', formData)
+    return response.data
+  },
+
+  languages: async () => {
+    const response = await apiClient.get<SupportedLanguages>('/stt/languages')
+    return response.data
+  },
+
+  postprocess: async (data: TranscriptPostProcessRequest) => {
+    const response = await apiClient.post<TranscriptPostProcessResponse>('/stt/postprocess', data)
+    return response.data
+  },
+
+  ttsStatus: async () => {
+    const response = await apiClient.get<{ allow_local_processing: boolean; piper_reachable: boolean; piper_detail: string }>('/tts/status')
+    return response.data
+  },
+
+  sttStatus: async () => {
+    const response = await apiClient.get<{ allow_local_processing: boolean; whisper_reachable: boolean; whisper_detail: string }>('/stt/status')
+    return response.data
+  },
+}
+
+export const preprocessorApi = {
+  preprocess: async (data: PreprocessRequest) => {
+    const response = await apiClient.post<PreprocessResponse>('/preprocess', data)
+    return response.data
+  },
+
+  groups: async () => {
+    const response = await apiClient.get<PreprocessGroups>('/preprocess/groups')
+    return response.data
+  },
+}
+
+export const promptLibraryApi = {
+  list: async () => {
+    const response = await apiClient.get<PromptInfo[]>('/prompts')
+    return response.data
+  },
+
+  get: async (name: string) => {
+    const response = await apiClient.get<PromptInfo>(`/prompts/${encodeURIComponent(name)}`)
+    return response.data
+  },
+
+  render: async (name: string, variables: Record<string, unknown>) => {
+    const response = await apiClient.post<PromptRenderResponse>(`/prompts/${encodeURIComponent(name)}/render`, { variables })
+    return response.data
+  },
+}
+
+export const browserAiApi = {
+  googleAiMode: async (data: GoogleAIModeRequest) => {
+    const response = await apiClient.post<GoogleAIModeResponse>('/browser-ai/google-ai-mode', data)
+    return response.data
+  },
+
+  duckAi: async (data: DuckAIRequest) => {
+    const response = await apiClient.post<DuckAIResponse>('/browser-ai/duck-ai', data)
+    return response.data
+  },
+
+  status: async () => {
+    const response = await apiClient.get<BrowserAIStatus>('/browser-ai/status')
+    return response.data
+  },
+}
+
+export const flashcardApi = {
+  generate: async (data: FlashcardGenerateRequest) => {
+    const response = await apiClient.post<FlashcardGenerateResponse>('/flashcards/generate', data)
+    return response.data
+  },
+}
+
+export const podcastApi = {
+  generateScript: async (data: PodcastScriptRequest) => {
+    const response = await apiClient.post<PodcastScriptResponse>('/podcasts/script', data)
+    return response.data
+  },
+}
+
+export const trainingApi = {
+  generateSyntheticData: async (data: SyntheticDataRequest) => {
+    const response = await apiClient.post<SyntheticDataResponse>('/deepseek-sessions/synthetic-data', data)
     return response.data
   },
 }

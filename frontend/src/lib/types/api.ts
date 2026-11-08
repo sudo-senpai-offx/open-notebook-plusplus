@@ -346,3 +346,208 @@ export interface DeepSeekChatResponse {
   session_id: string | null
   prompt_used: string | null
 }
+
+// TTS/STT API types (D14/D15)
+export interface TTSRequest {
+  text: string
+  voice?: string | null
+  language?: string | null
+  out_path?: string | null
+}
+
+export interface TTSResponse {
+  ok: boolean
+  audio_path?: string | null
+  bytes_written?: number
+  provider?: string | null
+  language?: string | null
+  voice?: string | null
+  error?: string | null
+  browser_fallback?: boolean
+}
+
+export interface STTRequest {
+  language?: string | null
+}
+
+export interface STTResponse {
+  ok: boolean
+  text?: string | null
+  seconds?: number
+  provider?: string | null
+  language?: string | null
+  error?: string | null
+  browser_fallback?: boolean
+}
+
+export interface VoiceList {
+  piper: string[]
+  edge_tts: string[]
+  browser_web_speech: string[]
+}
+
+export interface SupportedLanguages {
+  supported_large_tier: string[]
+  supported_small_tier: string[]
+  unsupported: string[]
+}
+
+// Preprocessor API types (B6-B9)
+export interface PreprocessRequest {
+  paths: string[]
+  settings?: Record<string, boolean>
+  language?: string | null
+}
+
+export interface PreprocessResult {
+  ok: boolean
+  source_path: string
+  markdown_path?: string | null
+  markdown_content?: string | null
+  file_group?: string | null
+  force_enabled?: boolean
+  error?: string | null
+}
+
+export interface PreprocessResponse {
+  results: PreprocessResult[]
+}
+
+export interface PreprocessGroups {
+  groups: Record<string, boolean>
+}
+
+// Prompt Library API types (G24/G25)
+export interface PromptInfo {
+  name: string
+  description: string
+  variables: string[]
+}
+
+export interface PromptRenderRequest {
+  variables: Record<string, unknown>
+}
+
+export interface PromptRenderResponse {
+  prompt: string
+  rendered: string
+}
+
+// Browser AI API types (D17)
+export interface GoogleAIModeRequest {
+  prompt: string
+  session_token?: string | null
+  country?: string
+  language?: string
+}
+
+export interface GoogleAIModeResponse {
+  ok: boolean
+  response?: string | null
+  session_token?: string | null
+  provider: string
+  error?: string | null
+  rate_limited?: boolean
+}
+
+export interface DuckAIRequest {
+  prompt: string
+  model?: string | null
+}
+
+export interface DuckAIResponse {
+  ok: boolean
+  response?: string | null
+  provider: string
+  error?: string | null
+  rate_limited?: boolean
+}
+
+export interface BrowserAIStatus {
+  google_ai_mode: {
+    configured: boolean
+    url?: string | null
+    playwright_fallback: boolean
+  }
+  duck_ai: {
+    configured: boolean
+    url?: string | null
+    p2d_duck_available: boolean
+  }
+  rate_limits: {
+    duck_ai: string
+    google_ai_mode: string
+  }
+}
+
+// Flashcard generation request
+export interface FlashcardGenerateRequest {
+  notebook_id: string
+  source_id?: string | null
+  source_text: string
+  language: string
+  card_type: 'basic' | 'cloze'
+  count: number
+}
+
+export interface FlashcardGenerateResponse {
+  ok: boolean
+  cards: Array<{
+    id?: string
+    guid?: string
+    model?: string
+    front?: string | null
+    back?: string | null
+    cloze_text?: string | null
+    tags?: string[]
+    source_id?: string | null
+    status?: string
+  }>
+  count: number
+  error?: string | null
+}
+
+// Podcast script generation request
+export interface PodcastScriptRequest {
+  notebook_id: string
+  source_text: string
+  tone?: string
+  duration?: number
+  speakers?: string
+}
+
+export interface PodcastScriptResponse {
+  ok: boolean
+  script?: string | null
+  error?: string | null
+}
+
+// Synthetic data generation request
+export interface SyntheticDataRequest {
+  notebook_id: string
+  topic: string
+  difficulty?: number
+  count?: number
+}
+
+export interface SyntheticDataResponse {
+  ok: boolean
+  pairs: Array<{ instruction: string; response: string }>
+  count: number
+  error?: string | null
+}
+
+// Transcript post-processing request
+export interface TranscriptPostProcessRequest {
+  transcript: string
+  notebook_id: string
+  language?: string
+}
+
+export interface TranscriptPostProcessResponse {
+  ok: boolean
+  cleaned_transcript?: string | null
+  original_length?: number
+  cleaned_length?: number
+  error?: string | null
+}

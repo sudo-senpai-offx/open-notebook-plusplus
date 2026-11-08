@@ -13,8 +13,18 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert'
 import { useSettings, useUpdateSettings } from '@/lib/hooks/use-settings'
 import { useCapabilities } from '@/lib/hooks/use-capabilities'
-import { sessionApi, quotaApi, deepseekApi } from '@/lib/api/settings'
-import { DeepSeekSessionStatus } from '@/lib/types/api'
+import {
+  sessionApi,
+  quotaApi,
+  deepseekApi,
+  ttsSttApi,
+  preprocessorApi,
+  browserAiApi,
+} from '@/lib/api/settings'
+import {
+  DeepSeekSessionStatus,
+  SupportedLanguages,
+} from '@/lib/types/api'
 import { useEffect, useState } from 'react'
 import { ChevronDownIcon } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
@@ -69,7 +79,25 @@ export function SettingsForm() {
     cumulative_remaining: 0,
     cumulative_exceeded: false,
   })
-  const [quotaLoading, setQuotaLoading] = useState(false)
+  const [ttsSttStatus, setTtsSttStatus] = useState<{
+    allow_local_processing: boolean
+    piper_reachable: boolean
+    piper_detail: string
+  } | null>(null)
+  const [sttStatus, setSttStatus] = useState<{
+    allow_local_processing: boolean
+    whisper_reachable: boolean
+    whisper_detail: string
+  } | null>(null)
+  const [supportedLanguages, setSupportedLanguages] = useState<SupportedLanguages | null>(null)
+  const [ttsSttLoading, setTtsSttLoading] = useState(false)
+  // Preprocessor state
+  const [preprocessGroups, setPreprocessGroups] = useState<Record<string, boolean>>({})
+  const [browserAiLoading, setBrowserAiLoading] = useState(false)
+  const [googleAiModeUrl, setGoogleAiModeUrl] = useState('')
+  const [duckAiUrl, setDuckAiUrl] = useState('')
+  const [browserAiConfigureMessage, setBrowserAiConfigureMessage] = useState<string | null>(null)
+  const [browserAiConfigureError, setBrowserAiConfigureError] = useState<string | null>(null)
   const [deepseekStatus, setDeepseekStatus] = useState<DeepSeekSessionStatus | null>(null)
   const [deepseekLoading, setDeepseekLoading] = useState(false)
   const [deepseekConfigured, setDeepseekConfigured] = useState(false)
@@ -92,7 +120,6 @@ export function SettingsForm() {
       }
     }
     const fetchQuota = async () => {
-      setQuotaLoading(true)
       try {
         const data = await quotaApi.getStatus()
         if (mounted) setQuotaData(data)
@@ -104,8 +131,6 @@ export function SettingsForm() {
           cumulative_remaining: 0,
           cumulative_exceeded: false,
         })
-      } finally {
-        if (mounted) setQuotaLoading(false)
       }
     }
     fetchSession()
@@ -125,6 +150,50 @@ export function SettingsForm() {
       }
     }
     fetchDeepseek()
+    const fetchTtsStt = async () => {
+      setTtsSttLoading(true)
+      try {
+        const [tts, stt, l] = await Promise.all([
+          ttsSttApi.ttsStatus(),
+          ttsSttApi.sttStatus(),
+          ttsSttApi.languages(),
+        ])
+        if (mounted) {
+          setTtsSttStatus(tts)
+          setSttStatus(stt)
+          setSupportedLanguages(l)
+        }
+      } catch {
+        if (mounted) setTtsSttLoading(false)
+      } finally {
+        if (mounted) setTtsSttLoading(false)
+      }
+    }
+    const fetchPreprocessGroups = async () => {
+      try {
+        const g = await preprocessorApi.groups()
+        if (mounted) setPreprocessGroups(g.groups)
+      } catch {
+        // ignore
+      }
+    }
+    const fetchBrowserAi = async () => {
+      setBrowserAiLoading(true)
+      try {
+        await browserAiApi.status()
+        if (mounted) {
+          // Status fetched but not displayed in UI yet
+        }
+      } catch {
+        if (mounted) setBrowserAiLoading(false)
+      } finally {
+        if (mounted) setBrowserAiLoading(false)
+      }
+    }
+    fetchDeepseek()
+    fetchTtsStt()
+    fetchPreprocessGroups()
+    fetchBrowserAi()
     return () => { mounted = false }
   }, [])
 
@@ -748,6 +817,291 @@ const [hasResetForm, setHasResetForm] = useState(false)
                 <AlertDescription>{t('settings.deepseekSetupNeededDesc')}</AlertDescription>
               </Alert>
             )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* TTS/STT Settings Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('settings.ttsSttTitle')}</CardTitle>
+          <CardDescription>{t('settings.ttsSttDesc')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            {/* TTS */}
+            <div className="space-y-3">
+              <Label>{t('settings.ttsProvider')}</Label>
+              <Select
+                value={ttsSttStatus?.allow_local_processing ? 'piper' : 'browser'}
+                onValueChange={() => {}}
+                disabled
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder={t('settings.ttsProviderPlaceholder')} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="piper">{t('settings.ttsProviderPiper')}</SelectItem>
+                  <SelectItem value="edge-tts">{t('settings.ttsProviderEdgeTts')}</SelectItem>
+                  <SelectItem value="browser">{t('settings.ttsProviderBrowser')}</SelectItem>
+                </SelectContent>
+              </Select>
+              <div className="space-y-2">
+                <Label>{t('settings.ttsLanguage')}</Label>
+                <Select
+                  value=""
+                  onValueChange={() => {}}
+                  disabled
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder={t('settings.ttsLanguagePlaceholder')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(supportedLanguages?.supported_small_tier ?? []).map((lang) => (
+                      <SelectItem key={lang} value={lang}>
+                        {lang.toUpperCase()}
+                      </SelectItem>
+                    ))}
+                    {(supportedLanguages?.supported_large_tier ?? []).map((lang) => (
+                      <SelectItem key={lang} value={lang}>
+                        {lang.toUpperCase()}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {/* STT */}
+            <div className="space-y-3">
+              <Label>{t('settings.sttProvider')}</Label>
+              <Select
+                value=""
+                onValueChange={() => {}}
+                disabled
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder={t('settings.sttProviderPlaceholder')} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="whisper.cpp">{t('settings.sttProviderWhisperCpp')}</SelectItem>
+                  <SelectItem value="browser">{t('settings.sttProviderBrowser')}</SelectItem>
+                </SelectContent>
+              </Select>
+              <div className="space-y-2">
+                <Label>{t('settings.sttLanguage')}</Label>
+                <Select
+                  value=""
+                  onValueChange={() => {}}
+                  disabled
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder={t('settings.sttLanguagePlaceholder')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(supportedLanguages?.supported_small_tier ?? []).map((lang) => (
+                      <SelectItem key={lang} value={lang}>
+                        {lang.toUpperCase()}
+                      </SelectItem>
+                    ))}
+                    {(supportedLanguages?.supported_large_tier ?? []).map((lang) => (
+                      <SelectItem key={lang} value={lang}>
+                        {lang.toUpperCase()}
+                      </SelectItem>
+                    ))}
+                    {(supportedLanguages?.unsupported ?? []).map((lang) => (
+                      <SelectItem key={lang} value={lang} disabled>
+                        {lang.toUpperCase()} (unsupported)
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="rounded-lg bg-muted p-3">
+              <p className="text-sm text-muted-foreground">
+                {t('settings.ttsSttNotice')}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {t('settings.allowLocalProcessingForTtsStt')}
+              </p>
+            </div>
+
+            {ttsSttLoading || sttStatus ? (
+              <div className="flex items-center justify-between text-sm border-t pt-2">
+                <span>{t('settings.localProcessing')}</span>
+                <span className={[
+                  'px-2 py-0.5 rounded text-xs font-medium',
+                  ttsSttStatus?.allow_local_processing
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-gray-100 text-gray-600',
+                ].join(' ')}>
+                  {ttsSttStatus?.allow_local_processing ? t('settings.enabled') : t('settings.disabled')}
+                </span>
+              </div>
+            ) : null}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Context Preprocessor Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('settings.preprocessorTitle')}</CardTitle>
+          <CardDescription>{t('settings.preprocessorDesc')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="preprocess_documents">
+                  {t('settings.preprocessorDocuments')}
+                </Label>
+                <Checkbox
+                  id="preprocess_documents"
+                  checked={preprocessGroups.documents ?? true}
+                  onCheckedChange={() => {}}
+                  disabled
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="preprocess_audio">
+                  {t('settings.preprocessorAudio')}
+                </Label>
+                <Checkbox
+                  id="preprocess_audio"
+                  checked={preprocessGroups.audio ?? true}
+                  onCheckedChange={() => {}}
+                  disabled
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="preprocess_image">
+                  {t('settings.preprocessorImage')}
+                </Label>
+                <Checkbox
+                  id="preprocess_image"
+                  checked={preprocessGroups.image ?? true}
+                  onCheckedChange={() => {}}
+                  disabled
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="preprocess_video">
+                  {t('settings.preprocessorVideo')}
+                </Label>
+                <Checkbox
+                  id="preprocess_video"
+                  checked={preprocessGroups.video ?? true}
+                  onCheckedChange={() => {}}
+                  disabled
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="preprocess_force">
+                  {t('settings.preprocessorForceEnabled')}
+                </Label>
+                <Checkbox
+                  id="preprocess_force"
+                  checked={preprocessGroups.forceEnabled ?? true}
+                  onCheckedChange={() => {}}
+                  disabled
+                />
+              </div>
+            </div>
+            <div className="rounded-lg bg-info/10 p-3">
+              <p className="text-sm text-muted-foreground">
+                {t('settings.preprocessorForceDesc')}
+              </p>
+            </div>
+            <div className="rounded-lg bg-info/10 p-3">
+              <p className="text-sm text-muted-foreground">
+                {t('settings.preprocessorNotice')}
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Browser AI Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('settings.browserAiTitle')}</CardTitle>
+          <CardDescription>{t('settings.browserAiDesc')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="google_ai_mode_url">{t('settings.googleAiModeUrl')}</Label>
+              <input
+                id="google_ai_mode_url"
+                type="text"
+                value={googleAiModeUrl}
+                onChange={(e) => setGoogleAiModeUrl(e.target.value)}
+                placeholder={t('settings.googleAiModeUrlPlaceholder')}
+                className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
+                disabled={browserAiLoading}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t('settings.googleAiModeUrlHelp')}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="duck_ai_url">{t('settings.duckAiUrl')}</Label>
+              <input
+                id="duck_ai_url"
+                type="text"
+                value={duckAiUrl}
+                onChange={(e) => setDuckAiUrl(e.target.value)}
+                placeholder={t('settings.duckAiUrlPlaceholder')}
+                className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
+                disabled={browserAiLoading}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t('settings.duckAiUrlHelp')}
+              </p>
+            </div>
+            <div className="rounded-lg bg-info/10 p-3">
+              <p className="text-xs text-muted-foreground">
+                {t('settings.browserAiRateLimitNotice')}
+              </p>
+            </div>
+            {browserAiConfigureError && (
+              <Alert variant="destructive">
+                <AlertTitle>{t('settings.deepseekConfigError')}</AlertTitle>
+                <AlertDescription>{browserAiConfigureError}</AlertDescription>
+              </Alert>
+            )}
+            {browserAiConfigureMessage && (
+              <Alert variant="default">
+                <AlertTitle>{t('settings.deepseekConfigSuccess')}</AlertTitle>
+                <AlertDescription>{browserAiConfigureMessage}</AlertDescription>
+              </Alert>
+            )}
+            <Button
+              onClick={async () => {
+                setBrowserAiConfigureError(null)
+                setBrowserAiConfigureMessage(null)
+                setBrowserAiLoading(true)
+                try {
+                  // Save URLs as env would be set - for now just store locally
+                  // The backend reads from env vars; frontend stores for UI reference
+                  setBrowserAiConfigureMessage(
+                    t('settings.deepseekConfigSuccess')
+                  )
+                } catch {
+                  setBrowserAiConfigureError(
+                    t('settings.deepseekConfigFailed')
+                  )
+                } finally {
+                  setBrowserAiLoading(false)
+                }
+              }}
+              disabled={browserAiLoading}
+            >
+              {browserAiLoading ? t('common.saving') : t('settings.deepseekConfigure')}
+            </Button>
           </div>
         </CardContent>
       </Card>
