@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration version="39">
+  <!--
+    Syncthing configuration for Open Notebook++ sync (Track B, E18 P1).
+
+    This folder keeps $SYNC_DIR mirrored between two Open Notebook++
+    instances continuously and bidirectionally. The API still owns
+    export/import semantics; Syncthing only moves the manifest files.
+    Blob bytes travel on the existing HTTP channel (/api/sync/blobs/*),
+    never through Syncthing.
+
+    Setup on each device:
+      1. Copy this file to ~/.config/syncthing/config.xml (or wherever
+         your Syncthing stores config).
+      2. Replace DEVICE_ID_SELF with this device's Syncthing ID
+         (shown in the GUI or via `syncthing -device-id`).
+      3. Replace DEVICE_ID_PEER with the peer's ID.
+      4. Replace $SYNC_DIR_ABSOLUTE with the absolute path to your
+         OPEN_NOTEBOOK_SYNC_DIR.
+      5. Generate a new API key: `syncthing -generate` or set one here.
+      6. Start Syncthing: `syncthing -home ~/.config/syncthing`.
+      7. Exchange device IDs out of band and add each other as remote
+         devices in the GUI (http://127.0.0.1:8384).
+      8. Add the "open-notebook-sync" folder on both devices, sharing
+         with the peer's device ID.
+  -->
+
+  <folder id="open-notebook-sync" path="$SYNC_DIR_ABSOLUTE" type="sendReceive">
+    <device id="DEVICE_ID_PEER"></device>
+    <device id="DEVICE_ID_SELF"></device>
+    <rescanIntervalS>300</rescanIntervalS>
+    <ignoreDelete>false</ignoreDelete>
+    <versioning></versioning>
+  </folder>
+
+  <device id="DEVICE_ID_SELF" name="open-notebook-$(hostname)" compression="metadata" introducer="false" skipIntroductionRemovals="false" introducedBy=""/>
+  <device id="DEVICE_ID_PEER" name="open-notebook-peer" compression="metadata" introducer="false" skipIntroductionRemovals="false" introducedBy=""/>
+
+  <gui enabled="true" tls="false" debugging="false">
+    <address>127.0.0.1:8384</address>
+    <api-key>API_KEY</api-key>
+    <insecureAdminAccess>true</insecureAdminAccess>
+    <insecureGUIAccess>true</insecureGUIAccess>
+    <theme>default</theme>
+  </gui>
+
+  <options>
+    <listenAddress>default</listenAddress>
+    <globalAnnounceServer>default</globalAnnounceServer>
+    <relayServer>default</relayServer>
+    <relayReconnectInterval>3m0s</relayReconnectInterval>
+    <keepTemporaryFilesH>0</keepTemporaryFilesH>
+    <cacheIgnorePermFile>false</cacheIgnorePermFile>
+    <progressUpdateIntervalS>5</progressUpdateIntervalS>
+    <limitBandwidthInKb>0</limitBandwidthInKb>
+    <limitBandwidthOutKb>0</limitBandwidthOutKb>
+    <minHomeDiskFree>1</minHomeDiskFree>
+    <reusePromiscuousDevices>true</reusePromiscuousDevices>
+    <logToStdout>false</logToStdout>
+    <logOldDays>7</logOldDays>
+    <maxConcurrentIncomingRequests>32</maxConcurrentIncomingRequests>
+    <overwriteRemoteDeviceNamesOnReceive>false</overwriteRemoteDeviceNamesOnReceive>
+    <autoAcceptFolders>false</autoAcceptFolders>
+    <sendOnlyIntroduction>false</sendOnlyIntroduction>
+    <localAnnounceEnabled>true</localAnnounceEnabled>
+    <localAnnouncePort>21027</localAnnouncePort>
+    <localAnnounceMCAddr>[ff12::8384]:21027</localAnnounceMCAddr>
+    <maxSendKbps>0</maxSendKbps>
+    <maxRecvKbps>0</maxRecvKbps>
+    <connectionPriority>default</connectionPriority>
+    <acceptedProtocols>syncthing,local</acceptedProtocols>
+  </options>
+</configuration>

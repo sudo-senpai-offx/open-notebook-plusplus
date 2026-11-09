@@ -1,0 +1,13 @@
+# Local state that must never be transported between devices
+.sync-rc
+.git/
+.tmp
+*.swp
+*~
+# Baseline/watermark live in DATA_FOLDER (already outside $SYNC_DIR),
+# but exclude any stray copies if they appear here:
+sync-baseline.json
+sync-watermark.json
+# Thumbnail/preview caches if any are added later
+*.thumb
+.cache/
