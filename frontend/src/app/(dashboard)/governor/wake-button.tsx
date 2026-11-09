@@ -2,19 +2,22 @@
 
 import { useEffect, useState } from "react"
 
-const API_BASE = "/api"
+interface WakeButtonProps {
+  isAsleep: boolean
+  apiBase: string
+  authHeader?: string
+}
 
-async function governorWake() {
-  const res = await fetch(`${API_BASE}/governor/wake`, { method: "POST" })
+async function governorWake(apiBase: string, authHeader?: string) {
+  const res = await fetch(`${apiBase}/governor/wake`, {
+    method: "POST",
+    headers: authHeader ? { authorization: authHeader } : {},
+  })
   if (!res.ok) throw new Error("wake failed")
   return res.json()
 }
 
-interface WakeButtonProps {
-  isAsleep: boolean
-}
-
-export function WakeButton({ isAsleep }: WakeButtonProps) {
+export function WakeButton({ isAsleep, apiBase, authHeader }: WakeButtonProps) {
   const [waking, setWaking] = useState(false)
   const [message, setMessage] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(null)
 
@@ -22,7 +25,7 @@ export function WakeButton({ isAsleep }: WakeButtonProps) {
     setWaking(true)
     setMessage(null)
     try {
-      await governorWake()
+      await governorWake(apiBase, authHeader)
       setMessage({ kind: "success", text: "Worker woke successfully" })
     } catch {
       setMessage({ kind: "error", text: "Failed to wake worker" })

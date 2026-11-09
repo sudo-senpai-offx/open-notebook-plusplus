@@ -1,10 +1,20 @@
+import { headers } from "next/headers"
 import { WakeButton } from "./wake-button"
 
+// The server component always runs in the same container as the API,
+// so the API is always reachable at http://localhost:5055/api regardless
+// of how the end user reached this page (direct, port forward, reverse proxy).
+const API_BASE = "http://localhost:5055/api"
+
 export default async function GovernorPage() {
-  const API_BASE = "/api"
+  const headersList = await headers()
+  const authHeader = headersList.get("authorization") ?? undefined
 
   async function governorState() {
-    const res = await fetch(`${API_BASE}/governor/state`, { cache: "no-store" })
+    const res = await fetch(`${API_BASE}/governor/state`, {
+      cache: "no-store",
+      headers: authHeader ? { authorization: authHeader } : {},
+    })
     if (!res.ok) return { asleep: false }
     return res.json()
   }
@@ -34,7 +44,7 @@ export default async function GovernorPage() {
       </div>
 
       <div className="mt-6">
-        <WakeButton isAsleep={isAsleep} />
+        <WakeButton isAsleep={isAsleep} apiBase={API_BASE} authHeader={authHeader} />
       </div>
     </div>
   )
