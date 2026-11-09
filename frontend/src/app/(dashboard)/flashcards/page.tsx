@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { AppShell } from '@/components/layout/AppShell'
 import {
   Card,
@@ -15,8 +15,6 @@ import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
-import { Separator } from '@/components/ui/separator'
-import { useTranslation } from '@/lib/hooks/use-translation'
 import {
   flashcardsApi,
   type Flashcard,
@@ -24,25 +22,24 @@ import {
   type FlashcardCreate,
   type FlashcardGenerateRequest,
 } from '@/lib/api/flashcards'
-import { Plus, Trash2, RefreshCw, Check, X, Mic, FileText, Download } from 'lucide-react'
+import { Plus, Trash2, RefreshCw, Check, X, Mic, Download } from 'lucide-react'
 
 type View = 'browse' | 'create' | 'generate' | 'export'
 
 export default function FlashcardsPage() {
-  const { t } = useTranslation()
   const [view, setView] = useState<View>('browse')
   const [cards, setCards] = useState<Flashcard[]>([])
   const [loading, setLoading] = useState(false)
-  [, setFilterStatus] = useState<FlashcardStatus | 'all'>('all')
+  const [_filterStatus, setFilterStatus] = useState<FlashcardStatus | 'all'>('all')
   const [newCard, setNewCard] = useState<FlashcardCreate>({
     model: 'basic',
     front: '',
     back: '',
     tags: [],
   })
-  [generateText, setGenerateText] = useState('')
-  [generateCount, setGenerateCount] = useState(10)
-  [generateResult, setGenerateResult] = useState<{ ok: boolean; cards: any[]; count: number; error?: string } | null>(null)
+  const [generateText, setGenerateText] = useState('')
+  const [generateCount, setGenerateCount] = useState(10)
+  const [generateResult, setGenerateResult] = useState<{ ok: boolean; cards: any[]; count: number; error?: string } | null>(null)
 
   const loadCards = useCallback(async () => {
     setLoading(true)
@@ -65,7 +62,7 @@ export default function FlashcardsPage() {
   }
 
   const filteredCards = cards.filter(c =>
-    filterStatus === 'all' || c.status === filterStatus
+    _filterStatus === 'all' || c.status === _filterStatus
   )
 
   const handleCreate = async () => {
@@ -91,7 +88,7 @@ export default function FlashcardsPage() {
   }
 
   const handleReject = async (cardId: string) => {
-    if (!window.confirm(t('flashcards.confirmReject'))) return
+    if (!window.confirm('Rejecting deletes this draft permanently. Continue?')) return
     try {
       await flashcardsApi.reject(cardId)
       void loadCards()
@@ -101,7 +98,7 @@ export default function FlashcardsPage() {
   }
 
   const handleTombstone = async (cardId: string) => {
-    if (!window.confirm(t('flashcards.confirmTombstone'))) return
+    if (!window.confirm('Tombstoning excludes this card from reviews and exports. Continue?')) return
     try {
       await flashcardsApi.tombstone(cardId)
       void loadCards()
@@ -115,7 +112,7 @@ export default function FlashcardsPage() {
     setLoading(true)
     try {
       const result = await flashcardsApi.generate({
-        notebook_id: '', // will be set by backend from context
+        notebook_id: '',
         source_text: generateText,
         language: 'en',
         card_type: 'basic',
@@ -163,22 +160,25 @@ export default function FlashcardsPage() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="font-display text-2xl font-bold tracking-tight">
-                {t('flashcards.title')}
+                Flashcards
               </h1>
-              <p className="text-muted-foreground">{t('flashcards.desc')}</p>
+              <p className="text-muted-foreground">
+                Create, review, and manage your flashcard deck. Cards start as drafts and must be
+                approved before they appear in reviews.
+              </p>
             </div>
             <div className="flex gap-2">
               <Button onClick={() => setView('create')}>
                 <Plus className="mr-2 h-4 w-4" />
-                {t('flashcards.newCard')}
+                New Card
               </Button>
               <Button onClick={() => setView('generate')}>
                 <Mic className="mr-2 h-4 w-4" />
-                {t('flashcards.generateAI')}
+                Generate with AI
               </Button>
               <Button onClick={() => setView('export')} variant="outline">
                 <Download className="mr-2 h-4 w-4" />
-                {t('flashcards.exportApkg')}
+                Export .apkg
               </Button>
             </div>
           </div>
@@ -189,7 +189,7 @@ export default function FlashcardsPage() {
               <CardContent className="p-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-xs text-muted-foreground">{t('flashcards.drafts')}</p>
+                    <p className="text-xs text-muted-foreground">Drafts</p>
                     <p className="text-2xl font-bold">{statusCounts.draft}</p>
                   </div>
                   <Badge variant="outline">draft</Badge>
@@ -200,7 +200,7 @@ export default function FlashcardsPage() {
               <CardContent className="p-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-xs text-muted-foreground">{t('flashcards.approved')}</p>
+                    <p className="text-xs text-muted-foreground">Approved</p>
                     <p className="text-2xl font-bold">{statusCounts.approved}</p>
                   </div>
                   <Badge variant="secondary">approved</Badge>
@@ -211,7 +211,7 @@ export default function FlashcardsPage() {
               <CardContent className="p-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-xs text-muted-foreground">{t('flashcards.tombstoned')}</p>
+                    <p className="text-xs text-muted-foreground">Tombstoned</p>
                     <p className="text-2xl font-bold">{statusCounts.tombstoned}</p>
                   </div>
                   <Badge variant="destructive">tombstoned</Badge>
@@ -222,10 +222,10 @@ export default function FlashcardsPage() {
 
           <Tabs defaultValue="browse" value={view} onValueChange={(v) => setView(v as View)}>
             <TabsList className="grid w-full grid-cols-4">
-              <TabsTrigger value="browse">{t('flashcards.browse')}</TabsTrigger>
-              <TabsTrigger value="create">{t('flashcards.create')}</TabsTrigger>
-              <TabsTrigger value="generate">{t('flashcards.generate')}</TabsTrigger>
-              <TabsTrigger value="export">{t('flashcards.export')}</TabsTrigger>
+              <TabsTrigger value="browse">Browse</TabsTrigger>
+              <TabsTrigger value="create">Create</TabsTrigger>
+              <TabsTrigger value="generate">Generate</TabsTrigger>
+              <TabsTrigger value="export">Export</TabsTrigger>
             </TabsList>
 
             {/* Browse */}
@@ -237,38 +237,40 @@ export default function FlashcardsPage() {
                     onValueChange={(v) => setFilterStatus(v as FlashcardStatus | 'all')}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder={t('flashcards.filterStatus')} />
+                      <SelectValue placeholder="Filter by status" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="all">{t('flashcards.allStatus')}</SelectItem>
-                      <SelectItem value="draft">{t('flashcards.statusDraft')}</SelectItem>
-                      <SelectItem value="approved">{t('flashcards.statusApproved')}</SelectItem>
-                      <SelectItem value="tombstoned">{t('flashcards.statusTombstoned')}</SelectItem>
+                      <SelectItem value="all">All</SelectItem>
+                      <SelectItem value="draft">Draft</SelectItem>
+                      <SelectItem value="approved">Approved</SelectItem>
+                      <SelectItem value="tombstoned">Tombstoned</SelectItem>
                     </SelectContent>
                   </Select>
                   <Button onClick={() => void loadCards()} size="sm">
                     <RefreshCw className="mr-2 h-4 w-4" />
-                    {t('flashcards.refresh')}
+                    Refresh
                   </Button>
                 </div>
 
                 {loading ? (
-                  <p className="text-sm text-muted-foreground">{t('flashcards.loading')}</p>
+                  <p className="text-sm text-muted-foreground">Loading cards…</p>
                 ) : filteredCards.length === 0 ? (
                   <div className="text-center py-12 text-muted-foreground">
-                    <p>{t('flashcards.noCards')}</p>
+                    <p>No flashcards yet. Create your first card or generate from source text.</p>
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm text-left">
                       <thead>
                         <tr className="border-b border-border">
-                          <th className="pb-3 text-muted-foreground">{t('flashcards.front')}</th>
-                          <th className="pb-3 text-muted-foreground">{t('flashcards.back')}</th>
-                          <th className="pb-3 text-muted-foreground">{t('flashcards.model')}</th>
-                          <th className="pb-3 text-muted-foreground">{t('flashcards.tags')}</th>
-                          <th className="pb-3 text-muted-foreground">{t('flashcards.status')}</th>
-                          <th className="pb-3 text-muted-foreground text-right">{t('flashcards.actions')}</th>
+                          <th className="pb-3 text-muted-foreground">Front</th>
+                          <th className="pb-3 text-muted-foreground">Back</th>
+                          <th className="pb-3 text-muted-foreground">Model</th>
+                          <th className="pb-3 text-muted-foreground">Tags</th>
+                          <th className="pb-3 text-muted-foreground">Status</th>
+                          <th className="pb-3 text-muted-foreground text-right">
+                            Actions
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
@@ -278,7 +280,7 @@ export default function FlashcardsPage() {
                               {card.model === 'cloze' ? card.cloze_text : card.front} || '-'
                             </td>
                             <td className="py-3">
-                              {card.model === 'cloze' ? t('flashcards.clozeCard') : card.back || '-'}
+                              {card.model === 'cloze' ? 'Cloze card' : card.back || '-'}
                             </td>
                             <td className="py-3">{card.model}</td>
                             <td className="py-3">
@@ -293,7 +295,7 @@ export default function FlashcardsPage() {
                                   onClick={() => handleApprove(card.id)}
                                 >
                                   <Check className="mr-1 h-4 w-4" />
-                                  {t('flashcards.approve')}
+                                  Approve
                                 </Button>
                               )}
                               {card.status === 'draft' && (
@@ -303,7 +305,7 @@ export default function FlashcardsPage() {
                                   onClick={() => handleReject(card.id)}
                                 >
                                   <X className="mr-1 h-4 w-4" />
-                                  {t('flashcards.reject')}
+                                  Reject
                                 </Button>
                               )}
                               {card.status === 'approved' && (
@@ -313,7 +315,7 @@ export default function FlashcardsPage() {
                                   onClick={() => handleTombstone(card.id)}
                                 >
                                   <Trash2 className="mr-1 h-4 w-4" />
-                                  {t('flashcards.tombstone')}
+                                  Tombstone
                                 </Button>
                               )}
                             </td>
@@ -330,8 +332,10 @@ export default function FlashcardsPage() {
             <TabsContent value="create">
               <Card>
                 <CardHeader>
-                  <CardTitle>{t('flashcards.newCard')}</CardTitle>
-                  <CardDescription>{t('flashcards.newCardDesc')}</CardDescription>
+                  <CardTitle>New Card</CardTitle>
+                  <CardDescription>
+                    Author a flashcard manually. Cards start as drafts.
+                  </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <Select
@@ -341,58 +345,79 @@ export default function FlashcardsPage() {
                     }
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder={t('flashcards.modelType')} />
+                      <SelectValue placeholder="Card type" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="basic">{t('flashcards.basic')}</SelectItem>
-                      <SelectItem value="cloze">{t('flashcards.cloze')}</SelectItem>
+                      <SelectItem value="basic">Basic</SelectItem>
+                      <SelectItem value="cloze">Cloze</SelectItem>
                     </SelectContent>
                   </Select>
 
                   {newCard.model === 'basic' ? (
                     <>
-                      <Input
-                        label={t('flashcards.front')}
-                        placeholder={t('flashcards.frontPlaceholder')}
-                        value={newCard.front ?? ''}
-                        onChange={(e) => setNewCard({ ...newCard, front: e.target.value })}
-                      />
-                      <Input
-                        label={t('flashcards.back')}
-                        placeholder={t('flashcards.backPlaceholder')}
-                        value={newCard.back ?? ''}
-                        onChange={(e) => setNewCard({ ...newCard, back: e.target.value })}
-                      />
+                      <div className="space-y-2">
+                        <label className="text-xs font-medium text-muted-foreground">
+                          Front
+                        </label>
+                        <Input
+                          placeholder="Question or prompt"
+                          value={newCard.front ?? ''}
+                          onChange={(e) =>
+                            setNewCard({ ...newCard, front: e.target.value })}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs font-medium text-muted-foreground">
+                          Back
+                        </label>
+                        <Input
+                          placeholder="Answer"
+                          value={newCard.back ?? ''}
+                          onChange={(e) =>
+                            setNewCard({ ...newCard, back: e.target.value })}
+                        />
+                      </div>
                     </>
                   ) : (
-                    <Textarea
-                      label={t('flashcards.clozeText')}
-                      placeholder={t('flashcards.clozePlaceholder')}
-                      value={newCard.cloze_text ?? ''}
-                      onChange={(e) =>
-                        setNewCard({ ...newCard, cloze_text: e.target.value })
+                    <div className="space-y-2">
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Cloze text
+                      </label>
+                      <Textarea
+                        placeholder="The {{c1::answer}} is the capital of France."
+                        value={newCard.cloze_text ?? ''}
+                        onChange={(e) =>
+                          setNewCard({ ...newCard, cloze_text: e.target.value })}
+                        className="h-32"
                       />
-                    />
+                    </div>
                   )}
 
-                  <Input
-                    label={t('flashcards.tags')}
-                    placeholder={t('flashcards.tagsPlaceholder')}
-                    value={newCard.tags.join(', ')}
-                    onChange={(e) =>
-                      setNewCard({
-                        ...newCard,
-                        tags: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
-                      })
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Tags
+                    </label>
+                    <Input
+                      placeholder="tag1, tag2"
+                      value={newCard.tags?.join(', ') ?? ''}
+                      onChange={(e) => {
+                        setNewCard({
+                          ...newCard,
+                          tags: e.target.value
+                            .split(',')
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        })
+                      }}
                     />
-                  />
+                  </div>
 
                   <Button
                     onClick={handleCreate}
                     disabled={loading}
                     className="w-full"
                   >
-                    {loading ? t('flashcards.creating') : t('flashcards.createCard')}
+                    {loading ? 'Creating…' : 'Create Card'}
                   </Button>
                 </CardContent>
               </Card>
@@ -402,17 +427,23 @@ export default function FlashcardsPage() {
             <TabsContent value="generate">
               <Card>
                 <CardHeader>
-                  <CardTitle>{t('flashcards.generateAI')}</CardTitle>
-                  <CardDescription>{t('flashcards.generateAIDesc')}</CardDescription>
+                  <CardTitle>Generate with AI</CardTitle>
+                  <CardDescription>
+                    Generate flashcards from source text via DeepSeek-web.
+                  </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <Textarea
-                    label={t('flashcards.sourceText')}
-                    placeholder={t('flashcards.sourceTextPlaceholder')}
-                    value={generateText}
-                    onChange={(e) => setGenerateText(e.target.value)}
-                    className="h-48"
-                  />
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Source text
+                    </label>
+                    <Textarea
+                      placeholder="Paste source text to generate flashcards from"
+                      value={generateText}
+                      onChange={(e) => setGenerateText(e.target.value)}
+                      className="h-48"
+                    />
+                  </div>
                   <div className="grid grid-cols-2 gap-4">
                     <Select defaultValue="en" onValueChange={() => {}}>
                       <SelectTrigger>
@@ -423,19 +454,24 @@ export default function FlashcardsPage() {
                         <SelectItem value="ja">Japanese</SelectItem>
                       </SelectContent>
                     </Select>
-                    <Input
-                      type="number"
-                      label={t('flashcards.count')}
-                      value={generateCount}
-                      onChange={(e) => setGenerateCount(parseInt(e.target.value) || 10)}
-                    />
+                    <div className="space-y-2">
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Count
+                      </label>
+                      <Input
+                        type="number"
+                        value={generateCount}
+                        onChange={(e) =>
+                          setGenerateCount(parseInt(e.target.value) || 10)}
+                      />
+                    </div>
                   </div>
                   <Button
                     onClick={handleGenerate}
                     disabled={loading || !generateText.trim()}
                     className="w-full"
                   >
-                    {loading ? t('flashcards.generating') : t('flashcards.generateCards')}
+                    {loading ? 'Generating…' : 'Generate Cards'}
                   </Button>
                 </CardContent>
               </Card>
@@ -444,7 +480,7 @@ export default function FlashcardsPage() {
                 <Card>
                   <CardHeader>
                     <CardTitle>
-                      {t('flashcards.generatedCards', { count: generateResult.count })}
+                      Generated {generateResult.count} cards
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
@@ -480,18 +516,24 @@ export default function FlashcardsPage() {
             <TabsContent value="export">
               <Card>
                 <CardHeader>
-                  <CardTitle>{t('flashcards.exportApkg')}</CardTitle>
-                  <CardDescription>{t('flashcards.exportApkgDesc')}</CardDescription>
+                  <CardTitle>Export .apkg</CardTitle>
+                  <CardDescription>
+                    Export approved cards as an Anki .apkg package.
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <Input
-                    label={t('flashcards.deckName')}
-                    placeholder="OpenNotebook"
-                    defaultValue="OpenNotebook"
-                  />
+                  <div className="space-y-2">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Deck name
+                    </label>
+                    <Input
+                      placeholder="OpenNotebook"
+                      defaultValue="OpenNotebook"
+                    />
+                  </div>
                   <Button onClick={handleExport} className="w-full mt-4">
                     <Download className="mr-2 h-4 w-4" />
-                    {t('flashcards.downloadApkg')}
+                    Download .apkg
                   </Button>
                 </CardContent>
               </Card>
