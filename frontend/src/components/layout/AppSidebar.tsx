@@ -46,6 +46,7 @@ import {
   Globe,
   Wrench,
   Command,
+  Edit,
 } from 'lucide-react'
 
 const getNavigation = (t: TFunction) => [
@@ -66,6 +67,7 @@ const getNavigation = (t: TFunction) => [
   {
     title: t('navigation.create'),
     items: [
+      { name: t('navigation.flashcards'), href: '/flashcards', icon: Edit, iconClass: undefined },
       { name: t('navigation.podcasts'), href: '/podcasts', icon: Mic, iconClass: 'text-mauve' },
       { name: t('navigation.training'), href: '/training', icon: Brain, iconClass: undefined },
       { name: t('navigation.focus'), href: '/focus', icon: Timer, iconClass: undefined },

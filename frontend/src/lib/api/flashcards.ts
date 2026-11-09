@@ -30,6 +30,28 @@ export interface FlashcardEdit {
   tags?: string[]
 }
 
+export interface FlashcardGenerateRequest {
+  notebook_id: string
+  source_id?: string
+  source_text: string
+  language?: string
+  card_type?: 'basic' | 'cloze'
+  count?: number
+}
+
+export interface FlashcardGenerateResponse {
+  ok: boolean
+  cards: Array<{ front?: string; back?: string; cloze_text?: string; tags?: string[] }>
+  count: number
+  error?: string
+}
+
+export interface FlashcardExportResponse {
+  ok: boolean
+  filename: string
+  size: number
+}
+
 const id = (cardId: string) => encodeURIComponent(cardId)
 
 export const flashcardsApi = {
@@ -73,6 +95,25 @@ export const flashcardsApi = {
 
   tombstone: async (cardId: string) => {
     const response = await apiClient.post<Flashcard>(`/flashcards/${id(cardId)}/tombstone`)
+    return response.data
+  },
+
+  generate: async (fields: FlashcardGenerateRequest): Promise<FlashcardGenerateResponse> => {
+    const response = await apiClient.post<FlashcardGenerateResponse>(
+      '/flashcards/generate',
+      fields
+    )
+    return response.data
+  },
+
+  export: async (deck?: string): Promise<FlashcardExportResponse> => {
+    const params = new URLSearchParams()
+    if (deck) params.set('deck', deck)
+    const query = params.toString()
+    const response = await apiClient.get<FlashcardExportResponse>(
+      `/flashcards/export${query ? `?${query}` : ''}`,
+      { responseType: 'blob' }
+    )
     return response.data
   },
 }
