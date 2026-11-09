@@ -543,4 +543,17 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    """Health check. Verifies the API process is alive and SurrealDB is reachable."""
+    from open_notebook.database.async_migrate import AsyncMigrationManager
+
+    db_ok = False
+    try:
+        mm = AsyncMigrationManager()
+        db_ok = await mm.ping()
+    except Exception:
+        db_ok = False
+
+    return {
+        "status": "healthy" if db_ok else "degraded",
+        "database": "reachable" if db_ok else "unreachable",
+    }
