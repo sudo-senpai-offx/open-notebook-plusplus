@@ -549,7 +549,8 @@ async def health():
     db_ok = False
     try:
         mm = AsyncMigrationManager()
-        db_ok = await mm.ping()
+        await mm.ping()
+        db_ok = True
     except Exception:
         db_ok = False
 

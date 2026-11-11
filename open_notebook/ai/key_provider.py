@@ -13,7 +13,7 @@ Usage:
 """
 
 import os
-from typing import Optional
+from typing import Dict, Optional
 
 from loguru import logger
 
@@ -25,43 +25,14 @@ from open_notebook.domain.credential import Credential
 # =============================================================================
 # Maps provider names to their environment variable names.
 # This is the single source of truth for provider-to-env-var mapping.
+#
+# Only local/self-hosted providers remain. All cloud API key providers
+# (OpenAI, Anthropic, DeepSeek API, etc.) have been unwired — ON++ now uses
+# the free DeepSeek-web tier (session cookies, not API keys) and local
+# models via Ollama/oMLX.
 
-PROVIDER_CONFIG = {
-    # Simple providers (just API key)
-    "openai": {
-        "env_var": "OPENAI_API_KEY",
-    },
-    "anthropic": {
-        "env_var": "ANTHROPIC_API_KEY",
-    },
-    "google": {
-        "env_var": "GOOGLE_API_KEY",
-    },
-    "groq": {
-        "env_var": "GROQ_API_KEY",
-    },
-    "mistral": {
-        "env_var": "MISTRAL_API_KEY",
-    },
-    "deepseek": {
-        "env_var": "DEEPSEEK_API_KEY",
-    },
-    "xai": {
-        "env_var": "XAI_API_KEY",
-    },
-    "openrouter": {
-        "env_var": "OPENROUTER_API_KEY",
-    },
-    "voyage": {
-        "env_var": "VOYAGE_API_KEY",
-    },
-    "elevenlabs": {
-        "env_var": "ELEVENLABS_API_KEY",
-    },
-    "deepgram": {
-        "env_var": "DEEPGRAM_API_KEY",
-    },
-    # URL-based providers
+PROVIDER_CONFIG: Dict[str, dict] = {
+    # URL-based local providers (no API key required, base URL only)
     "ollama": {
         "env_var": "OLLAMA_API_BASE",
     },
@@ -70,27 +41,6 @@ PROVIDER_CONFIG = {
     # _provision_simple_provider. No OPENAI_COMPATIBLE_* mirroring.
     "omlx": {
         "env_var": "OMLX_API_KEY",
-    },
-    "dashscope": {
-        "env_var": "DASHSCOPE_API_KEY",
-    },
-    "minimax": {
-        "env_var": "MINIMAX_API_KEY",
-    },
-    "novita": {
-        "env_var": "NOVITA_API_KEY",
-    },
-    "siliconflow": {
-        "env_var": "SILICONFLOW_API_KEY",
-    },
-    "zai": {
-        "env_var": "ZAI_API_KEY",
-    },
-    "ppq": {
-        "env_var": "PPQ_API_KEY",
-    },
-    "cohere": {
-        "env_var": "COHERE_API_KEY",
     },
 }
 
@@ -170,153 +120,22 @@ async def _provision_simple_provider(provider: str) -> bool:
     return True
 
 
-async def _provision_vertex() -> bool:
-    """
-    Set environment variables for Google Vertex AI from DB config.
-
-    Returns:
-        True if any keys were set from database
-    """
-    any_set = False
-
-    cred = await _get_default_credential("vertex")
-    if not cred:
-        return False
-
-    if cred.project:
-        os.environ["VERTEX_PROJECT"] = cred.project
-        logger.debug("Set VERTEX_PROJECT from Credential")
-        any_set = True
-    if cred.location:
-        os.environ["VERTEX_LOCATION"] = cred.location
-        logger.debug("Set VERTEX_LOCATION from Credential")
-        any_set = True
-    if cred.credentials_path:
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred.credentials_path
-        logger.debug("Set GOOGLE_APPLICATION_CREDENTIALS from Credential")
-        any_set = True
-
-    return any_set
-
-
-async def _provision_azure() -> bool:
-    """
-    Set environment variables for Azure OpenAI from DB config.
-
-    Returns:
-        True if any keys were set from database
-    """
-    any_set = False
-
-    cred = await _get_default_credential("azure")
-    if not cred:
-        return False
-
-    if cred.api_key:
-        os.environ["AZURE_OPENAI_API_KEY"] = cred.api_key.get_secret_value()
-        logger.debug("Set AZURE_OPENAI_API_KEY from Credential")
-        any_set = True
-    if cred.api_version:
-        os.environ["AZURE_OPENAI_API_VERSION"] = cred.api_version
-        logger.debug("Set AZURE_OPENAI_API_VERSION from Credential")
-        any_set = True
-    # For Azure, base_url from the UI form maps to endpoint
-    azure_endpoint = cred.endpoint or cred.base_url
-    if azure_endpoint:
-        os.environ["AZURE_OPENAI_ENDPOINT"] = azure_endpoint
-        logger.debug("Set AZURE_OPENAI_ENDPOINT from Credential")
-        any_set = True
-    if cred.endpoint_llm:
-        os.environ["AZURE_OPENAI_ENDPOINT_LLM"] = cred.endpoint_llm
-        logger.debug("Set AZURE_OPENAI_ENDPOINT_LLM from Credential")
-        any_set = True
-    if cred.endpoint_embedding:
-        os.environ["AZURE_OPENAI_ENDPOINT_EMBEDDING"] = cred.endpoint_embedding
-        logger.debug("Set AZURE_OPENAI_ENDPOINT_EMBEDDING from Credential")
-        any_set = True
-    if cred.endpoint_stt:
-        os.environ["AZURE_OPENAI_ENDPOINT_STT"] = cred.endpoint_stt
-        logger.debug("Set AZURE_OPENAI_ENDPOINT_STT from Credential")
-        any_set = True
-    if cred.endpoint_tts:
-        os.environ["AZURE_OPENAI_ENDPOINT_TTS"] = cred.endpoint_tts
-        logger.debug("Set AZURE_OPENAI_ENDPOINT_TTS from Credential")
-        any_set = True
-
-    return any_set
-
-
-async def _provision_url_key_compatible(provider: str, env_prefix: str) -> bool:
-    """Set environment variables for base_url + api_key compatible providers
-    (openai_compatible, anthropic_compatible) from DB config.
-
-    Returns:
-        True if any keys were set from database
-    """
-    any_set = False
-
-    cred = await _get_default_credential(provider)
-    if not cred:
-        return False
-
-    if cred.api_key:
-        os.environ[f"{env_prefix}_API_KEY"] = cred.api_key.get_secret_value()
-        logger.debug(f"Set {env_prefix}_API_KEY from Credential")
-        any_set = True
-    if cred.base_url:
-        os.environ[f"{env_prefix}_BASE_URL"] = cred.base_url
-        logger.debug(f"Set {env_prefix}_BASE_URL from Credential")
-        any_set = True
-
-    return any_set
-
-
-async def _provision_openai_compatible() -> bool:
-    """Set environment variables for OpenAI-Compatible providers from DB config."""
-    return await _provision_url_key_compatible("openai_compatible", "OPENAI_COMPATIBLE")
-
-
-async def _provision_anthropic_compatible() -> bool:
-    """Set environment variables for Anthropic-compatible providers from DB config."""
-    return await _provision_url_key_compatible(
-        "anthropic_compatible", "ANTHROPIC_COMPATIBLE"
-    )
-
-
 async def provision_provider_keys(provider: str) -> bool:
     """
     Provision environment variables from database for a specific provider.
 
-    This function checks if the provider has a Credential record stored in the
-    database and sets the corresponding environment variables. If the database
-    doesn't have the configuration, existing environment variables remain unchanged.
-
-    This is the main entry point for the DB->Env fallback mechanism.
+    Only local/self-hosted providers remain (ollama, omlx). All cloud API key
+    providers have been unwired — ON++ uses the free DeepSeek-web tier
+    (session cookies, not API keys) and local models via Ollama/oMLX.
 
     Args:
-        provider: Provider name (openai, anthropic, azure, vertex,
-                  openai-compatible, etc.)
+        provider: Provider name (ollama, omlx)
 
     Returns:
         True if any keys were set from database, False otherwise
-
-    Example:
-        # Before provisioning a model, ensure DB keys are in env vars
-        await provision_provider_keys("openai")
-        model = AIFactory.create_language(model_name="gpt-4", provider="openai")
     """
     # Normalize provider name
     provider_lower = provider.lower()
-
-    # Handle complex providers with multiple config fields
-    if provider_lower == "vertex":
-        return await _provision_vertex()
-    elif provider_lower == "azure":
-        return await _provision_azure()
-    elif provider_lower in ("openai-compatible", "openai_compatible"):
-        return await _provision_openai_compatible()
-    elif provider_lower in ("anthropic-compatible", "anthropic_compatible"):
-        return await _provision_anthropic_compatible()
 
     # Handle simple providers
     return await _provision_simple_provider(provider_lower)
@@ -337,16 +156,8 @@ async def provision_all_keys() -> dict[str, bool]:
     """
     results: dict[str, bool] = {}
 
-    # Simple providers
+    # Simple providers (only local providers remain in PROVIDER_CONFIG)
     for provider in PROVIDER_CONFIG.keys():
         results[provider] = await provision_provider_keys(provider)
-
-    # Complex providers
-    results["vertex"] = await provision_provider_keys("vertex")
-    results["azure"] = await provision_provider_keys("azure")
-    results["openai_compatible"] = await provision_provider_keys("openai_compatible")
-    results["anthropic_compatible"] = await provision_provider_keys(
-        "anthropic_compatible"
-    )
 
     return results

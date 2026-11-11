@@ -145,64 +145,13 @@ def create_credential_from_env(provider: str) -> Credential:
             api_key=SecretStr(api_key) if api_key else None,
             base_url=os.environ.get("OMLX_API_BASE"),
         )
-    elif provider == "vertex":
-        return Credential(
-            name=name,
-            provider=provider,
-            modalities=modalities,
-            project=os.environ.get("VERTEX_PROJECT"),
-            location=os.environ.get("VERTEX_LOCATION"),
-            credentials_path=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
-        )
-    elif provider == "azure":
-        return Credential(
-            name=name,
-            provider=provider,
-            modalities=modalities,
-            api_key=SecretStr(os.environ["AZURE_OPENAI_API_KEY"]),
-            endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
-            api_version=os.environ.get("AZURE_OPENAI_API_VERSION"),
-            endpoint_llm=os.environ.get("AZURE_OPENAI_ENDPOINT_LLM"),
-            endpoint_embedding=os.environ.get("AZURE_OPENAI_ENDPOINT_EMBEDDING"),
-            endpoint_stt=os.environ.get("AZURE_OPENAI_ENDPOINT_STT"),
-            endpoint_tts=os.environ.get("AZURE_OPENAI_ENDPOINT_TTS"),
-        )
-    elif provider in ("openai_compatible", "anthropic_compatible"):
-        env_prefix = provider.upper()
-        api_key = os.environ.get(f"{env_prefix}_API_KEY")
-        return Credential(
-            name=name,
-            provider=provider,
-            modalities=modalities,
-            api_key=SecretStr(api_key) if api_key else None,
-            base_url=os.environ.get(f"{env_prefix}_BASE_URL"),
-        )
-    elif provider == "google":
-        # Support both GOOGLE_API_KEY and GEMINI_API_KEY (fallback)
-        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        return Credential(
-            name=name,
-            provider=provider,
-            modalities=modalities,
-            api_key=SecretStr(api_key) if api_key else None,
-        )
     else:
-        # Simple API key providers (plus an optional *_BASE_URL endpoint
-        # override for providers that declare one, e.g. regional endpoints)
-        config = PROVIDER_ENV_CONFIG.get(provider, {})
-        required = config.get("required", [])
-        env_var = required[0] if required else None
-        api_key = os.environ.get(env_var) if env_var else None
-        spec = PROVIDERS.get(provider)
-        base_url_env = spec.base_url_env if spec else None
+        # Unknown provider — should not happen since cloud providers are
+        # unwired. Return a minimal credential.
         return Credential(
             name=name,
             provider=provider,
             modalities=modalities,
-            api_key=SecretStr(api_key) if api_key else None,
-            base_url=(os.environ.get(base_url_env, "").strip() or None)
-            if base_url_env
-            else None,
         )
 
 

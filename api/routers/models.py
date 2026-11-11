@@ -139,18 +139,10 @@ def _check_azure_support(mode: str) -> bool:
         bool: True if either generic or mode-specific env vars are set
     """
     # Check generic configuration (applies to all modes)
-    generic = (
-        os.environ.get("AZURE_OPENAI_API_KEY") is not None
-        and os.environ.get("AZURE_OPENAI_ENDPOINT") is not None
-        and os.environ.get("AZURE_OPENAI_API_VERSION") is not None
-    )
+    generic = False
 
     # Check mode-specific configuration (takes precedence)
-    specific = (
-        os.environ.get(f"AZURE_OPENAI_API_KEY_{mode}") is not None
-        and os.environ.get(f"AZURE_OPENAI_ENDPOINT_{mode}") is not None
-        and os.environ.get(f"AZURE_OPENAI_API_VERSION_{mode}") is not None
-    )
+    specific = False
 
     return generic or specific
 
@@ -524,27 +516,12 @@ async def get_provider_availability():
         # For each provider, check DB credentials first, then env vars as fallback
 
         # Simple env var mapping for backward compatibility
+        # Only local/self-hosted providers remain — all cloud API key
+        # providers have been unwired (DeepSeek-web uses session cookies,
+        # not API keys).
         env_var_map = {
-            "openai": "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "google": "GOOGLE_API_KEY",
-            "groq": "GROQ_API_KEY",
-            "mistral": "MISTRAL_API_KEY",
-            "deepseek": "DEEPSEEK_API_KEY",
-            "xai": "XAI_API_KEY",
-            "openrouter": "OPENROUTER_API_KEY",
-            "voyage": "VOYAGE_API_KEY",
-            "elevenlabs": "ELEVENLABS_API_KEY",
-            "deepgram": "DEEPGRAM_API_KEY",
             "ollama": "OLLAMA_API_BASE",
             "omlx": "OMLX_API_BASE",
-            "dashscope": "DASHSCOPE_API_KEY",
-            "minimax": "MINIMAX_API_KEY",
-            "novita": "NOVITA_API_KEY",
-            "siliconflow": "SILICONFLOW_API_KEY",
-            "zai": "ZAI_API_KEY",
-            "ppq": "PPQ_API_KEY",
-            "cohere": "COHERE_API_KEY",
         }
 
         provider_status = {}
@@ -554,40 +531,6 @@ async def get_provider_availability():
             has_cred = await _check_provider_has_credential(provider)
             has_env = os.environ.get(env_var) is not None
             provider_status[provider] = has_cred or has_env
-
-        # Google also supports GEMINI_API_KEY
-        if not provider_status.get("google"):
-            provider_status["google"] = os.environ.get("GEMINI_API_KEY") is not None
-
-        # Vertex: DB credential or env vars
-        provider_status["vertex"] = (
-            await _check_provider_has_credential("vertex")
-            or os.environ.get("VERTEX_PROJECT") is not None
-        )
-
-        # Azure: DB credential or env vars
-        provider_status["azure"] = (
-            await _check_provider_has_credential("azure")
-            or _check_azure_support("LLM")
-            or _check_azure_support("EMBEDDING")
-            or _check_azure_support("STT")
-            or _check_azure_support("TTS")
-        )
-
-        # OpenAI-compatible: DB credential or env vars
-        provider_status["openai_compatible"] = (
-            await _check_provider_has_credential("openai_compatible")
-            or _check_openai_compatible_support("LLM")
-            or _check_openai_compatible_support("EMBEDDING")
-            or _check_openai_compatible_support("STT")
-            or _check_openai_compatible_support("TTS")
-        )
-        provider_status["anthropic_compatible"] = await _check_provider_has_credential(
-            "anthropic_compatible"
-        ) or (
-            bool((os.environ.get("ANTHROPIC_COMPATIBLE_BASE_URL") or "").strip())
-            and bool((os.environ.get("ANTHROPIC_COMPATIBLE_API_KEY") or "").strip())
-        )
 
         available_providers = [k for k, v in provider_status.items() if v]
         unavailable_providers = [k for k, v in provider_status.items() if not v]
@@ -600,48 +543,10 @@ async def get_provider_availability():
         for provider in available_providers:
             supported_types[provider] = []
 
-            # Map Esperanto model types to our environment variable modes
-            mode_mapping = {
-                "language": "LLM",
-                "embedding": "EMBEDDING",
-                "speech_to_text": "STT",
-                "text_to_speech": "TTS",
-            }
-
-            # Special handling for openai-compatible to check mode-specific availability
-            if provider == "openai_compatible":
-                # Esperanto exposes this provider with a hyphen ("openai-compatible"),
-                # while the rest of the codebase uses the underscore form.
-                esperanto_name = "openai-compatible"
-                has_db_cred = await _check_provider_has_credential("openai_compatible")
-                for model_type, mode in mode_mapping.items():
-                    if (
-                        model_type in esperanto_available
-                        and esperanto_name in esperanto_available[model_type]
-                    ):
-                        if has_db_cred or _check_openai_compatible_support(mode):
-                            supported_types[provider].append(model_type)
-            # Special handling for azure to check mode-specific availability
-            elif provider == "azure":
-                has_db_cred = await _check_provider_has_credential("azure")
-                for model_type, mode in mode_mapping.items():
-                    if (
-                        model_type in esperanto_available
-                        and provider in esperanto_available[model_type]
-                    ):
-                        if has_db_cred or _check_azure_support(mode):
-                            supported_types[provider].append(model_type)
-            elif provider == "anthropic_compatible":
-                if (
-                    "language" in esperanto_available
-                    and "anthropic" in esperanto_available["language"]
-                ):
-                    supported_types[provider].append("language")
-            else:
-                # Standard provider detection
-                for model_type, providers in esperanto_available.items():
-                    if provider in providers:
-                        supported_types[provider].append(model_type)
+            # Standard provider detection
+            for model_type, providers in esperanto_available.items():
+                if provider in providers:
+                    supported_types[provider].append(model_type)
 
         return ProviderAvailabilityResponse(
             available=available_providers,
