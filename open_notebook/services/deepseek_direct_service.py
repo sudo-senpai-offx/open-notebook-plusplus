@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -191,11 +192,50 @@ class DeepSeekDirectService:
             return None
         return _solve_pow(challenge_data)
 
+    def upload_file(
+        self,
+        file_path: str,
+        filename: Optional[str] = None,
+        timeout: float = 60.0,
+    ) -> Optional[str]:
+        """Upload a file to DeepSeek-web and return its file ID.
+
+        Returns None if upload fails — the caller can proceed without
+        the attachment.
+        """
+        try:
+            sess = self._get_session()
+            url = f"{DEEPSEEK_BASE_URL}/api/v0/file/upload"
+
+            name = filename or os.path.basename(file_path)
+            with open(file_path, "rb") as f:
+                files = {"file": (name, f, "application/octet-stream")}
+                resp = sess.post(url, files=files, timeout=timeout)
+
+            if resp.status_code != 200:
+                logger.warning(
+                    f"DeepSeek file upload failed: HTTP {resp.status_code}"
+                )
+                return None
+
+            data = resp.json()
+            if data.get("code") == 0:
+                biz = data.get("data", {}).get("biz_data", {})
+                file_info = biz.get("file") or {}
+                return file_info.get("id")
+
+            logger.warning(f"DeepSeek file upload returned code {data.get('code')}")
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"DeepSeek file upload exception: {exc}")
+            return None
+
     def send_message(
         self,
         message: str,
         thinking_enabled: bool = False,
         timeout: float = 120.0,
+        ref_file_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Send a message to DeepSeek-web and return the response.
 
@@ -264,7 +304,7 @@ class DeepSeekDirectService:
                 "parent_message_id": None,
                 "model_type": "default",
                 "prompt": message,
-                "ref_file_ids": [],
+                "ref_file_ids": ref_file_ids or [],
                 "thinking_enabled": thinking_enabled,
                 "search_enabled": False,
                 "action": None,

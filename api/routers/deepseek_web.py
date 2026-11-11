@@ -17,7 +17,8 @@ Endpoints:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from loguru import logger
@@ -53,6 +54,10 @@ class DeepSeekWebRequest(BaseModel):
     )
     pc_fallback: Optional[bool] = Field(
         False, description="Force PC browser-use fallback instead of direct API"
+    )
+    attachments: Optional[List[str]] = Field(
+        None,
+        description="List of file paths to attach to the message (uploaded to deepseek-web)",
     )
 
 
@@ -144,9 +149,59 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
                 ),
             )
 
-        # 4. Transform message through prompter
+        # 4. Upload attachments to deepseek-web to get ref_file_ids
+        ref_file_ids: List[str] = []
+        if request.attachments:
+            for file_path in request.attachments:
+                file_id = deepseek_direct_service.upload_file(file_path)
+                if file_id:
+                    ref_file_ids.append(file_id)
+
+        # 5. Build context from notebook's preprocessed sources
+        notebook_context_parts: List[str] = []
+        if request.notebook_id:
+            from open_notebook.database.repository import ensure_record_id, repo_query
+
+            rows = await repo_query(
+                "SELECT * FROM source WHERE id IN (SELECT VALUE <-reference.in FROM type:'notebook' WHERE id = $notebook_id)",
+                {"notebook_id": ensure_record_id(request.notebook_id)},
+            )
+            for row in rows or []:
+                asset = row.get("asset") or {}
+                src_file_path = asset.get("file_path")
+                title_val = row.get("title") or asset.get("filename") or "Untitled"
+                src_title = str(title_val)  # type: ignore
+                if src_file_path:
+                    md_path = str(src_file_path) + ".md"  # type: ignore[arg-type]
+                    if os.path.exists(md_path):
+                        try:
+                            with open(md_path, "r", encoding="utf-8") as f:
+                                md_content = f.read()
+                            if md_content.strip():
+                                notebook_context_parts.append(
+                                    f"## Source: {src_title}\n{md_content}"
+                                )
+                        except Exception:
+                            pass
+
+        # 6. Transform message through prompter (with notebook context)
+        context_message = request.message
+        if notebook_context_parts:
+            context_message = (
+                f"{request.message}\n\n"
+                f"---\n"
+                f"Notebook context (preprocessed sources):\n"
+                f"{chr(10).join(notebook_context_parts)}\n"
+                f"---\n"
+            )
+        if ref_file_ids:
+            context_message = (
+                f"{context_message}\n\n"
+                f"Attached files: {len(ref_file_ids)} file(s) uploaded to chat."
+            )
+
         transformed_prompt = await prompter_service.transform(
-            raw_message=request.message,
+            raw_message=context_message,
             session_id=request.session_id,
             notebook_id=request.notebook_id,
             message_type=request.message_type or "chat",
@@ -157,6 +212,7 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
             message=transformed_prompt,
             thinking_enabled=request.thinking_enabled or False,
             timeout=120.0,
+            ref_file_ids=ref_file_ids,
         )
 
         # 6. Handle errors
