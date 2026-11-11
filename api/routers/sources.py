@@ -44,6 +44,7 @@ from open_notebook.exceptions import (
     UnsupportedTypeException,
 )
 from open_notebook.scheduler.submit import submit_held
+from open_notebook.services.preprocessor_service import preprocessor_service
 from open_notebook.storage.blobs import resolve_blob_path, store_bytes
 from open_notebook.sync.exchange import load_provenance
 
@@ -837,12 +838,41 @@ async def create_source(
                 logger.error(f"File upload failed: {e}")
                 raise HTTPException(status_code=400, detail="File upload failed")
 
+            # Preprocess the uploaded file to `.md` for context use (B6-B9).
+            # The `.md` is stored alongside the source and referenced in chat.
+            try:
+                preprocess_result = await preprocessor_service.preprocess(
+                    file_path,
+                    settings={},
+                    language=source_data.language,
+                )
+                if preprocess_result.ok and preprocess_result.markdown_path:
+                    content_state_preprocess = {
+                        "markdown_path": preprocess_result.markdown_path,
+                        "markdown_content": preprocess_result.markdown_content,
+                        "preprocess_file_group": preprocess_result.file_group,
+                        "preprocess_force_enabled": preprocess_result.force_enabled,
+                    }
+                else:
+                    logger.warning(
+                        f"Preprocessing failed for {file_path}: {preprocess_result.error}"
+                    )
+                    content_state_preprocess = {}
+            except Exception as e:
+                logger.warning(f"Preprocessing exception for {file_path}: {e}")
+                content_state_preprocess = {}
+
         # Prepare content_state for processing (type validation + SSRF/LFI guards)
         content_state = await _build_content_state(source_data, file_path)
         if upload_file and upload_file.filename:
             # Survives the hash-named blob: the user downloaded their
             # PDF as "report (1).pdf", not as a sha256.
             content_state["filename"] = os.path.basename(upload_file.filename)
+
+        # Merge preprocess results into content_state so the source
+        # processing command can use the `.md` for extraction/chat.
+        if upload_file and source_data.type == "upload":
+            content_state.update(content_state_preprocess)
         # The extraction graph needs the hash too, so its delete_source
         # cleanup can tell whether this blob is shared with another
         # source before it unlinks anything.
