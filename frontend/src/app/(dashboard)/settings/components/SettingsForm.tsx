@@ -30,6 +30,9 @@ import { useEffect, useState } from 'react'
 import { ChevronDownIcon } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { useOfflineStore } from '@/lib/offline-store'
+import { SystemInfo } from '@/app/(dashboard)/advanced/components/SystemInfo'
+import { ProcessingQueue } from '@/app/(dashboard)/advanced/components/ProcessingQueue'
+import { RebuildEmbeddings } from '@/app/(dashboard)/advanced/components/RebuildEmbeddings'
 
 const settingsSchema = z.object({
   default_content_processing_engine_doc: z.enum(['auto', 'docling', 'simple']).optional(),
@@ -1192,6 +1195,10 @@ export function SettingsForm() {
               </div>
             </CardContent>
           </Card>
+
+          <SystemInfo />
+          <ProcessingQueue />
+          <RebuildEmbeddings />
         </TabsContent>
       </Tabs>
 
