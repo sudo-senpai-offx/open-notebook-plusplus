@@ -134,6 +134,9 @@ services:
       # no sync driver on the host can see - the export appears to
       # succeed and produces nothing to commit.
       - ./sync:/app/sync
+      # Mount the locally-built frontend .next directory so UI changes
+      # take effect without rebuilding the Docker image.
+      - ./frontend/.next:/app/frontend/.next
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
