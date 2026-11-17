@@ -21,12 +21,6 @@ services:
       - SURREAL_ROCKSDB_THREAD_COUNT=1
     restart: always
     pull_policy: always
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/version"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
 
   open_notebook:
     build: .
@@ -127,6 +121,9 @@ services:
       - OPEN_NOTEBOOK_MINI_MODEL_TRANSFORM=${OPEN_NOTEBOOK_MINI_MODEL_TRANSFORM:-qwen3:4b}
       - OPEN_NOTEBOOK_DOCLING_FAST_PROFILE=true
       - OPEN_NOTEBOOK_EMBEDDING_BATCH_SIZE=8
+      # Browser AI default URLs (no credentials needed — just needs browser session)
+      - GOOGLE_AI_MODE_URL=${GOOGLE_AI_MODE_URL:-https://google.com/search}
+      - DUCK_AI_URL=${DUCK_AI_URL:-https://duck.ai}
     volumes:
       - ./notebook_data:/app/data
       # The sync manifest has to be readable by git on the host. Without

@@ -339,6 +339,15 @@ export function SettingsPage() {
             <div class="text-xs text-muted-foreground">
               Rate limits: Duck.ai {browserAi()!.rate_limits.duck_ai} · Google {browserAi()!.rate_limits.google_ai_mode}
             </div>
+            <div class="flex gap-2 mt-3">
+              <button
+                class="btn-ghost text-xs px-2 py-1"
+                onClick={() => void browserAiApi.status()}
+                disabled={saving()}
+              >
+                {t('common.refresh')}
+              </button>
+            </div>
           </div>
         </Show>
         <Show when={editMode()}>
