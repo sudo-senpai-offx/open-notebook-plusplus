@@ -19,6 +19,7 @@ export function SettingsPage() {
   const [settings, setSettings] = createSignal<SettingsResponse | null>(null)
   const [browserAi, setBrowserAi] = createSignal<BrowserAIStatus | null>(null)
   const [deepseek, setDeepseek] = createSignal<DeepSeekSessionStatus | null>(null)
+  const [deepseekAvailable, setDeepseekAvailable] = createSignal<boolean | null>(null)
   const [editMode, setEditMode] = createSignal(false)
 
   // Working copy of settings for editing
@@ -41,6 +42,12 @@ export function SettingsPage() {
       setDeepseek(await deepseekApi.status())
     } catch {
       // ignore
+    }
+    try {
+      const avail = await deepseekApi.available()
+      setDeepseekAvailable(avail.available || false)
+    } catch {
+      setDeepseekAvailable(false)
     }
   }
 
@@ -84,6 +91,15 @@ export function SettingsPage() {
     if (!ds) return
     // Prompt user for credentials via inline inputs in edit mode
     setEditMode(true)
+  }
+
+  const verifyDeepSeek = async () => {
+    try {
+      const avail = await deepseekApi.available()
+      setDeepseekAvailable(avail.available || false)
+    } catch {
+      setDeepseekAvailable(false)
+    }
   }
 
   const refreshSettings = () => {
@@ -233,6 +249,23 @@ export function SettingsPage() {
             disabled={saving()}
           >
             {t('common.configure')}
+          </button>
+          <button
+            class="btn-ghost text-xs px-2 py-1"
+            onClick={() => {
+              window.open('https://chat.deepseek.com', '_blank')
+            }}
+            disabled={saving()}
+            title="Open DeepSeek chat in a new tab to log in"
+          >
+            Open Login
+          </button>
+          <button
+            class="btn-ghost text-xs px-2 py-1"
+            onClick={() => void verifyDeepSeek()}
+            disabled={saving()}
+          >
+            {deepseekAvailable() === true ? 'Online' : deepseekAvailable() === false ? 'Offline' : 'Check'}
           </button>
         </div>
         <Show when={editMode()}>

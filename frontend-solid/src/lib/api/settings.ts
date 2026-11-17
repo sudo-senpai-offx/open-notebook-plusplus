@@ -208,6 +208,9 @@ export const deepseekApi = {
 
   refresh: () =>
     client.post('/chat/deepseek-web/session/refresh').then(r => r.data),
+
+  available: () =>
+    client.get<{ available: boolean }>('/chat/deepseek-web/available').then(r => r.data),
 }
 
 export const settingsApi = {
