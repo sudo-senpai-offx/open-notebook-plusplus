@@ -4,10 +4,15 @@ import type {
   AttachmentListResponse,
   AttachmentContentResponse,
   AttachmentDeleteResponse,
+  BrowserAIStatus,
+  CrawlSiteRequest,
+  CrawlSiteResponse,
+  CreateSiteRequest,
   DeepSeekSessionStatus,
   EditMessageRequest,
   EditMessageResponse,
-  BrowserAIStatus,
+  Site,
+  SiteSource,
   SourceChatSession,
   SourceChatSessionWithMessages,
   CreateSourceChatSessionRequest,
@@ -16,6 +21,7 @@ import type {
   Notebook,
   SettingsResponse,
   SettingsUpdate,
+  UpdateSiteRequest,
 } from '@/lib/types/api'
 
 // Auth model: the password itself is the Bearer token. /api/auth/status tells
@@ -90,6 +96,29 @@ export const sourceApi = {
   list: () => client.get<Source[]>('/sources').then(r => r.data),
 
   get: (id: string) => client.get<Source>(`/sources/${id}`).then(r => r.data),
+}
+
+// --- Sites (migrated into Sources page) -------------------------------------
+
+export const siteApi = {
+  list: () => client.get<Site[]>('/sites').then(r => r.data),
+
+  get: (id: string) => client.get<Site>(`/sites/${id}`).then(r => r.data),
+
+  create: (data: CreateSiteRequest) =>
+    client.post<Site>('/sites', data).then(r => r.data),
+
+  update: (id: string, data: UpdateSiteRequest) =>
+    client.patch<Site>(`/sites/${id}`, data).then(r => r.data),
+
+  delete: (id: string) =>
+    client.delete<{ message: string }>(`/sites/${id}`).then(r => r.data),
+
+  crawl: (id: string, data?: CrawlSiteRequest) =>
+    client.post<CrawlSiteResponse>(`/sites/${id}/crawl`, data ?? {}).then(r => r.data),
+
+  listSources: (id: string) =>
+    client.get<SiteSource[]>(`/sites/${id}/sources`).then(r => r.data),
 }
 
 // --- Source chat ------------------------------------------------------------

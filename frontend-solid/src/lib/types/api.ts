@@ -175,3 +175,64 @@ export interface SettingsUpdate {
   deepseek_authorization_token?: string | null
   deepseek_pc_url?: string | null
 }
+
+// --- Site (migrated from Sites page) ---------------------------------------
+
+export interface Site {
+  id: string
+  url: string
+  name?: string | null
+  restrict_to_origin: boolean
+  follow_sitemap: boolean
+  respect_robots_txt: boolean
+  max_pages: number
+  user_agent?: string | null
+  status?: string | null
+  last_run_at?: string | null
+  last_run_duration?: number | null
+  last_error?: string | null
+  created: string
+  updated: string
+  source_count?: number
+}
+
+export interface CreateSiteRequest {
+  url: string
+  name?: string | null
+  restrict_to_origin?: boolean | null
+  follow_sitemap?: boolean | null
+  respect_robots_txt?: boolean | null
+  max_pages?: number | null
+  user_agent?: string | null
+}
+
+export interface UpdateSiteRequest {
+  name?: string | null
+  restrict_to_origin?: boolean | null
+  follow_sitemap?: boolean | null
+  respect_robots_txt?: boolean | null
+  max_pages?: number | null
+  user_agent?: string | null
+}
+
+export interface CrawlSiteRequest {
+  notebook_ids?: string[]
+  transformations?: string[]
+  embed?: boolean | null
+  max_pages?: number | null
+}
+
+export interface CrawlSiteResponse {
+  crawl_id: string
+  status: string
+  message: string
+}
+
+export interface SiteSource {
+  id: string
+  title?: string | null
+  url?: string | null
+  status?: string | null
+  created: string
+  updated: string
+}
