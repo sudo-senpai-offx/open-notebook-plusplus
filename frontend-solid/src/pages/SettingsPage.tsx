@@ -1,22 +1,34 @@
 import { createSignal, onMount, Show, For } from 'solid-js'
 import { t, setLanguage, getLanguage, LANGUAGES } from '@/lib/i18n'
-import { settingsApi, browserAiApi, deepseekApi } from '@/lib/api/settings'
-import type { BrowserAIStatus, DeepSeekSessionStatus } from '@/lib/types/api'
+import {
+  settingsApi,
+  browserAiApi,
+  deepseekApi,
+} from '@/lib/api/settings'
+import type {
+  BrowserAIStatus,
+  DeepSeekSessionStatus,
+  SettingsResponse,
+  SettingsUpdate,
+} from '@/lib/types/api'
 
 export function SettingsPage() {
   const [language, setLang] = createSignal(getLanguage())
   const [saving, setSaving] = createSignal(false)
   const [saved, setSaved] = createSignal(false)
+  const [settings, setSettings] = createSignal<SettingsResponse | null>(null)
   const [browserAi, setBrowserAi] = createSignal<BrowserAIStatus | null>(null)
   const [deepseek, setDeepseek] = createSignal<DeepSeekSessionStatus | null>(null)
-  const [googleUrl, setGoogleUrl] = createSignal('')
-  const [duckUrl, setDuckUrl] = createSignal('')
+  const [editMode, setEditMode] = createSignal(false)
 
-  onMount(async () => {
+  // Working copy of settings for editing
+  const [editValues, setEditValues] = createSignal<SettingsUpdate>({})
+
+  const load = async () => {
     try {
       const s = await settingsApi.get()
-      setGoogleUrl(s?.browser_ai?.google_ai_mode_url ?? '')
-      setDuckUrl(s?.browser_ai?.duck_ai_url ?? '')
+      setSettings(s)
+      setEditValues({})
     } catch {
       // settings optional
     }
@@ -30,29 +42,95 @@ export function SettingsPage() {
     } catch {
       // ignore
     }
-  })
+  }
+
+  onMount(() => void load())
 
   const handleLanguage = async (code: string) => {
     setLang(code)
     await setLanguage(code)
   }
 
+  const handleEditValue = (key: string, value: string | boolean | string[]) => {
+    setEditValues(prev => ({ ...prev, [key]: value }))
+  }
+
+  const toggleEditMode = () => {
+    setEditMode(!editMode())
+    if (!editMode()) {
+      setEditValues({})
+    }
+  }
+
   const handleSave = async () => {
     setSaving(true)
     setSaved(false)
     try {
-      // Settings persistence is server-side; reflect changes after save.
-      await settingsApi.get()
+      await settingsApi.update(editValues())
+      setEditValues({})
+      setEditMode(false)
+      await load()
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
+    } catch {
+      // error surfaced by interceptor or toast
     } finally {
       setSaving(false)
     }
   }
 
+  const handleDeepSeekConfigure = async () => {
+    const ds = deepseek()
+    if (!ds) return
+    // Prompt user for credentials via inline inputs in edit mode
+    setEditMode(true)
+  }
+
+  const refreshSettings = () => {
+    void load()
+  }
+
+  const fieldLabel = (key: string): string => {
+    const labels: Record<string, string> = {
+      default_content_processing_engine_doc: 'Default Content Processing Engine (Doc)',
+      default_content_processing_engine_url: 'Default Content Processing Engine (URL)',
+      default_embedding_option: 'Default Embedding Option',
+      auto_delete_files: 'Auto Delete Files',
+      docling_ocr: 'Docling OCR',
+      docling_formulas: 'Docling Formulas',
+      docling_vision: 'Docling Vision',
+      youtube_preferred_languages: 'YouTube Preferred Languages',
+      allow_local_processing: 'Allow Local Processing',
+      deepseek_ds_session_id: 'DeepSeek Session ID',
+      deepseek_authorization_token: 'DeepSeek Authorization Token',
+      deepseek_pc_url: 'DeepSeek PC URL',
+    }
+    return labels[key] || key
+  }
+
   return (
-    <div class="max-w-2xl space-y-6">
-      <h1 class="text-2xl font-bold">{t('navigation.settings')}</h1>
+    <div class="max-w-3xl space-y-6">
+      <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-bold">{t('navigation.settings')}</h1>
+        <div class="flex gap-2">
+          <button
+            class="btn-ghost text-xs px-2 py-1"
+            onClick={() => void refreshSettings()}
+          >
+            {t('common.refresh')}
+          </button>
+          <button
+            classList={{
+              'btn text-xs px-2 py-1': true,
+              'bg-accent text-white': editMode(),
+            }}
+            onClick={toggleEditMode}
+            disabled={!settings() || saving()}
+          >
+            {editMode() ? t('common.cancel') : t('common.edit')}
+          </button>
+        </div>
+      </div>
 
       {/* Language */}
       <section class="card p-4">
@@ -73,6 +151,131 @@ export function SettingsPage() {
             )}
           </For>
         </div>
+      </section>
+
+      {/* Local Processing */}
+      <section class="card p-4">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-base font-semibold">{t('common.allow_local_processing')}</h2>
+          <span classList={{
+            'badge': true,
+            'bg-teal-tint text-teal': settings()?.allow_local_processing,
+            'bg-muted text-muted-foreground': !settings()?.allow_local_processing,
+          }}>
+            {settings()?.allow_local_processing ? t('common.done') : t('common.error')}
+          </span>
+        </div>
+        <p class="text-xs text-muted-foreground mb-3">
+          Disabled by default to avoid straining low-end devices.
+        </p>
+        <Show when={editMode()}>
+          <div class="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={editValues().allow_local_processing === true}
+              onChange={(e) =>
+                handleEditValue('allow_local_processing', e.currentTarget.checked)
+              }
+            />
+            <label class="text-sm">{t('common.allow_local_processing')}</label>
+          </div>
+        </Show>
+      </section>
+
+      {/* DeepSeek Web */}
+      <section class="card p-4">
+        <h2 class="text-base font-semibold mb-3">DeepSeek Web</h2>
+        <Show when={deepseek()} fallback={<p class="text-xs text-muted-foreground">{t('common.loading')}</p>}>
+          <div class="space-y-3 text-sm">
+            <div class="flex items-center justify-between">
+              <span>Credentials Configured</span>
+              <span classList={{
+                'badge': true,
+                'bg-teal-tint text-teal': deepseek()!.credentials_configured,
+                'bg-muted text-muted-foreground': !deepseek()!.credentials_configured,
+              }}>
+                {deepseek()!.credentials_configured ? t('common.done') : t('common.error')}
+              </span>
+            </div>
+            <div class="flex items-center justify-between">
+              <span>Has Session ID</span>
+              <span classList={{
+                'badge': true,
+                'bg-teal-tint text-teal': deepseek()!.has_session_id,
+                'bg-muted text-muted-foreground': !deepseek()!.has_session_id,
+              }}>
+                {deepseek()!.has_session_id ? t('common.done') : t('common.error')}
+              </span>
+            </div>
+            <div class="flex items-center justify-between">
+              <span>Has Authorization Token</span>
+              <span classList={{
+                'badge': true,
+                'bg-teal-tint text-teal': deepseek()!.has_authorization_token,
+                'bg-muted text-muted-foreground': !deepseek()!.has_authorization_token,
+              }}>
+                {deepseek()!.has_authorization_token ? t('common.done') : t('common.error')}
+              </span>
+            </div>
+          </div>
+        </Show>
+        <div class="flex gap-2 mt-3">
+          <button
+            class="btn-ghost text-xs px-2 py-1"
+            onClick={() => void deepseekApi.refresh()}
+            disabled={saving()}
+          >
+            {t('common.refresh')}
+          </button>
+          <button
+            class="btn text-xs px-2 py-1"
+            onClick={() => void handleDeepSeekConfigure()}
+            disabled={saving()}
+          >
+            {t('common.configure')}
+          </button>
+        </div>
+        <Show when={editMode()}>
+          <div class="space-y-2 mt-4">
+            <div>
+              <label class="label block text-sm mb-1">DeepSeek Session ID</label>
+              <input
+                class="input text-sm"
+                value={editValues().deepseek_ds_session_id ?? ''}
+                onInput={(e) =>
+                  handleEditValue('deepseek_ds_session_id', e.currentTarget.value)
+                }
+                placeholder="ds_session_id cookie"
+              />
+            </div>
+            <div>
+              <label class="label block text-sm mb-1">Authorization Token</label>
+              <input
+                class="input text-sm"
+                type="password"
+                value={editValues().deepseek_authorization_token ?? ''}
+                onInput={(e) =>
+                  handleEditValue(
+                    'deepseek_authorization_token',
+                    e.currentTarget.value,
+                  )
+                }
+                placeholder="authorization token"
+              />
+            </div>
+            <div>
+              <label class="label block text-sm mb-1">DeepSeek PC URL</label>
+              <input
+                class="input text-sm"
+                value={editValues().deepseek_pc_url ?? ''}
+                onInput={(e) =>
+                  handleEditValue('deepseek_pc_url', e.currentTarget.value)
+                }
+                placeholder="https://chat.deepseek.com"
+              />
+            </div>
+          </div>
+        </Show>
       </section>
 
       {/* Browser AI */}
@@ -105,48 +308,161 @@ export function SettingsPage() {
             </div>
           </div>
         </Show>
-      </section>
-
-      {/* DeepSeek */}
-      <section class="card p-4">
-        <h2 class="text-base font-semibold mb-3">DeepSeek Web</h2>
-        <Show when={deepseek()} fallback={<p class="text-xs text-muted-foreground">{t('common.loading')}</p>}>
-          <p class="text-sm">
-            {deepseek()!.credentials_configured
-              ? t('common.done')
-              : t('common.error')}
-          </p>
+        <Show when={editMode()}>
+          <div class="space-y-2 mt-4">
+            <div>
+              <label class="label block text-sm mb-1">Google AI Mode URL</label>
+              <input
+                class="input text-sm"
+                value={editValues().default_content_processing_engine_url ?? ''}
+                onInput={(e) =>
+                  handleEditValue(
+                    'default_content_processing_engine_url',
+                    e.currentTarget.value,
+                  )
+                }
+                placeholder="https://google.com/search"
+              />
+            </div>
+          </div>
         </Show>
       </section>
 
-      {/* URLs */}
+      {/* Content Processing */}
       <section class="card p-4">
-        <h2 class="text-base font-semibold mb-3">Endpoints</h2>
-        <div class="space-y-3">
-          <div>
-            <label class="label block text-sm mb-1">Google AI Mode URL</label>
-            <input
-              class="input"
-              value={googleUrl()}
-              onInput={(e) => setGoogleUrl(e.currentTarget.value)}
-            />
+        <h2 class="text-base font-semibold mb-3">Content Processing</h2>
+        <Show when={editMode()}>
+          <div class="space-y-3">
+            <div>
+              <label class="label block text-sm mb-1">{fieldLabel('default_content_processing_engine_doc')}</label>
+              <select
+                class="input text-sm"
+                value={editValues().default_content_processing_engine_doc ?? 'auto'}
+                onChange={(e) =>
+                  handleEditValue(
+                    'default_content_processing_engine_doc',
+                    e.currentTarget.value,
+                  )
+                }
+              >
+                <option value="auto">Auto</option>
+                <option value="docling">Docling</option>
+                <option value="simple">Simple</option>
+              </select>
+            </div>
+            <div>
+              <label class="label block text-sm mb-1">{fieldLabel('default_content_processing_engine_url')}</label>
+              <select
+                class="input text-sm"
+                value={editValues().default_content_processing_engine_url ?? 'auto'}
+                onChange={(e) =>
+                  handleEditValue(
+                    'default_content_processing_engine_url',
+                    e.currentTarget.value,
+                  )
+                }
+              >
+                <option value="auto">Auto</option>
+                <option value="firecrawl">Firecrawl</option>
+                <option value="jina">Jina</option>
+                <option value="crawl4ai">Crawl4AI</option>
+                <option value="simple">Simple</option>
+              </select>
+            </div>
+            <div>
+              <label class="label block text-sm mb-1">{fieldLabel('default_embedding_option')}</label>
+              <select
+                class="input text-sm"
+                value={editValues().default_embedding_option ?? 'ask'}
+                onChange={(e) =>
+                  handleEditValue('default_embedding_option', e.currentTarget.value)
+                }
+              >
+                <option value="ask">Ask</option>
+                <option value="always">Always</option>
+                <option value="never">Never</option>
+              </select>
+            </div>
+            <div>
+              <label class="label block text-sm mb-1">{fieldLabel('auto_delete_files')}</label>
+              <select
+                class="input text-sm"
+                value={editValues().auto_delete_files ?? 'no'}
+                onChange={(e) =>
+                  handleEditValue('auto_delete_files', e.currentTarget.value)
+                }
+              >
+                <option value="yes">Yes</option>
+                <option value="no">No</option>
+              </select>
+            </div>
           </div>
-          <div>
-            <label class="label block text-sm mb-1">Duck.ai URL</label>
-            <input
-              class="input"
-              value={duckUrl()}
-              onInput={(e) => setDuckUrl(e.currentTarget.value)}
-            />
+        </Show>
+      </section>
+
+      {/* Document Processing */}
+      <section class="card p-4">
+        <h2 class="text-base font-semibold mb-3">Document Processing</h2>
+        <Show when={editMode()}>
+          <div class="space-y-3">
+            <div class="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={editValues().docling_ocr === true}
+                onChange={(e) =>
+                  handleEditValue('docling_ocr', e.currentTarget.checked)
+                }
+              />
+              <label class="text-sm">{fieldLabel('docling_ocr')}</label>
+            </div>
+            <div class="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={editValues().docling_formulas === true}
+                onChange={(e) =>
+                  handleEditValue('docling_formulas', e.currentTarget.checked)
+                }
+              />
+              <label class="text-sm">{fieldLabel('docling_formulas')}</label>
+            </div>
+            <div class="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={editValues().docling_vision === true}
+                onChange={(e) =>
+                  handleEditValue('docling_vision', e.currentTarget.checked)
+                }
+              />
+              <label class="text-sm">{fieldLabel('docling_vision')}</label>
+            </div>
           </div>
-          <button class="btn" onClick={() => void handleSave()} disabled={saving()}>
+        </Show>
+      </section>
+
+      {/* Save controls */}
+      <Show when={editMode() && Object.keys(editValues()).length > 0}>
+        <div class="flex gap-3 pt-4">
+          <button
+            class="btn"
+            onClick={() => void handleSave()}
+            disabled={saving()}
+          >
             {saving() ? t('common.processing') : t('common.save')}
           </button>
-          <Show when={saved()}>
-            <span class="text-xs text-teal ml-2">{t('common.success')}</span>
-          </Show>
+          <button
+            class="btn-ghost text-xs px-2 py-1"
+            onClick={() => {
+              setEditValues({})
+              setEditMode(false)
+            }}
+          >
+            {t('common.cancel')}
+          </button>
         </div>
-      </section>
+      </Show>
+      <Show when={saved()}>
+        <span class="text-xs text-teal">{t('common.success')}</span>
+      </Show>
     </div>
   )
 }

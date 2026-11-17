@@ -4,16 +4,18 @@ import type {
   AttachmentListResponse,
   AttachmentContentResponse,
   AttachmentDeleteResponse,
+  DeepSeekSessionStatus,
   EditMessageRequest,
   EditMessageResponse,
   BrowserAIStatus,
-  DeepSeekSessionStatus,
   SourceChatSession,
   SourceChatSessionWithMessages,
   CreateSourceChatSessionRequest,
   SendMessageRequest,
   Source,
   Notebook,
+  SettingsResponse,
+  SettingsUpdate,
 } from '@/lib/types/api'
 
 // Auth model: the password itself is the Bearer token. /api/auth/status tells
@@ -171,8 +173,17 @@ export const browserAiApi = {
 export const deepseekApi = {
   status: () =>
     client.get<DeepSeekSessionStatus>('/chat/deepseek-web/session').then(r => r.data),
+
+  configure: (data: { ds_session_id: string; authorization_token: string }) =>
+    client.post('/chat/deepseek-web/session/configure', data).then(r => r.data),
+
+  refresh: () =>
+    client.post('/chat/deepseek-web/session/refresh').then(r => r.data),
 }
 
 export const settingsApi = {
-  get: () => client.get('/settings').then(r => r.data),
+  get: () => client.get<SettingsResponse>('/settings').then(r => r.data),
+
+  update: (data: SettingsUpdate) =>
+    client.put<SettingsResponse>('/settings', data).then(r => r.data),
 }

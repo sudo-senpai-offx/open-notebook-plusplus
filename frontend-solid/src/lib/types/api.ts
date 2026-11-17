@@ -145,3 +145,33 @@ export interface Notebook {
   updated?: string
   source_count?: number
 }
+
+export interface SettingsResponse {
+  default_content_processing_engine_doc?: string | null
+  default_content_processing_engine_url?: string | null
+  default_embedding_option?: string | null
+  auto_delete_files?: string | null
+  docling_ocr?: boolean | null
+  docling_formulas?: boolean | null
+  docling_vision?: boolean | null
+  youtube_preferred_languages?: string[] | null
+  allow_local_processing?: boolean | null
+  deepseek_ds_session_id?: string | null
+  deepseek_authorization_token?: string | null
+  deepseek_pc_url?: string | null
+}
+
+export interface SettingsUpdate {
+  default_content_processing_engine_doc?: string | null
+  default_content_processing_engine_url?: string | null
+  default_embedding_option?: string | null
+  auto_delete_files?: string | null
+  docling_ocr?: boolean | null
+  docling_formulas?: boolean | null
+  docling_vision?: boolean | null
+  youtube_preferred_languages?: string[] | null
+  allow_local_processing?: boolean | null
+  deepseek_ds_session_id?: string | null
+  deepseek_authorization_token?: string | null
+  deepseek_pc_url?: string | null
+}
