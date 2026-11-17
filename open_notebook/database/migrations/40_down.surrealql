@@ -1,0 +1,3 @@
+-- Migration 40 down: remove Credential.local_path field.
+
+REMOVE FIELD IF EXISTS local_path ON credential;

@@ -1,0 +1,12 @@
+-- Migration 40: Credential.local_path for local model files.
+--
+-- Why
+--
+-- Local models (Ollama GGUFs via llama-server, Whisper .bin, Piper/Kokoro
+-- .onnx) are referenced by absolute filesystem path, never containerized.
+-- Each Credential row can now store the model's local path so it survives
+-- across logins and devices without hardcoding anything in .env.
+-- PC and phone have different paths for the same logical model, so the
+-- path is per-Credential (per-device), not per-Model.
+
+DEFINE FIELD IF NOT EXISTS local_path ON credential TYPE option<string>;

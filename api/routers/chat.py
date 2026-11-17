@@ -1,10 +1,18 @@
 import asyncio
 import os
 import traceback
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query
+# ---------------------------------------------------------------------------
+# Internet connectivity probe (cached, 30s TTL) for cloud↔local switching.
+# Probes chat.deepseek.com, google.com (AI Mode), and duck.ai. Internet is
+# "available" when >= 2 of 3 respond within the timeout. Results are cached
+# for 30 seconds so the probe doesn't add latency to every turn.
+# ---------------------------------------------------------------------------
+import httpx
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from langchain_core.runnables import RunnableConfig
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -18,10 +26,12 @@ from api.routers._chat_shared import (
 )
 from open_notebook.ai.models import ProcessingFlags
 from open_notebook.database.repository import ensure_record_id, repo_query
+from open_notebook.domain.attachment import Attachment
 from open_notebook.domain.notebook import (
     ChatSession,
     Notebook,
     persist_chat_messages,
+    update_chat_message,
 )
 from open_notebook.exceptions import (
     NotFoundError,
@@ -29,6 +39,7 @@ from open_notebook.exceptions import (
 )
 from open_notebook.graphs.chat import graph as chat_graph
 from open_notebook.services.deepseek_direct_service import (
+    deepseek_direct_service,
     pow_solver_available,
 )
 from open_notebook.services.deepseek_session_service import (
@@ -42,6 +53,44 @@ from open_notebook.utils.context_builder import (
     build_notebook_context,
     build_relevant_context,
 )
+
+_internet_probe_cache: dict[str, Any] = {"result": None, "ts": 0.0}
+_PROBE_CACHE_TTL = 30.0
+_PROBE_TARGETS = [
+    ("deepseek-web", "https://chat.deepseek.com", 5.0),
+    ("google-ai-mode", "https://www.google.com", 5.0),
+    ("duck-ai", "https://duck.ai", 5.0),
+]
+
+
+async def _probe_internet() -> bool:
+    """Return True when >= 2 of 3 cloud endpoints are reachable.
+
+    Cached for _PROBE_CACHE_TTL seconds. Never raises on failure.
+    """
+    now = asyncio.get_event_loop().time()
+    if (
+        _internet_probe_cache["result"] is not None
+        and now - _internet_probe_cache["ts"] < _PROBE_CACHE_TTL
+    ):
+        return _internet_probe_cache["result"]
+
+    ok_count = 0
+    async with httpx.AsyncClient() as client:
+        for _name, url, timeout in _PROBE_TARGETS:
+            try:
+                resp = await client.head(url, timeout=timeout, follow_redirects=True)
+                if resp.status_code < 500:
+                    ok_count += 1
+            except Exception:  # noqa: BLE001
+                continue
+
+    result = ok_count >= 2
+    _internet_probe_cache["result"] = result
+    _internet_probe_cache["ts"] = now
+    return result
+
+
 from open_notebook.utils.graph_utils import (
     get_session_message_count,
     invoke_chat_turn,
@@ -119,6 +168,10 @@ class ExecuteChatRequest(BaseModel):
         default=None,
         description="Only consider history at or after this time (ISO, or 45m/2d/1w)",
     )
+    attachments: Optional[List[str]] = Field(
+        None,
+        description="List of local file paths to attach to the message",
+    )
 
 
 class HistorySelectionReport(BaseModel):
@@ -141,6 +194,15 @@ class ExecuteChatResponse(BaseModel):
     history_selection: Optional[HistorySelectionReport] = Field(
         default=None,
         description="Which exchanges the model saw, when trimming applied",
+    )
+    cloud_available: bool = Field(
+        default=False,
+        description="Whether cloud providers are reachable (internet probe)",
+    )
+    switch_to_cloud_suggested: bool = Field(
+        default=False,
+        description="UI hint: cloud is available while using local model, "
+        "offer user a switch",
     )
 
 
@@ -196,8 +258,8 @@ async def get_sessions(notebook_id: str = Query(..., description="Notebook ID"))
                     id=session.id or "",
                     title=session.title or "Untitled Session",
                     notebook_id=notebook_id,
-                    created=str(session.created),
-                    updated=str(session.updated),
+                    created=str(session.created) if session.created else "",
+                    updated=str(session.updated) if session.updated else "",
                     message_count=msg_count,
                     model_override=getattr(session, "model_override", None),
                     transcript_stored=stored,
@@ -243,8 +305,8 @@ async def create_session(request: CreateSessionRequest):
             id=session.id or "",
             title=session.title or "",
             notebook_id=request.notebook_id,
-            created=str(session.created),
-            updated=str(session.updated),
+            created=str(session.created) if session.created else "",
+            updated=str(session.updated) if session.updated else "",
             message_count=0,
             model_override=session.model_override,
         )
@@ -356,8 +418,8 @@ async def get_session(session_id: str):
             id=session.id or "",
             title=session.title or "Untitled Session",
             notebook_id=notebook_id,
-            created=str(session.created),
-            updated=str(session.updated),
+            created=str(session.created) if session.created else "",
+            updated=str(session.updated) if session.updated else "",
             message_count=len(messages),
             messages=messages,
             model_override=getattr(session, "model_override", None),
@@ -404,8 +466,8 @@ async def update_session(session_id: str, request: UpdateSessionRequest):
             id=session.id or "",
             title=session.title or "",
             notebook_id=notebook_id,
-            created=str(session.created),
-            updated=str(session.updated),
+            created=str(session.created) if session.created else "",
+            updated=str(session.updated) if session.updated else "",
             message_count=msg_count,
             model_override=session.model_override,
         )
@@ -439,6 +501,219 @@ async def delete_session(session_id: str):
     except Exception as e:
         logger.error(f"Error deleting session: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting session: {str(e)}")
+
+
+class ChatAttachmentUploadResponse(BaseModel):
+    file_path: str = Field(..., description="Local path of the uploaded file")
+    filename: str = Field(..., description="Original filename")
+
+
+@router.post("/chat/attachments", response_model=ChatAttachmentUploadResponse)
+async def upload_chat_attachment(
+    file: UploadFile = File(...),
+    upload_session_id: Optional[str] = Form(
+        None,
+        description="ON++ session id that uploaded this attachment (source traceability)",
+    ),
+) -> ChatAttachmentUploadResponse:
+    """Upload a file for use as a chat attachment.
+
+    The file is saved to the local attachments directory so the backend can
+    reference it when sending messages to models that support file uploads
+    (e.g. deepseek-web). Returns the local path to use in the
+    ``attachments`` field of ``POST /chat/execute``.
+    """
+    try:
+        upload_dir = Path(
+            os.getenv("OPEN_NOTEBOOK_ATTACHMENTS_DIR", "./data/attachments")
+        )
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        # Sanitize filename and make it unique
+        orig_name = file.filename or "file"
+        safe_name = "".join(c for c in orig_name if c.isalnum() or c in "._-") or "file"
+        dest = upload_dir / f"{uuid4().hex[:8]}_{safe_name}"
+
+        contents = await file.read()
+        dest.write_bytes(bytes(contents))
+
+        # Create an Attachment record so it can be listed/read/renamed/deleted
+        # independently of any notebook (separate table from notebooks).
+        try:
+            mime_type = file.content_type or "application/octet-stream"
+            attachment = Attachment(
+                file_path=str(dest),
+                filename=file.filename or safe_name,
+                mime_type=mime_type,
+                file_size=len(contents),
+                upload_session_id=upload_session_id,
+                is_orphaned=False,
+            )
+            await attachment.save()
+            logger.info(
+                f"Attachment record created: {attachment.id} -> {dest} "
+                f"(session={upload_session_id})"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"File saved but Attachment record creation failed: {exc}")
+
+        return ChatAttachmentUploadResponse(
+            file_path=str(dest),
+            filename=file.filename or safe_name,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Chat attachment upload failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Attachment upload failed: {str(e)}"
+        )
+
+
+class AttachmentListResponse(BaseModel):
+    attachments: list[dict] = Field(
+        ...,
+        description="List of attachment records (id, filename, mime_type, file_size, upload_session_id, is_orphaned, created)",
+    )
+
+
+class AttachmentContentResponse(BaseModel):
+    file_path: str = Field(..., description="Local path of the attachment file")
+    filename: str = Field(..., description="Original filename")
+    mime_type: str = Field(..., description="MIME type")
+    content: str = Field(
+        ..., description="Text content of the attachment (for text files)"
+    )
+
+
+@router.get("/chat/attachments", response_model=AttachmentListResponse)
+async def list_chat_attachments() -> AttachmentListResponse:
+    """List all attachment records (separate from notebooks).
+
+    Returns metadata for every uploaded attachment so the frontend can
+    display them in a reader overlay and offer delete.
+    """
+    try:
+        attachments = await Attachment.list_all()
+        return AttachmentListResponse(
+            attachments=[
+                {
+                    "id": a.id,
+                    "file_path": a.file_path,
+                    "filename": a.filename,
+                    "mime_type": a.mime_type,
+                    "file_size": a.file_size,
+                    "upload_session_id": a.upload_session_id,
+                    "is_orphaned": a.is_orphaned,
+                    "created": a.created.isoformat() if a.created else None,
+                }
+                for a in attachments
+            ]
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error listing attachments: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to list attachments: {str(e)}"
+        )
+
+
+@router.get(
+    "/chat/attachments/{attachment_id}/content",
+    response_model=AttachmentContentResponse,
+)
+async def get_attachment_content(attachment_id: str) -> AttachmentContentResponse:
+    """Read the text content of an attachment for the reader overlay.
+
+    Only text-based files are supported. Binary files return an empty
+    content string with a note in the frontend.
+    """
+    try:
+        attachment = await Attachment.get_by_id(attachment_id)
+        if attachment is None:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+
+        content = ""
+        path = Path(attachment.file_path)
+        if path.exists() and path.is_file():
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                replacement_ratio = text.count("\ufffd") / max(len(text), 1)
+                if replacement_ratio > 0.30:
+                    # Binary file — skip text prepend, content stays empty
+                    logger.warning(
+                        f"Attachment appears binary, content not readable: {attachment.filename}"
+                    )
+                else:
+                    content = text
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Could not read attachment {attachment_id}: {exc}")
+
+        return AttachmentContentResponse(
+            file_path=str(path),
+            filename=attachment.filename,
+            mime_type=attachment.mime_type,
+            content=content,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error reading attachment content: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to read attachment: {str(e)}"
+        )
+
+
+@router.delete("/chat/attachments/{attachment_id}")
+async def delete_chat_attachment(attachment_id: str) -> dict:
+    """Delete an attachment record and attempt to unlink the underlying file."""
+    try:
+        attachment = await Attachment.get_by_id(attachment_id)
+        if attachment is None:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+
+        await attachment.delete()
+        return {"ok": True, "message": f"Attachment '{attachment.filename}' deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error deleting attachment: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to delete attachment: {str(e)}"
+        )
+
+
+class AttachmentRenameRequest(BaseModel):
+    new_filename: str = Field(
+        ..., description="New display filename for the attachment"
+    )
+
+
+@router.patch("/chat/attachments/{attachment_id}/rename")
+async def rename_chat_attachment(
+    attachment_id: str,
+    request: AttachmentRenameRequest,
+) -> dict:
+    """Rename an attachment's display filename.
+
+    The underlying file on disk is NOT renamed — only the record's
+    display name changes.
+    """
+    try:
+        attachment = await Attachment.get_by_id(attachment_id)
+        if attachment is None:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+
+        await attachment.rename(request.new_filename)
+        return {
+            "ok": True,
+            "message": f"Attachment renamed to '{request.new_filename}'",
+            "filename": attachment.filename,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error renaming attachment: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to rename attachment: {str(e)}"
+        )
 
 
 def _context_tokens() -> int:
@@ -480,6 +755,9 @@ async def execute_chat(request: ExecuteChatRequest):
             else getattr(session, "model_override", None)
         )
 
+        # Probe internet connectivity for cloud↔local switching decisions.
+        internet_available = await _probe_internet()
+
         # Get current state
         # Use sync get_state() in a thread since SqliteSaver doesn't support async
         current_state = await asyncio.to_thread(
@@ -514,8 +792,94 @@ async def execute_chat(request: ExecuteChatRequest):
         # Add user message to state
         from langchain_core.messages import HumanMessage
 
+        # Prepend attachment contents to the message if any
+        message_content = request.message
+        ref_file_ids: list[str] = []
+        failed_attachments: list[str] = []
+        if request.attachments:
+            attachment_parts: list[str] = []
+            for file_path in request.attachments:
+                try:
+                    path = Path(file_path)
+                    if path.exists() and path.is_file():
+                        # Upload to deepseek-web so the model can reference
+                        # the file directly (covers binary files too).
+                        try:
+                            file_id = deepseek_direct_service.upload_file(file_path)
+                            if file_id:
+                                ref_file_ids.append(file_id)
+                                logger.info(
+                                    f"Attachment {path.name} uploaded to "
+                                    f"deepseek-web as {file_id}"
+                                )
+                            else:
+                                failed_attachments.append(path.name)
+                                logger.warning(
+                                    f"Attachment {path.name}: deepseek-web "
+                                    f"file upload returned no file ID"
+                                )
+                        except Exception as exc:
+                            failed_attachments.append(path.name)
+                            logger.warning(
+                                f"Could not upload attachment to deepseek-web: "
+                                f"{file_path} — {exc}"
+                            )
+
+                        # Read text content for message prepend (text files only).
+                        try:
+                            content = path.read_text(encoding="utf-8", errors="replace")
+                            replacement_ratio = content.count("\ufffd") / max(
+                                len(content), 1
+                            )
+                            if replacement_ratio > 0.30:
+                                logger.warning(
+                                    f"Attachment appears binary, skipping text prepend: {path.name}"
+                                )
+                            else:
+                                attachment_parts.append(
+                                    f"\n--- Attachment: {path.name} ---\n{content}\n--- End of {path.name} ---"
+                                )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                f"Could not read attachment {file_path}: {exc}"
+                            )
+                    else:
+                        logger.warning(f"Attachment not found: {file_path}")
+                        failed_attachments.append(Path(file_path).name)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"Could not process attachment {file_path}: {exc}")
+                    failed_attachments.append(Path(file_path).name)
+            if attachment_parts:
+                message_content = (
+                    request.message + "\n\n" + "".join(attachment_parts) + "\n\n---\n"
+                )
+
+            if attachment_parts:
+                message_content = (
+                    request.message + "\n\n" + "".join(attachment_parts) + "\n\n---\n"
+                )
+
+            # If model_override is deepseek-web and attachments were provided
+            # but none were successfully uploaded AND none could be read locally,
+            # fail loudly so the user knows.
+            if (
+                model_override == "deepseek-web"
+                and failed_attachments
+                and not attachment_parts
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Failed to upload or read the following attachment(s): "
+                        f"{', '.join(failed_attachments)}. "
+                        "Ensure DeepSeek-web credentials are configured in "
+                        "Settings and the PoW solver is installed "
+                        "(pip install deepseek-pow wasmtime)."
+                    ),
+                )
+
         # Explicit id so a failed turn can remove it from the checkpoint.
-        user_message = HumanMessage(content=request.message, id=str(uuid4()))
+        user_message = HumanMessage(content=message_content, id=str(uuid4()))
         state_values["messages"].append(user_message)
 
         # --- DeepSeek-web routing via deepseek_session_service (A1, A3, A5) ---
@@ -542,9 +906,11 @@ async def execute_chat(request: ExecuteChatRequest):
                         ),
                     )
 
-            # Transform message through prompter (session-aware)
+            # Transform message through prompter (session-aware).
+            # message_content (built above) includes attachment text when
+            # attachments are present; request.message alone does not.
             transformed_prompt = await prompter_service.transform(
-                raw_message=request.message,
+                raw_message=message_content,
                 session_id=request.session_id,
                 notebook_id=notebook.id if notebook else None,
                 message_type="chat",
@@ -561,42 +927,77 @@ async def execute_chat(request: ExecuteChatRequest):
                     ),
                 )
 
-            try:
-                nb_id = str(notebook.id) if notebook and notebook.id else ""
-                send_result = await deepseek_session_service.send_message(
-                    notebook_id=nb_id,
-                    classification="chat",
-                    message=transformed_prompt,
-                    chat_session_id=request.session_id,
-                    thinking_enabled=False,
-                    timeout=120.0,
-                )
-            except OpenNotebookError as exc:
-                msg = str(exc)
-                if "rate limited" in msg.lower():
-                    raise HTTPException(
-                        status_code=429,
-                        detail=(
-                            "DeepSeek-web rate limited. "
-                            "Wait for quota reset or enable 'Allow local processing' "
-                            "in Settings to use local models."
-                        ),
+            # Internet-aware send with retry: when offline, retry up to 10
+            # times with exponential backoff (5s doubling, cap 60s) before
+            # asking the user to fall back to a local model.
+            nb_id = str(notebook.id) if notebook and notebook.id else ""
+            send_result = None
+            last_error: Optional[str] = None
+            backoff = 5.0
+            for attempt in range(1, 11):
+                if not internet_available:
+                    last_error = (
+                        f"No internet connectivity (attempt {attempt}/10). "
+                        "Retrying in "
+                        f"{min(backoff, 60.0)}s..."
                     )
-                if "expired" in msg.lower() or "login" in msg.lower():
-                    raise HTTPException(
-                        status_code=403,
-                        detail=(
-                            "DeepSeek-web session expired. Manual login required: "
-                            "open chat.deepseek.com in a browser, log in, and the session "
-                            "cookies will be persisted for future requests."
-                        ),
+                    logger.warning(last_error)
+                    await asyncio.sleep(min(backoff, 60.0))
+                    backoff = min(backoff * 2, 60.0)
+                    internet_available = await _probe_internet()
+                    continue
+                try:
+                    send_result = await deepseek_session_service.send_message(
+                        notebook_id=nb_id,
+                        classification="chat",
+                        message=transformed_prompt,
+                        chat_session_id=request.session_id,
+                        thinking_enabled=True,
+                        timeout=120.0,
+                        ref_file_ids=ref_file_ids or None,
                     )
+                    break
+                except OpenNotebookError as exc:
+                    msg = str(exc)
+                    last_error = msg
+                    if "rate limited" in msg.lower():
+                        raise HTTPException(
+                            status_code=429,
+                            detail=(
+                                "DeepSeek-web rate limited. "
+                                "Wait for quota reset or enable 'Allow local processing' "
+                                "in Settings to use local models."
+                            ),
+                        )
+                    if "expired" in msg.lower() or "login" in msg.lower():
+                        raise HTTPException(
+                            status_code=403,
+                            detail=(
+                                "DeepSeek-web session expired. Manual login required: "
+                                "open chat.deepseek.com in a browser, log in, and the session "
+                                "cookies will be persisted for future requests."
+                            ),
+                        )
+                    # Network error on an otherwise-online connection: retry.
+                    logger.warning(
+                        f"DeepSeek-web send failed (attempt {attempt}/10): {msg}"
+                    )
+                    await asyncio.sleep(min(backoff, 60.0))
+                    backoff = min(backoff * 2, 60.0)
+
+            if send_result is None:
                 raise HTTPException(
-                    status_code=502, detail=f"DeepSeek-web error: {msg}"
+                    status_code=503,
+                    detail=(
+                        f"DeepSeek-web unavailable after 10 retries: {last_error}. "
+                        "Enable 'Allow local processing' in Settings to use "
+                        "local models offline, or check your internet connection."
+                    ),
                 )
 
             response_text = send_result.response
-            if not response_text:
+            thinking_text = send_result.thinking
+            if not response_text and not thinking_text:
                 raise HTTPException(
                     status_code=502,
                     detail="Empty response from DeepSeek-web.",
@@ -623,7 +1024,11 @@ async def execute_chat(request: ExecuteChatRequest):
             # Build assistant message
             from langchain_core.messages import AIMessage
 
-            assistant_message = AIMessage(content=response_text, id=str(uuid4()))
+            assistant_message = AIMessage(
+                content=response_text or "",
+                id=str(uuid4()),
+                additional_kwargs={"thinking": thinking_text} if thinking_text else {},
+            )
             state_values["messages"].append(assistant_message)
 
             # Persist the turn
@@ -656,6 +1061,8 @@ async def execute_chat(request: ExecuteChatRequest):
                         else "deepseek-web"
                     ),
                 ),
+                cloud_available=internet_available,
+                switch_to_cloud_suggested=False,
             )
 
         # Execute chat graph in a thread so the synchronous LangGraph invoke
@@ -688,6 +1095,10 @@ async def execute_chat(request: ExecuteChatRequest):
                             "local models, or wait for quota reset."
                         ),
                     )
+
+        # Suggest switching to cloud when on a local model and internet is back.
+        is_local_model = bool(model_override) and not is_cloud_model
+        switch_to_cloud = internet_available and is_local_model
 
         result = await asyncio.to_thread(
             invoke_chat_turn,
@@ -735,6 +1146,8 @@ async def execute_chat(request: ExecuteChatRequest):
                 total_exchanges=history.kept_exchanges + history.dropped_exchanges,
                 reason=history.reason,
             ),
+            cloud_available=internet_available,
+            switch_to_cloud_suggested=switch_to_cloud,
         )
     except NotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -751,6 +1164,340 @@ async def execute_chat(request: ExecuteChatRequest):
             f"  Traceback:\n{traceback.format_exc()}"
         )
         raise HTTPException(status_code=500, detail=f"Error executing chat: {str(e)}")
+
+
+class EditMessageRequest(BaseModel):
+    message_id: str = Field(..., description="ID of the message to edit")
+    new_content: str = Field(..., description="New message content")
+    new_attachments: Optional[List[str]] = Field(
+        None, description="New attachment file paths (replaces existing)"
+    )
+
+
+class EditMessageResponse(BaseModel):
+    session_id: str
+    messages: List[ChatMessage]
+    edit_count: int
+    continuations_deleted: int
+
+
+@router.post(
+    "/chat/sessions/{session_id}/messages/{message_id}/edit",
+    response_model=EditMessageResponse,
+)
+async def edit_chat_message(
+    session_id: str,
+    message_id: str,
+    request: EditMessageRequest,
+) -> EditMessageResponse:
+    """Edit a previously sent message and resend it through the model.
+
+    When a message is edited, all subsequent messages (continuations) are
+    deleted, the edited message is updated with an incremented edit counter,
+    and the message is re-sent through the model. Max 4 edits per message.
+
+    This implements the "edit and resend" flow: editing message #N deletes
+    messages #N+1..#end (they were continuations of the original), then
+    re-generates the response from the edited prompt.
+    """
+    try:
+        # Verify session exists
+        full_session_id, session = await get_session_or_404(session_id)
+
+        # Fetch notebook linked to this session
+        notebook_query = await repo_query(
+            "SELECT out FROM refers_to WHERE in = $session_id",
+            {"session_id": ensure_record_id(full_session_id)},
+        )
+        notebook = None
+        if notebook_query:
+            notebook = await Notebook.get(notebook_query[0]["out"])
+
+        # Determine model override (session-level only; edits reuse the
+        # session's configured model, there is no per-request override)
+        model_override = getattr(session, "model_override", None)
+
+        # Get all messages from the durable transcript
+        rows = await repo_query(
+            """
+            SELECT id, seq, role, content, edit_count, created
+            FROM chat_message
+            WHERE session = $sid
+            ORDER BY seq ASC
+            """,
+            {"sid": ensure_record_id(full_session_id)},
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="No messages in session")
+
+        messages = [
+            {
+                "id": str(row["id"]).replace("chat_message:", ""),
+                "seq": row["seq"],
+                "role": row["role"],
+                "content": row["content"] or "",
+                "edit_count": row.get("edit_count") or 0,
+                "created": str(row["created"]) if row.get("created") else None,
+            }
+            for row in rows
+        ]
+
+        # Find the message to edit
+        target_idx = None
+        for i, m in enumerate(messages):
+            if m["id"] == message_id:
+                target_idx = i
+                break
+        if target_idx is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+
+        target_msg = messages[target_idx]
+
+        # Validate: must be a human message
+        if target_msg["role"] != "human":
+            raise HTTPException(
+                status_code=400,
+                detail="Only human messages can be edited",
+            )
+
+        # Validate: edit count limit (max 4)
+        current_edit_count = target_msg["edit_count"] or 0
+        if current_edit_count >= 4:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Message has reached the maximum of 4 edits "
+                    f"(current: {current_edit_count})"
+                ),
+            )
+
+        # Count continuations to delete (all messages after target)
+        continuations_deleted = len(messages) - target_idx - 1
+
+        # Delete all messages after the edited one (they were continuations)
+        if continuations_deleted > 0:
+            await repo_query(
+                """
+                DELETE FROM chat_message
+                WHERE session = $sid AND seq > $seq
+                """,
+                {
+                    "sid": ensure_record_id(full_session_id),
+                    "seq": target_msg["seq"],
+                },
+            )
+
+        # Build the new message content with attachment prepend
+        message_content = request.new_content
+        ref_file_ids: list[str] = []
+        attachment_parts: list[str] = []
+        if request.new_attachments:
+            for file_path in request.new_attachments:
+                try:
+                    path = Path(file_path)
+                    if path.exists() and path.is_file():
+                        # Upload to deepseek-web for ref_file_ids
+                        try:
+                            file_id = deepseek_direct_service.upload_file(file_path)
+                            if file_id:
+                                ref_file_ids.append(file_id)
+                        except Exception:
+                            pass
+
+                        # Read text content for prepend
+                        try:
+                            content = path.read_text(encoding="utf-8", errors="replace")
+                            replacement_ratio = content.count("\ufffd") / max(
+                                len(content), 1
+                            )
+                            if replacement_ratio <= 0.30:
+                                attachment_parts.append(
+                                    f"\n--- Attachment: {path.name} ---\n{content}\n--- End of {path.name} ---"
+                                )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            if attachment_parts:
+                message_content = (
+                    request.new_content
+                    + "\n\n"
+                    + "".join(attachment_parts)
+                    + "\n\n---\n"
+                )
+
+        # Update the edited message in SurrealDB
+        new_edit_count = current_edit_count + 1
+        updated = await update_chat_message(
+            full_session_id,
+            message_id,
+            message_content,
+            new_edit_count,
+        )
+        if not updated:
+            raise HTTPException(status_code=500, detail="Failed to update message")
+
+        # Build context from notebook sources (same as execute)
+        context: dict[str, Any] = {}
+        if notebook:
+            # Use build_context logic inline for simplicity
+            context = {"sources": [], "notes": []}
+
+        # --- Model invocation ---
+        if model_override == "deepseek-web":
+            # Quota check
+            if not await quota_tracker.can_request("deepseek"):
+                flags = await ProcessingFlags.get_instance()
+                if flags.allow_local_processing:
+                    model_override = "llama"
+                else:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            "DeepSeek-web quota exhausted. "
+                            "Enable 'Allow local processing' in Settings."
+                        ),
+                    )
+
+            transformed_prompt = await prompter_service.transform(
+                raw_message=message_content,
+                session_id=session_id,
+                notebook_id=notebook.id if notebook else None,
+                message_type="chat",
+            )
+
+            if not pow_solver_available():
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "DeepSeek PoW solver unavailable on this device. "
+                        "Install deepseek-pow + wasmtime."
+                    ),
+                )
+
+            nb_id = str(notebook.id) if notebook and notebook.id else ""
+            send_result = await deepseek_session_service.send_message(
+                notebook_id=nb_id,
+                classification="chat",
+                message=transformed_prompt,
+                chat_session_id=session_id,
+                thinking_enabled=True,
+                timeout=120.0,
+                ref_file_ids=ref_file_ids or None,
+            )
+
+            response_text = send_result.response
+            thinking_text = send_result.thinking
+            if not response_text and not thinking_text:
+                raise HTTPException(
+                    status_code=502, detail="Empty response from DeepSeek-web."
+                )
+
+            await quota_tracker.increment("deepseek", 1)
+
+            # Build assistant message
+            from langchain_core.messages import AIMessage
+
+            assistant_message = AIMessage(
+                content=response_text or "",
+                id=str(uuid4()),
+                additional_kwargs={"thinking": thinking_text} if thinking_text else {},
+            )
+
+            # Persist the turn (edited human message already updated above)
+            turn_messages = [assistant_message]
+            try:
+                added = await persist_chat_messages(full_session_id, turn_messages)
+                if added:
+                    logger.info(
+                        f"Persisted {added} chat message(s) for {full_session_id}"
+                    )
+            except Exception as exc:
+                logger.warning(f"Could not persist chat messages: {exc}")
+
+            messages_out = extract_chat_messages(turn_messages)
+
+            return EditMessageResponse(
+                session_id=session_id,
+                messages=messages_out,
+                edit_count=new_edit_count,
+                continuations_deleted=continuations_deleted,
+            )
+
+        # Non-deepseek-web: use LangGraph graph
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        # Reconstruct truncated history from SurrealDB (messages up to and including edited one)
+        truncated_history = messages[: target_idx + 1]
+        # Replace the edited message content
+        truncated_history[target_idx] = {
+            **truncated_history[target_idx],
+            "content": message_content,
+        }
+
+        # Build LangChain messages
+        lc_messages: list[Any] = []
+        for m in truncated_history:
+            if m["role"] == "human":
+                lc_messages.append(HumanMessage(content=m["content"], id=m["id"]))
+            elif m["role"] == "ai":
+                # Thinking not stored in SurrealDB transcript yet;
+                # best-effort reconstruction without it.
+                lc_messages.append(AIMessage(content=m["content"], id=m["id"]))
+
+        state_values = {
+            "messages": lc_messages,
+            "context": context,
+            "notebook": notebook,
+            "model_override": model_override,
+        }
+
+        result = await asyncio.to_thread(
+            invoke_chat_turn,
+            chat_graph,
+            state_values,
+            RunnableConfig(
+                configurable={
+                    "thread_id": full_session_id,
+                    "model_id": model_override,
+                }
+            ),
+            HumanMessage(content=message_content, id=str(uuid4())),
+        )
+
+        await session.save()
+
+        turn_messages = result.get("messages", [])
+        try:
+            added = await persist_chat_messages(full_session_id, turn_messages)
+            if added:
+                logger.info(f"Persisted {added} chat message(s)")
+        except Exception as exc:
+            logger.warning(f"Could not persist chat messages: {exc}")
+
+        messages_out = extract_chat_messages(turn_messages)
+
+        return EditMessageResponse(
+            session_id=session_id,
+            messages=messages_out,
+            edit_count=new_edit_count,
+            continuations_deleted=continuations_deleted,
+        )
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except HTTPException:
+        raise
+    except OpenNotebookError:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Error editing chat message: {str(e)}\n"
+            f"  Session ID: {session_id}\n"
+            f"  Message ID: {message_id}\n"
+            f"  Traceback:\n{traceback.format_exc()}"
+        )
+        raise HTTPException(status_code=500, detail=f"Error editing message: {str(e)}")
 
 
 def _eligible_ids(

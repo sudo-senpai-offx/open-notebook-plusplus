@@ -69,6 +69,11 @@ class Credential(ObjectModel):
     project: Optional[str] = None
     location: Optional[str] = None
     credentials_path: Optional[str] = None
+    # Local filesystem path to a model file (Ollama GGUF via llama-server,
+    # Whisper .bin, Piper/Kokoro .onnx). Models are referenced by path,
+    # never containerized. Per-Credential so PC and phone can store
+    # different paths for the same logical model.
+    local_path: Optional[str] = None
     # Flexible provider config bag, persisted as-is to the credential table's
     # `config` FLEXIBLE object (migration 15). This is the source of truth on
     # disk and holds both the keys this version maps (see CONFIG_EXTRAS) and any

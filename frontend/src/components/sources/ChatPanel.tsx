@@ -6,14 +6,36 @@ import { Textarea } from '@/components/ui/textarea'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
-import { Bot, User, Send, Loader2, FileText, Lightbulb, StickyNote, Clock } from 'lucide-react'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog'
+import {
+  Bot,
+  User,
+  Send,
+  Loader2,
+  FileText,
+  Lightbulb,
+  StickyNote,
+  Clock,
+  Paperclip,
+  Upload,
+  ExternalLink,
+  Edit,
+  RotateCw,
+  Scroll,
+} from 'lucide-react'
 import { MarkdownRenderer } from '@/components/ui/markdown-renderer'
 import {
   SourceChatMessage,
   SourceChatContextIndicator,
   BaseChatSession,
-  HistorySelection
+  HistorySelection,
+  AttachmentRecord,
 } from '@/lib/types/api'
 import { ModelSelector } from './ModelSelector'
 import { ContextIndicator } from '@/components/common/ContextIndicator'
@@ -23,6 +45,8 @@ import { convertReferencesToCompactMarkdown, createCompactReferenceLinkComponent
 import { useModalManager } from '@/lib/hooks/use-modal-manager'
 import { toast } from 'sonner'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { attachmentApi, chatApi } from '@/lib/api/settings'
+import { AttachmentReaderOverlay } from './AttachmentReaderOverlay'
 
 interface NotebookContextStats {
   sourcesInsights: number
@@ -34,11 +58,17 @@ interface NotebookContextStats {
 
 type HistoryRange = 'all' | '24h' | '7d'
 
+// Approximate token count: ~4 chars per token (rule of thumb for English/mixed text)
+function countTokens(text: string): number {
+  if (!text) return 0
+  return Math.ceil(text.length / 4)
+}
+
 interface ChatPanelProps {
   messages: SourceChatMessage[]
   isStreaming: boolean
   contextIndicators: SourceChatContextIndicator | null
-  onSendMessage: (message: string, modelOverride?: string, historySince?: string) => void
+  onSendMessage: (message: string, modelOverride?: string, historySince?: string, attachments?: File[]) => void
   modelOverride?: string
   onModelChange?: (model?: string) => void
   historySelection?: HistorySelection | null
@@ -57,6 +87,8 @@ interface ChatPanelProps {
   notebookContextStats?: NotebookContextStats
   // Notebook ID for saving notes
   notebookId?: string
+  // Callback when messages change due to edit (parent refreshes its list)
+  onMessagesChanged?: () => void
 }
 
 export function ChatPanel({
@@ -77,10 +109,35 @@ export function ChatPanel({
   contextType = 'source',
   notebookContextStats,
   notebookId,
+  onMessagesChanged,
   historySelection = null
 }: ChatPanelProps) {
   const { t } = useTranslation()
   const [sessionManagerOpen, setSessionManagerOpen] = useState(false)
+  const [readerOpen, setReaderOpen] = useState(false)
+  const [attachments, setAttachments] = useState<AttachmentRecord[]>([])
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false)
+  const [editDialogOpen, setEditDialogOpen] = useState(false)
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
+  const [editContent, setEditContent] = useState('')
+  const [editLoading, setEditLoading] = useState(false)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
+
+  // Fetch all attachments for the reader overlay
+  useEffect(() => {
+    const fetchAttachments = async () => {
+      setAttachmentsLoading(true)
+      try {
+        const data = await attachmentApi.list()
+        setAttachments(data.attachments)
+      } catch {
+        // Ignore — attachments are optional
+      } finally {
+        setAttachmentsLoading(false)
+      }
+    }
+    fetchAttachments()
+  }, [])
   // Which slice of the conversation the next turn sends. Undefined means
   // the whole history up to the context budget; the shorthands narrow it
   // to a timeframe and travel as history_since on the send.
@@ -110,6 +167,45 @@ export function ChatPanel({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // Track scroll position to show/hide the scroll-to-bottom button
+  const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20
+    setShowScrollToBottom(!atBottom)
+  }
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    setShowScrollToBottom(false)
+  }
+
+  // Open the edit dialog for a human message
+  const handleEditClick = (message: SourceChatMessage) => {
+    setEditingMessageId(message.id)
+    setEditContent(message.content)
+    setEditDialogOpen(true)
+  }
+
+  // Submit the edited message via the edit API
+  const handleSubmitEdit = async () => {
+    if (!editingMessageId || !currentSessionId || !onMessagesChanged) return
+    setEditLoading(true)
+    try {
+      await chatApi.editMessage(currentSessionId, editingMessageId, {
+        message_id: editingMessageId,
+        new_content: editContent,
+      })
+      setEditDialogOpen(false)
+      setEditingMessageId(null)
+      setEditContent('')
+      onMessagesChanged()
+    } catch {
+      toast.error(t('common.error'))
+    } finally {
+      setEditLoading(false)
+    }
+  }
 
   return (
     <>
@@ -149,10 +245,22 @@ export function ChatPanel({
               </DialogContent>
             </Dialog>
           )}
+          {attachments.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-2 text-muted-foreground"
+              onClick={() => setReaderOpen(true)}
+              disabled={attachmentsLoading}
+            >
+              <ExternalLink className="h-4 w-4" />
+              <span className="text-xs">{t('chat.attachments')}</span>
+            </Button>
+          )}
         </div>
       </CardHeader>
       <CardContent className="flex-1 flex flex-col min-h-0 p-0">
-        <ScrollArea className="flex-1 min-h-0 px-4" ref={scrollAreaRef}>
+        <ScrollArea className="flex-1 min-h-0 px-4" ref={scrollAreaRef} onScroll={handleScroll}>
           <div className="space-y-4 py-4">
             {messages.length === 0 ? (
               <div className="text-center text-muted-foreground py-8">
@@ -169,6 +277,7 @@ export function ChatPanel({
                   message={message}
                   notebookId={notebookId}
                   onReferenceClick={handleReferenceClick}
+                  onEditClick={message.type === 'human' ? handleEditClick : undefined}
                 />
               ))
             )}
@@ -187,6 +296,19 @@ export function ChatPanel({
             <div ref={messagesEndRef} />
           </div>
         </ScrollArea>
+
+        {/* Scroll to bottom floating button */}
+        {showScrollToBottom && (
+          <Button
+            onClick={scrollToBottom}
+            variant="outline"
+            size="icon"
+            className="fixed bottom-6 right-6 z-50 h-10 w-10 rounded-full shadow-lg"
+            aria-label="Scroll to bottom"
+          >
+            <Scroll className="h-5 w-5" />
+          </Button>
+        )}
 
         {/* Context Indicators */}
         {contextIndicators && (
@@ -255,17 +377,87 @@ export function ChatPanel({
           </div>
         </div>
 
+        {/* Token counters: message+attachments, reasoning, response */}
+        {messages.length > 0 && (
+          <div className="border-t px-4 py-2 flex items-center gap-4 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1">
+              <FileText className="h-3 w-3" />
+              {t('chat.tokenCountMessage')}: {countTokens(messages.map(m => m.content).join(' '))}
+            </span>
+            {messages.some(m => m.type === 'ai' && m.thinking) && (
+              <span className="flex items-center gap-1">
+                <Lightbulb className="h-3 w-3" />
+                {t('chat.tokenCountReasoning')}: {countTokens(messages.filter(m => m.type === 'ai' && m.thinking).map(m => m.thinking || '').join(' '))}
+              </span>
+            )}
+            {messages.some(m => m.type === 'ai') && (
+              <span className="flex items-center gap-1">
+                <Bot className="h-3 w-3" />
+                {t('chat.tokenCountResponse')}: {countTokens(messages.filter(m => m.type === 'ai').map(m => m.content).join(' '))}
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Input Area */}
         <ChatComposer
-          onSendMessage={(message, modelOverride) =>
-            onSendMessage(message, modelOverride, historySince)
+          onSendMessage={(message: string, modelOverride?: string, historySince?: string, attachments?: File[]) =>
+            onSendMessage(message, modelOverride, historySince, attachments)
           }
           isStreaming={isStreaming}
           modelOverride={modelOverride}
           onModelChange={onModelChange}
+          historySince={historySince}
         />
       </CardContent>
     </Card>
+
+    <AttachmentReaderOverlay
+      attachments={attachments}
+      open={readerOpen}
+      onOpenChange={setReaderOpen}
+    />
+
+    {/* Edit message dialog */}
+    <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+      <DialogContent className="sm:max-w-[500px]">
+        <DialogHeader>
+          <DialogTitle className="text-base">{t('common.edit')} {t('chat.message')}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <Textarea
+            value={editContent}
+            onChange={(e) => setEditContent(e.target.value)}
+            rows={5}
+            className="resize-none"
+            disabled={editLoading}
+          />
+          <p className="text-xs text-muted-foreground">
+            {t('chat.editMessageHint')}
+          </p>
+        </div>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => setEditDialogOpen(false)}
+            disabled={editLoading}
+          >
+            {t('common.cancel')}
+          </Button>
+          <Button
+            onClick={handleSubmitEdit}
+            disabled={editLoading || !editContent.trim()}
+          >
+            {editLoading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Edit className="h-4 w-4" />
+            )}
+            {t('common.edit')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     </>
   )
@@ -274,27 +466,76 @@ export function ChatPanel({
 // Composer owns the input state so keystrokes (including IME composition) only
 // re-render this small component instead of the whole message history.
 interface ChatComposerProps {
-  onSendMessage: (message: string, modelOverride?: string) => void
+  onSendMessage: (message: string, modelOverride?: string, historySince?: string, attachments?: File[]) => void
   isStreaming: boolean
   modelOverride?: string
   onModelChange?: (model?: string) => void
+  historySince?: string
 }
 
 function ChatComposer({
   onSendMessage,
   isStreaming,
   modelOverride,
-  onModelChange
+  onModelChange,
+  historySince
 }: ChatComposerProps) {
   const { t } = useTranslation()
   const chatInputId = useId()
   const [input, setInput] = useState('')
+  const [attachments, setAttachments] = useState<File[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleSend = () => {
     if (input.trim() && !isStreaming) {
-      onSendMessage(input.trim(), modelOverride)
+      onSendMessage(input.trim(), modelOverride, historySince, attachments.length > 0 ? attachments : undefined)
       setInput('')
+      setAttachments([])
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
     }
+  }
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (files) {
+      setAttachments(Array.from(files))
+    }
+  }
+
+  // Extract files from clipboard paste event (e.g. screenshot pasted, file copied)
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items || []
+    const files: File[] = []
+    for (const item of items) {
+      if (item.kind === 'file' && item.type) {
+        const file = item.getAsFile()
+        if (file) {
+          files.push(file)
+        }
+      }
+    }
+    if (files.length > 0) {
+      setAttachments(prev => [...prev, ...files])
+    }
+  }
+
+  // Handle drag-and-drop file paste
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const files = Array.from(e.dataTransfer?.files || [])
+    if (files.length > 0) {
+      setAttachments(prev => [...prev, ...files])
+    }
+  }
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+  }
+
+  const removeAttachment = (index: number) => {
+    setAttachments(attachments.filter((_, i) => i !== index))
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -313,7 +554,11 @@ function ChatComposer({
   const keyHint = isMac ? '⌘+Enter' : 'Ctrl+Enter'
 
   return (
-    <div className="flex-shrink-0 p-4 space-y-3 border-t">
+    <div
+      className="flex-shrink-0 p-4 space-y-3 border-t"
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+    >
       {/* Model selector */}
       {onModelChange && (
         <div className="flex items-center justify-between">
@@ -326,6 +571,40 @@ function ChatComposer({
         </div>
       )}
 
+      {/* Attachments preview */}
+      {attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2 max-w-full">
+          {attachments.map((file, idx) => (
+            <div key={idx} className="flex items-center gap-2 px-2 py-1 bg-muted rounded border border-border">
+              <Paperclip className="h-3 w-3 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground truncate max-w-[120px]">{file.name}</span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 p-0"
+                onClick={() => removeAttachment(idx)}
+                aria-label="Remove attachment"
+              >
+                ×
+              </Button>
+            </div>
+          ))}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setAttachments([])
+              if (fileInputRef.current) {
+                fileInputRef.current.value = ''
+              }
+            }}
+            className="h-7 px-2 text-xs"
+          >
+            <Upload className="h-3 w-3" /> Clear
+          </Button>
+        </div>
+      )}
+
       <div className="flex gap-2 items-end min-w-0">
         <Textarea
           id={chatInputId}
@@ -334,10 +613,29 @@ function ChatComposer({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder={`${t('chat.sendPlaceholder')} (${t('chat.pressToSend', { key: keyHint })})`}
           disabled={isStreaming}
           className="flex-1 min-h-[40px] max-h-[100px] resize-none py-2 px-3 min-w-0"
           rows={1}
+        />
+        <Button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isStreaming}
+          size="icon"
+          className="h-[40px] w-[40px] flex-shrink-0"
+          aria-label="attach file"
+        >
+          <Paperclip className="h-4 w-4" />
+        </Button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept="image/*,.pdf,.txt,.md,.doc,.docx"
+          className="hidden"
+          onChange={handleFileChange}
+          disabled={isStreaming}
         />
         <Button
           onClick={handleSend}
@@ -363,13 +661,16 @@ interface ChatMessageProps {
   message: SourceChatMessage
   notebookId?: string
   onReferenceClick: (type: string, id: string) => void
+  onEditClick?: (message: SourceChatMessage) => void
 }
 
 const ChatMessage = memo(function ChatMessage({
   message,
   notebookId,
-  onReferenceClick
+  onReferenceClick,
+  onEditClick
 }: ChatMessageProps) {
+  const { t } = useTranslation()
   return (
     <div
       className={`flex gap-3 ${
@@ -394,10 +695,31 @@ const ChatMessage = memo(function ChatMessage({
           {message.type === 'ai' ? (
             <AIMessageContent
               content={message.content}
+              thinking={message.thinking ?? undefined}
               onReferenceClick={onReferenceClick}
             />
           ) : (
-            <p className="text-sm break-all">{message.content}</p>
+            <>
+              <p className="text-sm break-all">{message.content}</p>
+              {message.edit_count && message.edit_count > 0 && (
+                <div className="flex items-center gap-1 mt-1">
+                  <RotateCw className="h-3 w-3 text-muted-foreground" />
+                  <span className="text-[10px] text-muted-foreground">
+                    Edit {message.edit_count}/4
+                  </span>
+                </div>
+              )}
+              {onEditClick && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onEditClick(message)}
+                  className="w-fit self-end mt-1 px-2 py-1 text-xs"
+                >
+                  <Edit className="h-3 w-3" /> {t('common.edit')}
+                </Button>
+              )}
+            </>
           )}
         </div>
         {message.type === 'ai' && (
@@ -421,12 +743,15 @@ const ChatMessage = memo(function ChatMessage({
 // Helper component to render AI messages with clickable references
 function AIMessageContent({
   content,
+  thinking,
   onReferenceClick
 }: {
   content: string
+  thinking?: string
   onReferenceClick: (type: string, id: string) => void
 }) {
   const { t } = useTranslation()
+  const [thinkingExpanded, setThinkingExpanded] = useState(false)
   // Convert references to compact markdown with numbered citations
   const markdownWithCompactRefs = convertReferencesToCompactMarkdown(content, t('common.references'))
 
@@ -434,10 +759,29 @@ function AIMessageContent({
   const LinkComponent = createCompactReferenceLinkComponent(onReferenceClick)
 
   return (
-    <MarkdownRenderer components={{
-      a: LinkComponent
-    }}>
-      {markdownWithCompactRefs}
-    </MarkdownRenderer>
+    <>
+      <MarkdownRenderer components={{
+        a: LinkComponent
+      }}>
+        {markdownWithCompactRefs}
+      </MarkdownRenderer>
+      {thinking && (
+        <div className="mt-2 pt-2 border-t border-border/50">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setThinkingExpanded(!thinkingExpanded)}
+            className="w-full text-left text-xs text-muted-foreground hover:text-foreground"
+          >
+            {thinkingExpanded ? '▾' : '▸'} {t('chat.reasoningTokens')}
+          </Button>
+          {thinkingExpanded && (
+            <div className="mt-2 p-3 bg-muted/50 rounded text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-[300px] overflow-y-auto">
+              {thinking}
+            </div>
+          )}
+        </div>
+      )}
+    </>
   )
 }

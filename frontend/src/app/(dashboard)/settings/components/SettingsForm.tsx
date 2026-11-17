@@ -30,9 +30,9 @@ import { useEffect, useState } from 'react'
 import { ChevronDownIcon } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { useOfflineStore } from '@/lib/offline-store'
-import { SystemInfo } from '@/app/(dashboard)/advanced/components/SystemInfo'
-import { ProcessingQueue } from '@/app/(dashboard)/advanced/components/ProcessingQueue'
-import { RebuildEmbeddings } from '@/app/(dashboard)/advanced/components/RebuildEmbeddings'
+import { SystemInfo } from './advanced/SystemInfo'
+import { ProcessingQueue } from './advanced/ProcessingQueue'
+import { RebuildEmbeddings } from './advanced/RebuildEmbeddings'
 
 const settingsSchema = z.object({
   default_content_processing_engine_doc: z.enum(['auto', 'docling', 'simple']).optional(),
@@ -98,6 +98,11 @@ export function SettingsForm() {
   const [duckAiUrl, setDuckAiUrl] = useState('')
   const [browserAiConfigureMessage, setBrowserAiConfigureMessage] = useState<string | null>(null)
   const [browserAiConfigureError, setBrowserAiConfigureError] = useState<string | null>(null)
+  const [browserAiStatus, setBrowserAiStatus] = useState<{
+    google_ai_mode: { configured: boolean; url?: string | null; playwright_fallback: boolean }
+    duck_ai: { configured: boolean; url?: string | null; p2d_duck_available: boolean }
+    rate_limits: { duck_ai: string; google_ai_mode: string }
+  } | null>(null)
   const [deepseekStatus, setDeepseekStatus] = useState<DeepSeekSessionStatus | null>(null)
   const [deepseekLoading, setDeepseekLoading] = useState(false)
   const [deepseekConfigured, setDeepseekConfigured] = useState(false)
@@ -180,9 +185,16 @@ export function SettingsForm() {
     const fetchBrowserAi = async () => {
       setBrowserAiLoading(true)
       try {
-        await browserAiApi.status()
+        const data = await browserAiApi.status()
         if (mounted) {
-          // Status fetched but not displayed in UI yet
+          setBrowserAiStatus(data)
+          // Populate URL fields from status if available
+          if (data.google_ai_mode.url) {
+            setGoogleAiModeUrl(data.google_ai_mode.url)
+          }
+          if (data.duck_ai.url) {
+            setDuckAiUrl(data.duck_ai.url)
+          }
         }
       } catch {
         if (mounted) setBrowserAiLoading(false)
@@ -296,6 +308,9 @@ export function SettingsForm() {
           </TabsTrigger>
           <TabsTrigger value="cache-offline" className="px-4 py-2 text-sm font-medium">
             {t('settings.tabCacheOffline')}
+          </TabsTrigger>
+          <TabsTrigger value="rate-limits" className="px-4 py-2 text-sm font-medium">
+            {t('settings.tabRateLimits')}
           </TabsTrigger>
           <TabsTrigger value="advanced" className="px-4 py-2 text-sm font-medium">
             {t('settings.tabAdvanced')}
@@ -780,6 +795,40 @@ export function SettingsForm() {
                     {t('settings.duckAiUrlHelp')}
                   </p>
                 </div>
+                {browserAiStatus && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-sm border-b pb-1">
+                      <span className="text-muted-foreground">
+                        Google AI Mode
+                      </span>
+                      <span className={[
+                        'px-2 py-0.5 rounded text-xs font-medium',
+                        browserAiStatus.google_ai_mode.configured
+                          ? 'bg-green-100 text-green-700'
+                          : 'bg-gray-100 text-gray-600',
+                      ].join(' ')}>
+                        {browserAiStatus.google_ai_mode.configured
+                          ? t('settings.enabled')
+                          : t('settings.disabled')}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm border-b pb-1 last:border-b-0">
+                      <span className="text-muted-foreground">
+                        Duck.ai
+                      </span>
+                      <span className={[
+                        'px-2 py-0.5 rounded text-xs font-medium',
+                        browserAiStatus.duck_ai.configured
+                          ? 'bg-green-100 text-green-700'
+                          : 'bg-gray-100 text-gray-600',
+                      ].join(' ')}>
+                        {browserAiStatus.duck_ai.configured
+                          ? t('settings.enabled')
+                          : t('settings.disabled')}
+                      </span>
+                    </div>
+                  </div>
+                )}
                 <div className="rounded-lg bg-info/10 p-3">
                   <p className="text-xs text-muted-foreground">
                     {t('settings.browserAiRateLimitNotice')}
@@ -803,12 +852,22 @@ export function SettingsForm() {
                     setBrowserAiConfigureMessage(null)
                     setBrowserAiLoading(true)
                     try {
-                      setBrowserAiConfigureMessage(
-                        t('settings.deepseekConfigSuccess')
-                      )
-                    } catch {
+                      const status = await browserAiApi.status()
+                      setBrowserAiStatus(status)
+                      const googleConfigured = status.google_ai_mode.configured
+                      const duckConfigured = status.duck_ai.configured
+                      if (googleConfigured || duckConfigured) {
+                        setBrowserAiConfigureMessage(
+                          t('settings.deepseekConfigSuccess')
+                        )
+                      } else {
+                        setBrowserAiConfigureError(
+                          'No Browser AI providers are configured. Set GOOGLE_AI_MODE_URL or DUCK_AI_URL environment variables.'
+                        )
+                      }
+                    } catch (e: any) {
                       setBrowserAiConfigureError(
-                        t('settings.deepseekConfigFailed')
+                        e?.response?.data?.detail || t('settings.deepseekConfigFailed')
                       )
                     } finally {
                       setBrowserAiLoading(false)
@@ -1152,6 +1211,79 @@ export function SettingsForm() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* Rate Limits Tab */}
+        <TabsContent value="rate-limits" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>{t('settings.tabRateLimits')}</CardTitle>
+              <CardDescription>{t('settings.rateLimitsDesc')}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-6">
+                <div className="rounded-lg bg-muted p-3">
+                  <p className="text-sm">{t('settings.rateLimitOrderDesc')}</p>
+                  <div className="mt-2 space-y-1">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>1</span>
+                      <span>{t('settings.rateLimitOrder1')}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>2</span>
+                      <span>{t('settings.rateLimitOrder2')}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>3</span>
+                      <span>{t('settings.rateLimitOrder3')}</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="space-y-4">
+                  {Object.entries(quotaData.providers).map(([provider, info]) => (
+                    <div key={provider} className="border rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-semibold capitalize">{provider}</span>
+                        {info.exceeded && (
+                          <span className="px-2 py-0.5 rounded text-xs bg-destructive/10 text-destructive">
+                            {t('settings.rateLimitExceeded')}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">{info.used} / {info.limit}</span>
+                        <span className="font-mono text-xs">{Math.round(((info.used / info.limit) * 100))}%</span>
+                      </div>
+                      <div className="w-full bg-surface-recessed rounded-full h-1.5 mt-1">
+                        <div className="h-1.5 rounded-full bg-primary transition-all" style={{ width: `${Math.min((info.used / info.limit) * 100, 100)}%` }} />
+                      </div>
+                      {info.reset_at && (
+                        <p className="text-xs text-muted-foreground mt-1">{t('settings.rateLimitResetsAt', { time: info.reset_at })}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="rounded-lg border p-3">
+                  <p className="text-sm font-medium mb-2">{t('settings.rateLimitRetryDesc')}</p>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>{t('settings.rateLimitRetryAttempts')}</span>
+                    <span>10</span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>{t('settings.rateLimitRetryBackoff')}</span>
+                    <span>5s doubling, cap 60s</span>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+          <div className="rounded-lg border p-4">
+            <div className="flex items-center justify-between mb-2">
+              <Label htmlFor="auto_fallback">{t('settings.autoFallback')}</Label>
+              <span className="text-xs text-muted-foreground">{t('settings.autoFallbackDesc')}</span>
+            </div>
+            <Checkbox id="auto_fallback" checked={false} onCheckedChange={() => {}} disabled />
+          </div>
         </TabsContent>
 
         {/* Advanced Tab */}
