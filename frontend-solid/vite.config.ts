@@ -25,6 +25,32 @@ export default defineConfig({
   build: {
     target: 'es2020',
     minify: 'esbuild',
+    rollupOptions: {
+      output: {
+        manualChunks: (id) => {
+          // Vendor chunk: node_modules
+          if (id.includes('node_modules')) {
+            if (id.includes('solid-js') || id.includes('@solidjs')) {
+              return 'vendor-solid'
+            }
+            if (id.includes('axios') || id.includes('i18next')) {
+              return 'vendor-core'
+            }
+            if (id.includes('lucide-solid')) {
+              return 'vendor-icons'
+            }
+            return 'vendor'
+          }
+        },
+        chunkFileNames: (chunkInfo) => {
+          // Keep entry as index-*.js for the app code
+          if (chunkInfo.name === 'index') {
+            return 'assets/index-[name]-[hash].js'
+          }
+          return 'assets/[name]-[hash].js'
+        },
+      },
+    },
   },
   resolve: {
     alias: {
