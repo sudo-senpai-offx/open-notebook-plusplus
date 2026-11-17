@@ -6,6 +6,10 @@ import { ChatPanel } from '@/components/sources/ChatPanel'
 import type { Source, SourceChatSession, ChatMessage, Site, CreateSiteRequest } from '@/lib/types/api'
 
 export function SourcesPage() {
+  // --- Session persistence keys ---
+  const SESSION_STORAGE_KEY = 'onb_last_source_id'
+  const SESSION_STORAGE_SESSION_KEY = 'onb_last_session_id'
+
   // --- Sources state ---
   const [sources, setSources] = createSignal<Source[]>([])
   const [selectedSource, setSelectedSource] = createSignal<Source | null>(null)
@@ -59,6 +63,20 @@ export function SourcesPage() {
   onMount(async () => {
     try {
       await Promise.all([loadSources(), loadSites()])
+      // Restore last selected source/session from localStorage (session retention)
+      const lastSourceId = localStorage.getItem(SESSION_STORAGE_KEY)
+      const lastSessionId = localStorage.getItem(SESSION_STORAGE_SESSION_KEY)
+      if (lastSourceId && lastSessionId) {
+        const src = sources().find(s => s.id === lastSourceId)
+        if (src) {
+          await loadSessions(src)
+          const sess = sessions().find(s => s.id === lastSessionId)
+          if (sess) {
+            setSelectedSession(sess)
+            await loadMessages(src.id, sess.id)
+          }
+        }
+      }
     } catch (e) {
       setError(String(e))
     }
@@ -66,15 +84,18 @@ export function SourcesPage() {
 
   const loadSessions = async (src: Source) => {
     setSelectedSource(src)
+    localStorage.setItem(SESSION_STORAGE_KEY, src.id)
     try {
       const list = await sourceChatApi.listSessions(src.id)
       setSessions(list)
       if (list.length > 0) {
         await loadMessages(src.id, list[0].id)
         setSelectedSession(list[0])
+        localStorage.setItem(SESSION_STORAGE_SESSION_KEY, list[0].id)
       } else {
         setSelectedSession(null)
         setMessages([])
+        localStorage.removeItem(SESSION_STORAGE_SESSION_KEY)
       }
     } catch {
       setSessions([])
@@ -92,6 +113,7 @@ export function SourcesPage() {
 
   const handleSelectSession = async (sess: SourceChatSession) => {
     setSelectedSession(sess)
+    localStorage.setItem(SESSION_STORAGE_SESSION_KEY, sess.id)
     const src = selectedSource()
     if (src) {
       await loadMessages(src.id, sess.id)
