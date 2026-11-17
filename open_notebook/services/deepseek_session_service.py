@@ -24,10 +24,11 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from loguru import logger
 
+from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.deepseek_session import DeepSeekSession, estimate_tokens
 from open_notebook.exceptions import NotFoundError, OpenNotebookError
 from open_notebook.services.deepseek_direct_service import (
@@ -76,6 +77,7 @@ class DeepSeekSendResult:
     warned: bool
     pow_solved: bool
     used_pc_fallback: bool = False
+    thinking: Optional[str] = None
 
 
 class DeepSeekSessionService:
@@ -148,7 +150,7 @@ class DeepSeekSessionService:
             # Here we only create the ON++ tracking row.
             new_row = DeepSeekSession(
                 notebook_id=notebook_id,
-                deepseek_session_id=None,  # filled on first successful send
+                deepseek_session_id=chat_session_id or "pending",  # filled on first successful send
                 classification=classification,
                 token_count=0,
                 parent_deepseek_session_id=None,
@@ -192,6 +194,68 @@ class DeepSeekSessionService:
         )
         return new_row
 
+    async def _build_compaction_context(
+        self,
+        notebook_id: str,
+        classification: str,
+        chat_session_id: Optional[str],
+        max_tokens: int = 80_000,
+    ) -> str:
+        """Build a compact digest of the ON++ transcript for a continuation.
+
+        When a DeepSeek web session hits the token cap, the continuation
+        session starts with no server-side history. To keep the model
+        grounded, we seed the first send with a digest of the prior ON++
+        transcript (the SurrealDB `chat_message` table is the durable
+        source of truth).
+
+        Strategy: keep the most recent exchanges verbatim (they matter most
+        for the next turn) and elide older ones, capped at `max_tokens`.
+        """
+        if not chat_session_id:
+            return ""
+        try:
+            rows = await repo_query(
+                """
+                SELECT role, content FROM chat_message
+                WHERE session = $sid
+                ORDER BY seq ASC
+                """,
+                {"sid": ensure_record_id(chat_session_id)},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Compaction: could not read transcript: {exc}")
+            return ""
+
+        if not rows:
+            return ""
+
+        # Walk newest-first, accumulating verbatim exchanges until the
+        # budget is spent. Older exchanges are dropped entirely (the model
+        # only needs the recent thread to continue coherently).
+        kept: List[str] = []
+        used = 0
+        for row in reversed(rows):
+            role = str(row.get("role") or "")
+            content = str(row.get("content") or "")
+            if not content.strip():
+                continue
+            label = "User" if role == "human" else "Assistant"
+            block = f"{label}: {content}"
+            used += estimate_tokens(block)
+            if used > max_tokens:
+                break
+            kept.append(block)
+
+        if not kept:
+            return ""
+
+        kept.reverse()
+        header = (
+            "[Continuation context — prior conversation digest, most recent last]\n"
+        )
+        return header + "\n\n".join(kept) + "\n[End of prior conversation]\n"
+
     # ------------------------------------------------------------------
     # Send a message through a DeepSeek session (rate-limited)
     # ------------------------------------------------------------------
@@ -204,6 +268,7 @@ class DeepSeekSessionService:
         chat_session_id: Optional[str] = None,
         thinking_enabled: bool = False,
         timeout: float = 120.0,
+        ref_file_ids: Optional[List[str]] = None,
     ) -> DeepSeekSendResult:
         """Send a message via DeepSeek-web, managing the session lifecycle.
 
@@ -227,6 +292,17 @@ class DeepSeekSessionService:
             # Estimate outgoing tokens.
             input_tokens = estimate_tokens(message)
 
+            # If this send runs on a fresh continuation session (the prior
+            # DeepSeek web session hit the token cap), seed the message with
+            # a digest of the ON++ transcript so the model keeps context.
+            if resolved.is_continuation:
+                compaction = await self._build_compaction_context(
+                    notebook_id, classification, chat_session_id
+                )
+                if compaction:
+                    message = f"{compaction}\n\nUser: {message}"
+                    input_tokens = estimate_tokens(message)
+
             # If the resolved session is brand new (no DeepSeek web id yet),
             # the direct service will create the conversation on first send.
             ds_id = resolved.deepseek_session_id
@@ -237,6 +313,7 @@ class DeepSeekSessionService:
                     message=message,
                     thinking_enabled=thinking_enabled,
                     timeout=timeout,
+                    ref_file_ids=ref_file_ids,
                 )
             except Exception as exc:
                 logger.error(f"DeepSeek direct send failed: {exc}")
@@ -277,6 +354,7 @@ class DeepSeekSessionService:
 
             return DeepSeekSendResult(
                 response=response_text,
+                thinking=result.get("thinking"),
                 deepseek_session_id=ds_id or "",
                 is_continuation=resolved.is_continuation,
                 token_budget_remaining=max(0, remaining),
