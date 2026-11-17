@@ -4,6 +4,7 @@ import {
   settingsApi,
   browserAiApi,
   deepseekApi,
+  syncApi,
 } from '@/lib/api/settings'
 import type {
   BrowserAIStatus,
@@ -21,6 +22,9 @@ export function SettingsPage() {
   const [deepseek, setDeepseek] = createSignal<DeepSeekSessionStatus | null>(null)
   const [deepseekAvailable, setDeepseekAvailable] = createSignal<boolean | null>(null)
   const [editMode, setEditMode] = createSignal(false)
+  const [exporting, setExporting] = createSignal(false)
+  const [importing, setImporting] = createSignal(false)
+  const [importFile, setImportFile] = createSignal<HTMLInputElement | null>(null)
 
   // Working copy of settings for editing
   const [editValues, setEditValues] = createSignal<SettingsUpdate>({})
@@ -48,6 +52,60 @@ export function SettingsPage() {
       setDeepseekAvailable(avail.available || false)
     } catch {
       setDeepseekAvailable(false)
+    }
+  }
+
+  const handleExport = async () => {
+    setExporting(true)
+    try {
+      const bundle = await settingsApi.export()
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `onpp-settings-${new Date().toISOString().slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      // error surfaced by interceptor
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const handleImport = async (e: Event) => {
+    const input = e.target as HTMLInputElement
+    const files = input.files
+    if (!files || files.length === 0) return
+    const file = files[0]
+    setImporting(true)
+    try {
+      const text = await file.text()
+      const data = JSON.parse(text)
+      await settingsApi.import(data)
+      input.value = ''
+      await load()
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch {
+      // error surfaced by interceptor
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const handleSyncManifest = async () => {
+    try {
+      const manifest = await syncApi.manifest()
+      const blob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `onpp-sync-${new Date().toISOString().slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      // error surfaced by interceptor
     }
   }
 
@@ -267,6 +325,29 @@ export function SettingsPage() {
           >
             {deepseekAvailable() === true ? 'Online' : deepseekAvailable() === false ? 'Offline' : 'Check'}
           </button>
+          <button
+            class="btn-ghost text-xs px-2 py-1"
+            onClick={() => void handleExport()}
+            disabled={saving() || exporting()}
+            title="Export settings + credentials"
+          >
+            Export
+          </button>
+          <button
+            class="btn-ghost text-xs px-2 py-1"
+            onClick={() => importFile()?.click()}
+            disabled={saving() || importing()}
+            title="Import settings + credentials"
+          >
+            Import
+          </button>
+          <input
+            ref={setImportFile}
+            type="file"
+            accept=".json"
+            onChange={handleImport}
+            class="hidden"
+          />
         </div>
         <Show when={editMode()}>
           <div class="space-y-2 mt-4">
@@ -368,6 +449,24 @@ export function SettingsPage() {
             </div>
           </div>
         </Show>
+      </section>
+
+      {/* Sync */}
+      <section class="card p-4">
+        <h2 class="text-base font-semibold mb-3">Sync</h2>
+        <p class="text-xs text-muted-foreground mb-3">
+          Cumulative sync manifest: notebooks, sources, attachments, settings,
+          DeepSeek credentials. Excludes per-device model selection.
+        </p>
+        <div class="flex gap-2">
+          <button
+            class="btn"
+            onClick={() => void handleSyncManifest()}
+            disabled={saving()}
+          >
+            Export Sync Manifest
+          </button>
+        </div>
       </section>
 
       {/* Content Processing */}

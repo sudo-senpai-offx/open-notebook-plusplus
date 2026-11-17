@@ -2,7 +2,7 @@ import { createSignal, Show, For } from 'solid-js'
 import { t } from '@/lib/i18n'
 import {
   Bot, User, Send, Loader2, FileText, Lightbulb,
-  RotateCw, Scroll, Paperclip, X,
+  RotateCw, Scroll, Paperclip, X, Upload, Camera, Clipboard,
 } from 'lucide-solid'
 import { attachmentApi } from '@/lib/api/settings'
 import type { AttachmentRecord, ChatMessage } from '@/lib/types/api'
@@ -23,9 +23,12 @@ export function ChatPanel(props: ChatPanelProps) {
   const [attachments, setAttachments] = createSignal<AttachmentRecord[]>([])
   const [attachmentsLoading, setAttachmentsLoading] = createSignal(false)
   const [pickerOpen, setPickerOpen] = createSignal(false)
+  const [uploadDialogOpen, setUploadDialogOpen] = createSignal(false)
 
   let endEl: HTMLDivElement | undefined
   let inputRef: HTMLTextAreaElement | undefined
+  let fileInputRef: HTMLInputElement | null = null
+  let cameraInputRef: HTMLInputElement | null = null
 
   // Load attachments on mount
   const loadAttachments = async () => {
@@ -82,20 +85,90 @@ export function ChatPanel(props: ChatPanelProps) {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`
   }
 
+  // Upload via file picker
+  const handleFileUpload = async (e: Event) => {
+    const inputEl = e.target as HTMLInputElement
+    const files = inputEl.files
+    if (!files || files.length === 0) return
+    setUploadDialogOpen(false)
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        await attachmentApi.upload(file)
+      }
+      inputEl.value = ''
+      await loadAttachments()
+      setPickerOpen(true)
+    } catch {
+      // error surfaced by interceptor
+    }
+  }
+
+  // Upload via camera
+  const handleCameraUpload = async (e: Event) => {
+    const inputEl = e.target as HTMLInputElement
+    const files = inputEl.files
+    if (!files || files.length === 0) return
+    setUploadDialogOpen(false)
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        await attachmentApi.upload(file)
+      }
+      inputEl.value = ''
+      await loadAttachments()
+      setPickerOpen(true)
+    } catch {
+      // error surfaced by interceptor
+    }
+  }
+
+  // Paste clipboard as text attachment
+  const handlePasteClipboard = async () => {
+    try {
+      setUploadDialogOpen(false)
+      try {
+        const text = await navigator.clipboard.readText()
+        if (!text || !text.trim()) {
+          return
+        }
+        const blob = new Blob([text], { type: 'text/plain' })
+        const file = new File([blob], `clipboard-${Date.now()}.txt`, { type: 'text/plain' })
+        await attachmentApi.upload(file)
+        await loadAttachments()
+        setPickerOpen(true)
+      } catch {
+        // Clipboard access may be denied
+      }
+    } catch {
+      // error surfaced by interceptor
+    }
+  }
+
   return (
     <div class="flex flex-col h-full bg-card">
       <div class="flex-shrink-0 px-4 py-3 border-b border-border flex items-center justify-between">
         <span class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           {t('navigation.sources')}
         </span>
-        <button
-          onClick={() => { setPickerOpen(true); void loadAttachments() }}
-          class="text-xs btn-ghost px-2 py-1"
-          disabled={attachmentsLoading()}
-        >
-          <Paperclip class="w-3 h-3 mr-1" />
-          {t('common.new')}
-        </button>
+        <div class="flex gap-1">
+          <button
+            onClick={() => { setUploadDialogOpen(true); void loadAttachments() }}
+            class="text-xs btn-ghost px-2 py-1"
+            disabled={attachmentsLoading()}
+            title={t('common.new')}
+          >
+            <Paperclip class="w-3 h-3 mr-1" />
+            {t('common.new')}
+          </button>
+          <button
+            onClick={() => setPickerOpen(!pickerOpen())}
+            class="text-xs btn-ghost px-2 py-1"
+            disabled={attachmentsLoading() || attachments().length === 0}
+          >
+            <FileText class="w-3 h-3" />
+          </button>
+        </div>
       </div>
 
       <div class="flex-1 overflow-y-auto px-4" onScroll={handleScroll}>
@@ -195,7 +268,7 @@ export function ChatPanel(props: ChatPanelProps) {
             placeholder={t('common.search')}
           />
           <button
-            onClick={() => setPickerOpen(!pickerOpen())}
+            onClick={() => setUploadDialogOpen(!uploadDialogOpen())}
             class="p-2 rounded bg-accent text-white"
           >
             <Paperclip class="w-4 h-4" />
@@ -210,7 +283,57 @@ export function ChatPanel(props: ChatPanelProps) {
         </div>
       </div>
 
-      {/* Attachment picker overlay */}
+      {/* Upload dialog (camera / clipboard / file) */}
+      <Show when={uploadDialogOpen()}>
+        <div
+          class="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+          onClick={() => setUploadDialogOpen(false)}
+        >
+          <div
+            class="card max-w-md w-full p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 class="text-lg font-bold mb-4">Add Attachment</h2>
+            <div class="space-y-3">
+              <button
+                onClick={() => {
+                  setUploadDialogOpen(false)
+                  fileInputRef?.click()
+                }}
+                class="w-full btn-ghost text-left p-3 rounded border flex items-center justify-between hover:bg-muted"
+              >
+                <div class="flex items-center gap-2">
+                  <Upload class="w-4 h-4" />
+                  <span>Upload from device</span>
+                </div>
+              </button>
+              <button
+                onClick={() => {
+                  setUploadDialogOpen(false)
+                  cameraInputRef?.click()
+                }}
+                class="w-full btn-ghost text-left p-3 rounded border flex items-center justify-between hover:bg-muted"
+              >
+                <div class="flex items-center gap-2">
+                  <Camera class="w-4 h-4" />
+                  <span>Capture from camera</span>
+                </div>
+              </button>
+              <button
+                onClick={handlePasteClipboard}
+                class="w-full btn-ghost text-left p-3 rounded border flex items-center justify-between hover:bg-muted"
+              >
+                <div class="flex items-center gap-2">
+                  <Clipboard class="w-4 h-4" />
+                  <span>Paste clipboard as text</span>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      {/* Attachment picker (existing attachments) */}
       <Show when={pickerOpen()}>
         <div
           class="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
@@ -221,7 +344,7 @@ export function ChatPanel(props: ChatPanelProps) {
             onClick={(e) => e.stopPropagation()}
           >
             <div class="flex items-center justify-between p-4 border-b border-border">
-              <h2 class="font-semibold">{t('navigation.attachments')}</h2>
+              <h2 class="font-semibold">Attachments</h2>
               <button
                 class="btn-ghost text-xs px-2 py-1"
                 onClick={() => setPickerOpen(false)}
@@ -234,7 +357,9 @@ export function ChatPanel(props: ChatPanelProps) {
                 <p class="text-xs text-muted-foreground">{t('common.processing')}</p>
               </Show>
               <Show when={!attachmentsLoading() && attachments().length === 0}>
-                <p class="text-xs text-muted-foreground">{t('common.noResults')}</p>
+                <p class="text-xs text-muted-foreground">
+                  {t('common.noResults')}
+                </p>
               </Show>
               <div class="space-y-2">
                 <For each={attachments()}>
@@ -270,6 +395,24 @@ export function ChatPanel(props: ChatPanelProps) {
           </div>
         </div>
       </Show>
+
+      {/* Hidden file inputs */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        onChange={handleFileUpload}
+        class="hidden"
+        accept="*"
+      />
+      <input
+        ref={cameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={handleCameraUpload}
+        class="hidden"
+      />
     </div>
   )
 }

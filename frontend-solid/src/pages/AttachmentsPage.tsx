@@ -19,6 +19,8 @@ export function AttachmentsPage() {
   const [readerTitle, setReaderTitle] = createSignal('')
   const [renamingId, setRenamingId] = createSignal<string | null>(null)
   const [renameValue, setRenameValue] = createSignal('')
+  const [uploading, setUploading] = createSignal(false)
+  const [fileInput, setFileInput] = createSignal<HTMLInputElement | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -74,9 +76,51 @@ export function AttachmentsPage() {
     }
   }
 
+  const handleFileSelect = async (e: Event) => {
+    const input = e.target as HTMLInputElement
+    const files = input.files
+    if (!files || files.length === 0) return
+
+    setUploading(true)
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        await attachmentApi.upload(file)
+      }
+      input.value = ''
+      await load()
+    } catch {
+      // error surfaced by interceptor
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const triggerFileUpload = () => {
+    fileInput()?.click()
+  }
+
   return (
     <div class="max-w-3xl">
-      <h1 class="text-2xl font-bold mb-4">{t('navigation.attachments')}</h1>
+      <div class="flex items-center justify-between mb-4">
+        <h1 class="text-2xl font-bold">{t('navigation.attachments')}</h1>
+        <button
+          class="btn"
+          onClick={() => triggerFileUpload()}
+          disabled={uploading()}
+        >
+          {uploading() ? t('common.processing') : t('common.new')}
+        </button>
+      </div>
+
+      <input
+        ref={setFileInput}
+        type="file"
+        multiple
+        onChange={handleFileSelect}
+        class="hidden"
+        accept="*"
+      />
 
       <Show when={loading()}>
         <p class="text-sm text-muted-foreground">{t('common.loading')}</p>

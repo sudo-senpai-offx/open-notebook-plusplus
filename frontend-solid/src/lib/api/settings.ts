@@ -191,6 +191,16 @@ export const attachmentApi = {
       `/chat/attachments/${attachmentId}/rename`,
       { new_filename: newFilename },
     ).then(r => r.data),
+
+  upload: (file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return client.post(
+      '/chat/attachments',
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } },
+    ).then(r => r.data)
+  },
 }
 
 // --- Browser AI / DeepSeek --------------------------------------------------
@@ -218,4 +228,14 @@ export const settingsApi = {
 
   update: (data: SettingsUpdate) =>
     client.put<SettingsResponse>('/settings', data).then(r => r.data),
+
+  export: () =>
+    client.get('/settings/export').then(r => r.data),
+
+  import: (data: any) =>
+    client.post('/settings/import', data).then(r => r.data),
+}
+
+export const syncApi = {
+  manifest: () => client.get('/sync/manifest').then(r => r.data),
 }
