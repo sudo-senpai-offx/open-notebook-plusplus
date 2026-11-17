@@ -84,6 +84,7 @@ export interface SendMessageRequest {
   message: string
   model_override?: string | null
   history_since?: string | null
+  attachments?: string[]
 }
 
 export interface ExecuteChatResponse {

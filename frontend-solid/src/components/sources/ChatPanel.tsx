@@ -2,15 +2,16 @@ import { createSignal, Show, For } from 'solid-js'
 import { t } from '@/lib/i18n'
 import {
   Bot, User, Send, Loader2, FileText, Lightbulb,
-  RotateCw, Scroll,
+  RotateCw, Scroll, Paperclip, X,
 } from 'lucide-solid'
-import type { ChatMessage } from '@/lib/types/api'
+import { attachmentApi } from '@/lib/api/settings'
+import type { AttachmentRecord, ChatMessage } from '@/lib/types/api'
 
 export interface ChatPanelProps {
   sessionId: string
   messages: ChatMessage[]
   isStreaming: boolean
-  onSendMessage: (message: string, attachments?: File[]) => void
+  onSendMessage: (message: string, attachments?: string[]) => void
   modelOverride?: string
   historySelection?: { kept_exchanges: number; total_exchanges: number; reason: string } | null
 }
@@ -18,15 +19,44 @@ export interface ChatPanelProps {
 export function ChatPanel(props: ChatPanelProps) {
   const [input, setInput] = createSignal('')
   const [showScrollToBottom, setShowScrollToBottom] = createSignal(false)
+  const [selectedAttachments, setSelectedAttachments] = createSignal<string[]>([])
+  const [attachments, setAttachments] = createSignal<AttachmentRecord[]>([])
+  const [attachmentsLoading, setAttachmentsLoading] = createSignal(false)
+  const [pickerOpen, setPickerOpen] = createSignal(false)
 
   let endEl: HTMLDivElement | undefined
   let inputRef: HTMLTextAreaElement | undefined
 
+  // Load attachments on mount
+  const loadAttachments = async () => {
+    setAttachmentsLoading(true)
+    try {
+      const data = await attachmentApi.list()
+      setAttachments(data.attachments || [])
+    } catch {
+      // attachments optional
+    } finally {
+      setAttachmentsLoading(false)
+    }
+  }
+
+  const toggleAttachment = (filePath: string) => {
+    setSelectedAttachments(prev =>
+      prev.includes(filePath)
+        ? prev.filter(p => p !== filePath)
+        : [...prev, filePath],
+    )
+  }
+
+  const isAttachmentSelected = (filePath: string) =>
+    selectedAttachments().includes(filePath)
+
   const handleSend = () => {
     const text = input().trim()
-    if (!text) return
-    props.onSendMessage(text)
+    if (!text && selectedAttachments().length === 0) return
+    props.onSendMessage(text, selectedAttachments().length > 0 ? selectedAttachments() : undefined)
     setInput('')
+    setSelectedAttachments([])
     inputRef?.focus()
   }
 
@@ -44,12 +74,28 @@ export function ChatPanel(props: ChatPanelProps) {
   const countTokens = (text: string): number =>
     text ? Math.ceil(text.length / 4) : 0
 
+  const formatFileSize = (bytes: number): string => {
+    if (!bytes) return '0 B'
+    const k = 1024
+    const sizes = ['B', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(k))
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`
+  }
+
   return (
     <div class="flex flex-col h-full bg-card">
       <div class="flex-shrink-0 px-4 py-3 border-b border-border flex items-center justify-between">
         <span class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           {t('navigation.sources')}
         </span>
+        <button
+          onClick={() => { setPickerOpen(true); void loadAttachments() }}
+          class="text-xs btn-ghost px-2 py-1"
+          disabled={attachmentsLoading()}
+        >
+          <Paperclip class="w-3 h-3 mr-1" />
+          {t('common.new')}
+        </button>
       </div>
 
       <div class="flex-1 overflow-y-auto px-4" onScroll={handleScroll}>
@@ -109,6 +155,29 @@ export function ChatPanel(props: ChatPanelProps) {
         </div>
       </Show>
 
+      {/* Selected attachment chips */}
+      <Show when={selectedAttachments().length > 0}>
+        <div class="flex-shrink-0 px-4 py-2 border-b border-border flex flex-wrap gap-2">
+          <For each={selectedAttachments()}>
+            {(filePath) => {
+              const att = attachments().find(a => a.file_path === filePath)
+              return (
+                <div class="flex items-center gap-1 px-2 py-1 rounded bg-accent/10 border border-accent/20">
+                  <FileText class="w-3 h-3 text-accent" />
+                  <span class="text-xs truncate max-w-[120px]">{att?.filename || filePath.split('/').pop()}</span>
+                  <button
+                    onClick={() => toggleAttachment(filePath)}
+                    class="p-1 text-accent hover:bg-accent/20 rounded"
+                  >
+                    <X class="w-3 h-3" />
+                  </button>
+                </div>
+              )
+            }}
+          </For>
+        </div>
+      </Show>
+
       <div class="flex-shrink-0 border-t border-border p-3">
         <div class="flex items-end gap-2">
           <textarea
@@ -126,14 +195,81 @@ export function ChatPanel(props: ChatPanelProps) {
             placeholder={t('common.search')}
           />
           <button
+            onClick={() => setPickerOpen(!pickerOpen())}
+            class="p-2 rounded bg-accent text-white"
+          >
+            <Paperclip class="w-4 h-4" />
+          </button>
+          <button
             onClick={handleSend}
-            disabled={!input().trim()}
+            disabled={!input().trim() && selectedAttachments().length === 0}
             class="p-2 rounded bg-accent text-white disabled:opacity-50"
           >
             <Send class="w-4 h-4" />
           </button>
         </div>
       </div>
+
+      {/* Attachment picker overlay */}
+      <Show when={pickerOpen()}>
+        <div
+          class="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            class="card max-w-2xl w-full max-h-[80vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div class="flex items-center justify-between p-4 border-b border-border">
+              <h2 class="font-semibold">{t('navigation.attachments')}</h2>
+              <button
+                class="btn-ghost text-xs px-2 py-1"
+                onClick={() => setPickerOpen(false)}
+              >
+                {t('common.close')}
+              </button>
+            </div>
+            <div class="p-4 overflow-y-auto">
+              <Show when={attachmentsLoading()}>
+                <p class="text-xs text-muted-foreground">{t('common.processing')}</p>
+              </Show>
+              <Show when={!attachmentsLoading() && attachments().length === 0}>
+                <p class="text-xs text-muted-foreground">{t('common.noResults')}</p>
+              </Show>
+              <div class="space-y-2">
+                <For each={attachments()}>
+                  {(att) => (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        toggleAttachment(att.file_path)
+                      }}
+                      classList={{
+                        'flex items-center gap-3 px-3 py-2 rounded border transition-colors': true,
+                        'bg-accent/10 border-accent/50': isAttachmentSelected(att.file_path),
+                        'border-border hover:bg-muted': !isAttachmentSelected(att.file_path),
+                      }}
+                    >
+                      <FileText
+                        class={`w-4 h-4 ${isAttachmentSelected(att.file_path) ? 'text-accent' : 'text-muted-foreground'}`}
+                      />
+                      <div class="flex-1 min-w-0">
+                        <div class="text-sm truncate font-medium">{att.filename}</div>
+                        <div class="text-xs text-muted-foreground truncate">
+                          {att.mime_type} · {formatFileSize(att.file_size)}
+                        </div>
+                      </div>
+                      <Show when={isAttachmentSelected(att.file_path)}>
+                        <X class="w-4 h-4 text-accent" />
+                      </Show>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Show>
     </div>
   )
 }

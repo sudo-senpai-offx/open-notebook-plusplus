@@ -77,7 +77,7 @@ export function SourcesPage() {
     }
   }
 
-  const handleSend = async (text: string) => {
+  const handleSend = async (text: string, attachments?: string[]) => {
     const src = selectedSource()
     const sess = selectedSession()
     if (!src || !sess || isStreaming()) return
@@ -98,7 +98,7 @@ export function SourcesPage() {
     try {
       await streamSse(
         `/api/sources/${src.id}/chat/sessions/${sess.id}/messages`,
-        { message: text },
+        { message: text, attachments },
         (evt) => {
           let payload: any
           try {
