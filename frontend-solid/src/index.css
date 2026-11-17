@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --text: #6b6375;
+    --text-h: #08060d;
+    --bg: #fff;
+    --border: #e5e4e7;
+    --code-bg: #f4f3ec;
+    --accent: #aa3bff;
+    --accent-bg: rgba(170, 59, 255, 0.1);
+    --accent-border: rgba(170, 59, 255, 0.5);
+    --teal: #0d9488;
+    --teal-tint: #ccfbf1;
+    --muted: #f3f4f6;
+    --muted-foreground: #6b7280;
+    --card: #ffffff;
+    --destructive: #ef4444;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --text: #9ca3af;
+      --text-h: #f3f4f6;
+      --bg: #16171d;
+      --border: #2e303a;
+      --code-bg: #1f2028;
+      --accent: #c084fc;
+      --accent-bg: rgba(192, 132, 252, 0.15);
+      --teal-tint: rgba(13, 148, 136, 0.2);
+      --card: #16171d;
+      --muted: #1f2028;
+      --muted-foreground: #9ca3af;
+    }
+  }
+
+  body {
+    margin: 0;
+    font: 18px/145% system-ui, 'Segoe UI', Roboto, sans-serif;
+    letter-spacing: 0.18px;
+    color: var(--text);
+    background: var(--bg);
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  @media (max-width: 1024px) {
+    body { font-size: 16px; }
+  }
+
+  #root {
+    width: 100%;
+    max-width: 100%;
+    min-height: 100svh;
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+  }
+
+  h1 { font-size: 24px; font-weight: 600; margin: 0 0 8px; }
+  h2 { font-size: 20px; font-weight: 500; margin: 0 0 8px; }
+  p { margin: 0; }
+
+  code {
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 15px;
+    padding: 4px 8px;
+    background: var(--code-bg);
+    border-radius: 4px;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md border border-transparent px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors duration-200 disabled:opacity-50 disabled:pointer-events-none;
+    background: var(--accent);
+  }
+  .btn:hover { filter: brightness(0.9); }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors duration-200 disabled:opacity-50 disabled:pointer-events-none;
+    color: var(--muted-foreground);
+  }
+  .btn-ghost:hover { background: var(--muted); }
+
+  .input {
+    @apply flex w-full rounded-md border px-3 py-2 text-sm file:border-0 file:bg-transparent file:text-sm disabled:cursor-not-allowed disabled:opacity-50;
+    border-color: var(--border);
+    background: var(--bg);
+    color: var(--text);
+  }
+  .input:focus { outline: none; box-shadow: 0 0 0 2px var(--accent-bg); }
+
+  .card {
+    @apply rounded-xl border shadow-sm;
+    border-color: var(--border);
+    background: var(--card);
+    color: var(--text-h);
+  }
+
+  .badge {
+    @apply inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold leading-none uppercase transition-colors;
+  }
+}
+
+/* Utility aliases for CSS vars */
+.text-muted-foreground { color: var(--muted-foreground); }
+.text-destructive { color: var(--destructive); }
+.text-accent { color: var(--accent); }
+.bg-bg { background: var(--bg); }
+.bg-card { background: var(--card); }
+.bg-muted { background: var(--muted); }
+.bg-accent { background: var(--accent); }
+.bg-teal-tint { background: var(--teal-tint); }
+.bg-teal { background: var(--teal); }
+.text-teal { color: var(--teal); }
+.border-border { border-color: var(--border); }
