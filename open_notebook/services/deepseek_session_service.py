@@ -147,10 +147,14 @@ class DeepSeekSessionService:
             # No active session: create a new DeepSeek web session.
             # The actual DeepSeek web conversation is created lazily on
             # first send_message() (deepseek_direct_service._ensure_chat_session).
-            # Here we only create the ON++ tracking row.
+            # Here we only create the ON++ tracking row. deepseek_session_id
+            # stays as a placeholder until the first successful DeepSeek web
+            # session is established, at which point it is updated via
+            # record_usage().
+            import uuid as _uuid
             new_row = DeepSeekSession(
                 notebook_id=notebook_id,
-                deepseek_session_id=chat_session_id or "pending",  # filled on first successful send
+                deepseek_session_id=f"pending:{_uuid.uuid4()}",  # placeholder, filled on first successful send
                 classification=classification,
                 token_count=0,
                 parent_deepseek_session_id=None,
