@@ -6,7 +6,6 @@ import { ChatPanel } from '@/components/sources/ChatPanel'
 import type { Source, SourceChatSession, ChatMessage, Site, CreateSiteRequest } from '@/lib/types/api'
 
 export function SourcesPage() {
-  // --- Session persistence keys ---
   const SESSION_STORAGE_KEY = 'onb_last_source_id'
   const SESSION_STORAGE_SESSION_KEY = 'onb_last_session_id'
 
@@ -32,7 +31,6 @@ export function SourcesPage() {
   // --- Tab state ---
   const [activeTab, setActiveTab] = createSignal<'sources' | 'sites'>('sources')
 
-  // --- Load sources ---
   const loadSources = async () => {
     try {
       const list = await sourceApi.list()
@@ -47,7 +45,6 @@ export function SourcesPage() {
     }
   }
 
-  // --- Load sites ---
   const loadSites = async () => {
     setSitesLoading(true)
     try {
@@ -63,7 +60,6 @@ export function SourcesPage() {
   onMount(async () => {
     try {
       await Promise.all([loadSources(), loadSites()])
-      // Restore last selected source/session from localStorage (session retention)
       const lastSourceId = localStorage.getItem(SESSION_STORAGE_KEY)
       const lastSessionId = localStorage.getItem(SESSION_STORAGE_SESSION_KEY)
       if (lastSourceId && lastSessionId) {
@@ -189,7 +185,6 @@ export function SourcesPage() {
     }
   }
 
-  // --- Site actions ---
   const handleCreateSite = async () => {
     const url = newSiteUrl().trim()
     if (!url) return
@@ -220,7 +215,6 @@ export function SourcesPage() {
     try {
       await siteApi.crawl(site.id, { embed: true })
       setSiteError('')
-      // Refresh sites to show updated status
       await loadSites()
     } catch (e) {
       setSiteError(String(e))
@@ -259,8 +253,8 @@ export function SourcesPage() {
 
       <Show when={activeTab() === 'sources'}>
         <div class="flex h-full gap-4 flex-1 min-w-0">
-          <div class="w-56 flex-shrink-0 flex flex-col gap-2">
-            <h2 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <div class="w-60 flex-shrink-0 flex flex-col gap-2">
+            <h2 class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
               {t('navigation.sources')}
             </h2>
             <Show when={loading()}>
@@ -275,9 +269,9 @@ export function SourcesPage() {
                   <button
                     onClick={() => void loadSessions(src)}
                     classList={{
-                      'w-full text-left px-3 py-2 rounded text-sm transition-colors': true,
-                      'bg-accent/10 text-accent': selectedSource()?.id === src.id,
-                      'hover:bg-muted': selectedSource()?.id !== src.id,
+                      'w-full text-left px-3 py-2 rounded-md text-sm transition-all duration-150': true,
+                      'bg-accent/10 text-accent border-r-2 border-accent': selectedSource()?.id === src.id,
+                      'border-transparent hover:bg-muted': selectedSource()?.id !== src.id,
                     }}
                   >
                     <div class="truncate">{src.title}</div>
@@ -287,9 +281,9 @@ export function SourcesPage() {
             </div>
           </div>
 
-          <div class="w-56 flex-shrink-0 flex flex-col gap-2">
+          <div class="w-60 flex-shrink-0 flex flex-col gap-2">
             <div class="flex items-center justify-between">
-              <h2 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              <h2 class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Sessions
               </h2>
               <button
@@ -306,9 +300,9 @@ export function SourcesPage() {
                   <button
                     onClick={() => void handleSelectSession(sess)}
                     classList={{
-                      'w-full text-left px-3 py-2 rounded text-sm transition-colors': true,
-                      'bg-accent/10 text-accent': selectedSession()?.id === sess.id,
-                      'hover:bg-muted': selectedSession()?.id !== sess.id,
+                      'w-full text-left px-3 py-2 rounded-md text-sm transition-all duration-150': true,
+                      'bg-accent/10 text-accent border-r-2 border-accent': selectedSession()?.id === sess.id,
+                      'border-transparent hover:bg-muted': selectedSession()?.id !== sess.id,
                     }}
                   >
                     <div class="truncate">{sess.title || 'Untitled'}</div>
@@ -322,7 +316,7 @@ export function SourcesPage() {
             <Show
               when={selectedSession()}
               fallback={
-                <div class="h-full flex items-center justify-center text-muted-foreground text-sm">
+                <div class="empty-state h-full flex items-center justify-center text-muted-foreground">
                   {selectedSource() ? t('chat.startConversation') : t('common.loading')}
                 </div>
               }
@@ -340,8 +334,8 @@ export function SourcesPage() {
 
       <Show when={activeTab() === 'sites'}>
         <div class="flex h-full flex-col gap-4 flex-1 min-w-0">
-          <div class="w-56 flex-shrink-0 flex flex-col gap-2">
-            <h2 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <div class="w-60 flex-shrink-0 flex flex-col gap-2">
+            <h2 class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
               Sites
             </h2>
             <Show when={sitesLoading()}>
@@ -356,9 +350,9 @@ export function SourcesPage() {
                   <button
                     onClick={() => handleSelectSite(site)}
                     classList={{
-                      'w-full text-left px-3 py-2 rounded text-sm transition-colors': true,
-                      'bg-accent/10 text-accent': selectedSite()?.id === site.id,
-                      'hover:bg-muted': selectedSite()?.id !== site.id,
+                      'w-full text-left px-3 py-2 rounded-md text-sm transition-all duration-150': true,
+                      'bg-accent/10 text-accent border-r-2 border-accent': selectedSite()?.id === site.id,
+                      'border-transparent hover:bg-muted': selectedSite()?.id !== site.id,
                     }}
                   >
                     <div class="flex items-center gap-2">
@@ -411,21 +405,29 @@ export function SourcesPage() {
                 <div class="space-y-4">
                   <h2 class="text-base font-semibold">{selectedSite()!.name || selectedSite()!.url}</h2>
                   <div class="grid grid-cols-2 gap-2 text-sm">
-                    <div class="p-2 bg-muted rounded">
-                      <div class="text-xs text-muted-foreground">URL</div>
-                      <div class="truncate">{selectedSite()!.url}</div>
+                    <div class="p-3 rounded-md bg-muted">
+                      <div class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                        URL
+                      </div>
+                      <div class="truncate text-sm">{selectedSite()!.url}</div>
                     </div>
-                    <div class="p-2 bg-muted rounded">
-                      <div class="text-xs text-muted-foreground">Status</div>
-                      <div>{selectedSite()!.status || 'idle'}</div>
+                    <div class="p-3 rounded-md bg-muted">
+                      <div class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                        Status
+                      </div>
+                      <div class="text-sm">{selectedSite()!.status || 'idle'}</div>
                     </div>
-                    <div class="p-2 bg-muted rounded">
-                      <div class="text-xs text-muted-foreground">Sources</div>
-                      <div>{selectedSite()!.source_count ?? 0}</div>
+                    <div class="p-3 rounded-md bg-muted">
+                      <div class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                        Sources
+                      </div>
+                      <div class="text-sm">{selectedSite()!.source_count ?? 0}</div>
                     </div>
-                    <div class="p-2 bg-muted rounded">
-                      <div class="text-xs text-muted-foreground">Max Pages</div>
-                      <div>{selectedSite()!.max_pages}</div>
+                    <div class="p-3 rounded-md bg-muted">
+                      <div class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                        Max Pages
+                      </div>
+                      <div class="text-sm">{selectedSite()!.max_pages}</div>
                     </div>
                   </div>
                   <div class="flex gap-2">
@@ -445,7 +447,9 @@ export function SourcesPage() {
                 </div>
               </Show>
               <Show when={!selectedSite()}>
-                <p class="text-xs text-muted-foreground text-center py-8">Select a site to manage</p>
+                <div class="empty-state h-full flex items-center justify-center text-muted-foreground">
+                  <p class="text-sm">Select a site to manage</p>
+                </div>
               </Show>
             </div>
           </div>

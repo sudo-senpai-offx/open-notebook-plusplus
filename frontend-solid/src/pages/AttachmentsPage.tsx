@@ -102,7 +102,7 @@ export function AttachmentsPage() {
 
   return (
     <div class="max-w-3xl">
-      <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center justify-between mb-6">
         <h1 class="text-2xl font-bold">{t('navigation.attachments')}</h1>
         <button
           class="btn"
@@ -123,13 +123,15 @@ export function AttachmentsPage() {
       />
 
       <Show when={loading()}>
-        <p class="text-sm text-muted-foreground">{t('common.loading')}</p>
+        <div class="empty-state py-12">
+          <span class="text-muted-foreground text-sm">{t('common.loading')}</span>
+        </div>
       </Show>
 
       <div class="space-y-2">
         <For each={attachments()}>
           {(att) => (
-            <div class="card p-3 flex items-center justify-between gap-3">
+            <div class="card p-4 flex items-center justify-between group">
               <div class="min-w-0 flex-1">
                 <Show when={renamingId() === att.id}>
                   <input
@@ -156,7 +158,7 @@ export function AttachmentsPage() {
                   </div>
                 </Show>
               </div>
-              <div class="flex items-center gap-1 flex-shrink-0">
+              <div class="flex items-center gap-1.5 flex-shrink-0">
                 <button
                   class="btn-ghost text-xs px-2 py-1"
                   onClick={() => startRename(att)}
@@ -174,16 +176,16 @@ export function AttachmentsPage() {
           )}
         </For>
         <Show when={!loading() && attachments().length === 0}>
-          <p class="text-sm text-muted-foreground">
-            {t('common.noResults')}
-          </p>
+          <div class="empty-state py-12">
+            <span class="text-muted-foreground text-sm">{t('common.noResults')}</span>
+          </div>
         </Show>
       </div>
 
       {/* Reader overlay */}
       <Show when={readerId()}>
         <div
-          class="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+          class="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4"
           onClick={() => setReaderId(null)}
         >
           <div
