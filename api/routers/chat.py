@@ -1079,7 +1079,7 @@ async def execute_chat(request: ExecuteChatRequest):
             or "gemini" in str(model_override).lower()
         )
         if is_cloud_model:
-            if not await quota_tracker.can_request("deepseek"):
+            if not await quota_tracker.can_request("cloud"):
                 flags = await ProcessingFlags.get_instance()
                 if flags.allow_local_processing:
                     model_override = "llama"

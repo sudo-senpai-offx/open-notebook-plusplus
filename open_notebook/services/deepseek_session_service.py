@@ -32,9 +32,11 @@ from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.deepseek_session import DeepSeekSession, estimate_tokens
 from open_notebook.exceptions import NotFoundError, OpenNotebookError
 from open_notebook.services.deepseek_direct_service import (
+    configure as configure_direct,
     deepseek_direct_service,
     pow_solver_available,
 )
+from open_notebook.ai.models import ProcessingFlags
 
 # ~1M token cap per DeepSeek web session (DeepSeek-V4 web limit).
 DEEPSEEK_TOKEN_CAP = 1_000_000
@@ -132,13 +134,13 @@ class DeepSeekSessionService:
                     # Cap approached: spin continuation, retire old session.
                     new_session = await self._create_continuation(existing)
                     return DeepSeekSessionResult(
-                        deepseek_session_id=new_session.deepseek_session_id or "",
+                        deepseek_session_id=new_session.id or "",
                         is_continuation=True,
                         token_budget_remaining=DEEPSEEK_TOKEN_CAP,
                         warned=True,
                     )
                 return DeepSeekSessionResult(
-                    deepseek_session_id=existing.deepseek_session_id or "",
+                    deepseek_session_id=existing.id or "",
                     is_continuation=False,
                     token_budget_remaining=remaining,
                     warned=warned,
@@ -152,6 +154,7 @@ class DeepSeekSessionService:
             # session is established, at which point it is updated via
             # record_usage().
             import uuid as _uuid
+
             new_row = DeepSeekSession(
                 notebook_id=notebook_id,
                 deepseek_session_id=f"pending:{_uuid.uuid4()}",  # placeholder, filled on first successful send
@@ -309,15 +312,23 @@ class DeepSeekSessionService:
 
             # If the resolved session is brand new (no DeepSeek web id yet),
             # the direct service will create the conversation on first send.
-            ds_id = resolved.deepseek_session_id
 
-            # Send via the direct PoW solver.
+            # Send via the direct PoW solver. Always request a fresh DeepSeek
+            # web session (chat_session_id=None) — the standalone endpoint
+            # works this way and avoids stale/invalid session ID issues.
+            flags = await ProcessingFlags.get_instance()
+            if flags.deepseek_ds_session_id and flags.deepseek_authorization_token:
+                configure_direct(
+                    flags.deepseek_ds_session_id,
+                    flags.deepseek_authorization_token,
+                )
             try:
                 result = deepseek_direct_service.send_message(
                     message=message,
                     thinking_enabled=thinking_enabled,
                     timeout=timeout,
                     ref_file_ids=ref_file_ids,
+                    chat_session_id=None,
                 )
             except Exception as exc:
                 logger.error(f"DeepSeek direct send failed: {exc}")
@@ -338,17 +349,23 @@ class DeepSeekSessionService:
             output_tokens = estimate_tokens(response_text)
             total_tokens = input_tokens + output_tokens
 
-            # If this was a brand-new ON++ row, backfill the DeepSeek web
+            # Backfill the ON++ tracking row with the actual DeepSeek web
             # session id now that the conversation exists on DeepSeek's side.
-            # The direct service creates the DeepSeek web session id internally;
-            # we capture it here on the next resolution. For now we record
-            # usage against the ON++ row id as the tracking key.
-            session_row = await DeepSeekSession.get(ds_id) if ds_id else None
+            # On subsequent turns this id is passed to _ensure_chat_session()
+            # so the same conversation is continued rather than a new one
+            # being created.
+            actual_web_session_id = result.get("chat_session_id")
             if session_row is None:
                 # Row was just created; fetch it by id (ds_id is the ON++ row id).
                 session_row = await DeepSeekSession.get(ds_id) if ds_id else None
 
             if session_row:
+                if (
+                    actual_web_session_id
+                    and session_row.deepseek_session_id != actual_web_session_id
+                ):
+                    session_row.deepseek_session_id = actual_web_session_id
+                    await session_row.save()
                 await session_row.record_usage(total_tokens)
                 remaining = DEEPSEEK_TOKEN_CAP - session_row.token_count
             else:
