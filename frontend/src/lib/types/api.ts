@@ -186,6 +186,10 @@ export interface SourceChatMessage {
   type: 'human' | 'ai'
   content: string
   timestamp?: string
+  thinking?: string | null
+  edit_count?: number
+  original_content?: string | null
+  edited_at?: string | null
 }
 
 export interface SourceChatContextIndicator {
@@ -234,6 +238,10 @@ export interface NotebookChatMessage {
   type: 'human' | 'ai'
   content: string
   timestamp?: string
+  thinking?: string | null
+  edit_count?: number
+  original_content?: string | null
+  edited_at?: string | null
 }
 
 export interface NotebookChatSessionWithMessages extends NotebookChatSession {
@@ -260,12 +268,59 @@ export interface SendNotebookChatMessageRequest {
   }
   model_override?: string
   history_since?: string
+  attachments?: string[]
 }
 
 export interface SendNotebookChatMessageResponse {
   session_id: string
   messages: NotebookChatMessage[]
   history_selection?: HistorySelection
+}
+
+export interface ChatAttachmentUploadResponse {
+  file_path: string
+  filename: string
+}
+
+// Attachment types (separate from notebooks database)
+export interface AttachmentRecord {
+  id: string
+  file_path: string
+  filename: string
+  mime_type: string
+  file_size: number
+  upload_session_id?: string | null
+  is_orphaned: boolean
+  created?: string | null
+}
+
+export interface AttachmentListResponse {
+  attachments: AttachmentRecord[]
+}
+
+export interface AttachmentContentResponse {
+  file_path: string
+  filename: string
+  mime_type: string
+  content: string
+}
+
+export interface AttachmentDeleteResponse {
+  ok: boolean
+  message: string
+}
+
+export interface EditMessageRequest {
+  message_id: string
+  new_content: string
+  new_attachments?: string[]
+}
+
+export interface EditMessageResponse {
+  session_id: string
+  messages: SourceChatMessage[]
+  edit_count: number
+  continuations_deleted: number
 }
 
 export interface BuildContextRequest {
@@ -318,6 +373,85 @@ export interface DeepSeekSessionStatus {
   pow_solver_available: boolean
 }
 
+export interface ProcessingFlagsResponse {
+  allow_local_processing: boolean
+  deepseek_pc_url: string | null
+}
+
+export interface SessionStatusResponse {
+  session_id?: string
+  local_processing_enabled?: boolean
+  cloud_processing_enabled?: boolean
+  browser_session_active?: boolean
+  last_refresh_at?: string
+  rate_limits?: Record<string, unknown>
+  allow_local_processing?: boolean
+}
+
+export interface QuotaStatusResponse {
+  providers: Record<string, { used: number; limit: number; remaining: number; exceeded: boolean; reset_at?: string; last_used_at?: string }>
+  cumulative_used: number
+  cumulative_limit: number
+  cumulative_remaining: number
+  cumulative_exceeded: boolean
+  updated_at?: string
+}
+
+export interface ChatBuildContextRequest {
+  session_id: string
+  notebook_id?: string
+  message: string
+}
+
+export interface ChatBuildContextResponse {
+  context: string
+}
+
+export interface ChatEditMessageRequest {
+  message_id: string
+  content?: string
+  new_content?: string
+}
+
+export interface ChatEditMessageResponse {
+  ok: boolean
+}
+
+export interface DynamicCourseRequest {
+  topic: string
+  field: string
+  estimated_duration_days?: number | null
+  user_preferences?: string | null
+}
+
+export interface SyncConflictsResponse {
+  conflicts: Array<{
+    collection: string
+    db_record_id: string
+    local_updated?: string
+    remote_updated?: string
+    resolved: boolean
+    resolution?: string
+  }>
+}
+
+export interface SyncOptoutResponse {
+  collections: string[]
+  record_ids: string[]
+}
+
+export interface SyncResolveResponse {
+  ok: boolean
+}
+
+export interface SyncUpdateOptoutResponse {
+  ok: boolean
+}
+
+export interface SyncAutoSyncResponse {
+  ok: boolean
+}
+
 export interface DeepSeekConfigureRequest {
   ds_session_id: string
   authorization_token: string
@@ -345,6 +479,7 @@ export interface DeepSeekChatRequest {
   notebook_id?: string
   message_type?: string
   thinking_enabled?: boolean
+  attachments?: string[]
 }
 
 export interface DeepSeekChatResponse {
@@ -355,9 +490,26 @@ export interface DeepSeekChatResponse {
   pow_required: boolean
   session_id: string | null
   prompt_used: string | null
+  provider?: string | null
+  language?: string | null
+  voice?: string | null
+  browser_fallback?: boolean
 }
 
-// TTS/STT API types (D14/D15)
+export interface STTRequest {
+  language?: string | null
+}
+
+export interface STTResponse {
+  ok: boolean
+  text?: string | null
+  seconds?: number
+  provider?: string | null
+  language?: string | null
+  error?: string | null
+  browser_fallback?: boolean
+}
+
 export interface TTSRequest {
   text: string
   voice?: string | null
@@ -372,20 +524,6 @@ export interface TTSResponse {
   provider?: string | null
   language?: string | null
   voice?: string | null
-  error?: string | null
-  browser_fallback?: boolean
-}
-
-export interface STTRequest {
-  language?: string | null
-}
-
-export interface STTResponse {
-  ok: boolean
-  text?: string | null
-  seconds?: number
-  provider?: string | null
-  language?: string | null
   error?: string | null
   browser_fallback?: boolean
 }

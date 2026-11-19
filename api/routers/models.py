@@ -409,14 +409,17 @@ async def update_default_models(defaults_data: DefaultModelsResponse):
 async def get_processing_flags():
     """Return the current processing flag configuration."""
     flags = await ProcessingFlags.get_instance()
-    return {"allow_local_processing": flags.allow_local_processing}
+    return {
+        "allow_local_processing": flags.allow_local_processing,
+        "deepseek_pc_url": flags.deepseek_pc_url,
+    }
 
 
 @router.put("/processing-flags", response_model=dict)
 async def update_processing_flags(flags_data: dict):
     """Update processing flag configuration.
 
-    Expected payload: {"allow_local_processing": bool}
+    Expected payload: {"allow_local_processing": bool, "deepseek_pc_url": str}
     """
     try:
         flags = await ProcessingFlags.get_instance()
@@ -425,10 +428,17 @@ async def update_processing_flags(flags_data: dict):
         if value is not None:
             flags.allow_local_processing = bool(value)
 
+        pc_url = flags_data.get("deepseek_pc_url")
+        if pc_url is not None:
+            flags.deepseek_pc_url = pc_url or None
+
         await flags.update()
 
-        return {"allow_local_processing": flags.allow_local_processing}
-    except Exception as e:
+        return {
+            "allow_local_processing": flags.allow_local_processing,
+            "deepseek_pc_url": flags.deepseek_pc_url,
+        }
+    except Exception as e:  # noqa: BLE001
         logger.error(f"Error updating processing flags: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Error updating processing flags: {str(e)}"
@@ -437,7 +447,7 @@ async def update_processing_flags(flags_data: dict):
         raise
     except OpenNotebookError:
         raise
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.error(f"Error updating default models: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Error updating default models: {str(e)}"

@@ -1,5 +1,3 @@
-import json
-import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -10,8 +8,6 @@ from loguru import logger
 from api.models import SettingsResponse, SettingsUpdate
 from open_notebook.ai.models import ProcessingFlags
 from open_notebook.domain.content_settings import ContentSettings
-from open_notebook.domain.credential import Credential
-from open_notebook.domain.notebook import Source
 from open_notebook.domain.provider_config import ProviderConfig
 from open_notebook.exceptions import (
     InvalidInputError,
@@ -169,8 +165,8 @@ async def sync_manifest():
     Uses last-write-wins via the ON++ sync engine (surreal + blob store).
     """
     try:
-        from open_notebook.domain.notebook import Notebook, Source
         from open_notebook.domain.attachment import Attachment
+        from open_notebook.domain.notebook import Notebook, Source
 
         manifest: Dict[str, Any] = {
             "exported_at": datetime.now(timezone.utc).isoformat(),

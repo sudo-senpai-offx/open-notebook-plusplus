@@ -18,6 +18,7 @@ import {
   sessionApi,
   quotaApi,
   deepseekApi,
+  processingFlags,
   ttsSttApi,
   preprocessorApi,
   browserAiApi,
@@ -110,6 +111,7 @@ export function SettingsForm() {
   const [authToken, setAuthToken] = useState('')
   const [configureMessage, setConfigureMessage] = useState<string | null>(null)
   const [configureError, setConfigureError] = useState<string | null>(null)
+  const [deepSeekPcUrl, setDeepSeekPcUrl] = useState('')
 
   useEffect(() => {
     let mounted = true
@@ -164,8 +166,8 @@ export function SettingsForm() {
           ttsSttApi.languages(),
         ])
         if (mounted) {
-          setTtsSttStatus(tts)
-          setSttStatus(stt)
+          setTtsSttStatus(tts as unknown as { allow_local_processing: boolean; piper_reachable: boolean; piper_detail: string })
+          setSttStatus(stt as unknown as { allow_local_processing: boolean; whisper_reachable: boolean; whisper_detail: string })
           setSupportedLanguages(l)
         }
       } catch {
@@ -203,6 +205,17 @@ export function SettingsForm() {
       }
     }
     fetchDeepseek()
+    const fetchProcessingFlags = async () => {
+      try {
+        const data = await processingFlags.get()
+        if (mounted) {
+          setDeepSeekPcUrl(data.deepseek_pc_url ?? '')
+        }
+      } catch {
+        // Non-critical; PC fallback URL is optional
+      }
+    }
+    fetchProcessingFlags()
     fetchTtsStt()
     fetchPreprocessGroups()
     fetchBrowserAi()
@@ -1151,6 +1164,52 @@ export function SettingsForm() {
                     <AlertDescription>{t('settings.deepseekSetupNeededDesc')}</AlertDescription>
                   </Alert>
                 )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* PC Fallback URL Card */}
+          <Card>
+            <CardHeader>
+              <CardTitle>{t('settings.pcFallbackTitle')}</CardTitle>
+              <CardDescription>{t('settings.pcFallbackDesc')}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="deepseek_pc_url">{t('settings.deepseekPcUrl')}</Label>
+                  <input
+                    id="deepseek_pc_url"
+                    type="text"
+                    value={deepSeekPcUrl}
+                    onChange={(e) => setDeepSeekPcUrl(e.target.value)}
+                    placeholder={t('settings.deepseekPcUrlPlaceholder')}
+                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
+                    disabled={deepseekLoading}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.deepseekPcUrlHelp')}
+                  </p>
+                </div>
+                <Button
+                  onClick={async () => {
+                    setConfigureError(null)
+                    setConfigureMessage(null)
+                    try {
+                      const result = await processingFlags.update({
+                        deepseek_pc_url: deepSeekPcUrl || null,
+                      })
+                      setConfigureMessage('PC fallback URL saved')
+                      setDeepSeekPcUrl(result.deepseek_pc_url ?? '')
+                    } catch (e) {
+                      const err = e as { response?: { data?: { detail?: string } } };
+                      setConfigureError(err?.response?.data?.detail || t('settings.deepseekPcUrlSaveFailed'))
+                    }
+                  }}
+                  disabled={deepseekLoading}
+                >
+                  {t('settings.deepseekPcUrlSave')}
+                </Button>
               </div>
             </CardContent>
           </Card>

@@ -46,11 +46,9 @@ export function NotebooksPage() {
 
   return (
     <div class="max-w-3xl">
-      <div class="flex items-center justify-between mb-6">
-        <h1 class="text-2xl font-bold">{t('navigation.notebooks')}</h1>
-      </div>
+      <h1 class="text-2xl font-bold mb-4">{t('navigation.notebooks')}</h1>
 
-      <div class="card p-5 mb-6">
+      <div class="card p-4 mb-4">
         <div class="flex gap-2">
           <input
             class="input flex-1"
@@ -66,35 +64,24 @@ export function NotebooksPage() {
             onClick={() => void handleCreate()}
             disabled={creating() || !newTitle().trim()}
           >
-            {creating() ? t('common.processing') : t('common.create')}
+            {t('common.create')}
           </button>
         </div>
       </div>
 
       <Show when={loading()}>
-        <div class="empty-state py-12">
-          <span class="text-muted-foreground text-sm">Loading notebooks…</span>
-        </div>
+        <p class="text-sm text-muted-foreground">{t('common.loading')}</p>
       </Show>
 
-      <Show when={!loading() && notebooks().length === 0}>
-        <div class="empty-state py-12">
-          <span class="text-muted-foreground text-sm">{t('common.noResults')}</span>
-        </div>
-      </Show>
-
-      <div class="space-y-1.5">
+      <div class="space-y-2">
         <For each={notebooks()}>
           {(nb) => (
-            <div class="card p-4 flex items-center justify-between group">
-              <div class="flex items-center gap-3 cursor-pointer cursor-default">
-                <div class="w-8 h-8 rounded-md bg-accent/10 flex items-center justify-center text-accent text-sm font-medium">
-                  NB
-                </div>
+            <div class="card p-4 flex items-center justify-between">
+              <div>
                 <div class="font-medium">{nb.name}</div>
               </div>
               <button
-                class="btn-ghost text-xs p-1.5 text-destructive hover:bg-destructive/10"
+                class="btn-ghost text-xs"
                 onClick={() => void handleDelete(nb.id)}
               >
                 {t('common.delete')}

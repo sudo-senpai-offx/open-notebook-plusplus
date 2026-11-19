@@ -26,6 +26,7 @@ export function SettingsPage() {
   const [importing, setImporting] = createSignal(false)
   const [importFile, setImportFile] = createSignal<HTMLInputElement | null>(null)
 
+  // Working copy of settings for editing
   const [editValues, setEditValues] = createSignal<SettingsUpdate>({})
 
   const load = async () => {
@@ -146,6 +147,7 @@ export function SettingsPage() {
   const handleDeepSeekConfigure = async () => {
     const ds = deepseek()
     if (!ds) return
+    // Prompt user for credentials via inline inputs in edit mode
     setEditMode(true)
   }
 
@@ -206,17 +208,14 @@ export function SettingsPage() {
 
       {/* Language */}
       <section class="card p-4">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-base font-semibold">{t('common.language')}</h2>
-          <span class="text-xs text-muted-foreground">{t('common.restart')} </span>
-        </div>
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <h2 class="text-base font-semibold mb-3">{t('common.language')}</h2>
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
           <For each={LANGUAGES}>
             {(lang) => (
               <button
                 onClick={() => void handleLanguage(lang.code)}
                 classList={{
-                  'px-3 py-2 rounded-md text-sm border transition-colors text-left': true,
+                  'px-3 py-2 rounded text-sm border transition-colors text-left': true,
                   'bg-accent/10 border-accent text-accent': language() === lang.code,
                   'border-border hover:bg-muted': language() !== lang.code,
                 }}
@@ -259,10 +258,7 @@ export function SettingsPage() {
 
       {/* DeepSeek Web */}
       <section class="card p-4">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-base font-semibold">DeepSeek Web</h2>
-          <span class="text-xs text-muted-foreground">Free web tier</span>
-        </div>
+        <h2 class="text-base font-semibold mb-3">DeepSeek Web</h2>
         <Show when={deepseek()} fallback={<p class="text-xs text-muted-foreground">{t('common.loading')}</p>}>
           <div class="space-y-3 text-sm">
             <div class="flex items-center justify-between">
@@ -398,10 +394,7 @@ export function SettingsPage() {
 
       {/* Browser AI */}
       <section class="card p-4">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-base font-semibold">Browser AI</h2>
-          <span class="text-xs text-muted-foreground">No credentials needed</span>
-        </div>
+        <h2 class="text-base font-semibold mb-3">Browser AI</h2>
         <Show when={browserAi()} fallback={<p class="text-xs text-muted-foreground">{t('common.loading')}</p>}>
           <div class="space-y-3 text-sm">
             <div class="flex items-center justify-between">
@@ -460,10 +453,7 @@ export function SettingsPage() {
 
       {/* Sync */}
       <section class="card p-4">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-base font-semibold">Sync</h2>
-          <span class="text-xs text-muted-foreground">Last-write-wins</span>
-        </div>
+        <h2 class="text-base font-semibold mb-3">Sync</h2>
         <p class="text-xs text-muted-foreground mb-3">
           Cumulative sync manifest: notebooks, sources, attachments, settings,
           DeepSeek credentials. Excludes per-device model selection.

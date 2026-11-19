@@ -18,6 +18,7 @@ Endpoints:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -25,9 +26,6 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from open_notebook.ai.models import ProcessingFlags
-from open_notebook.services.browser_use_service import (
-    browser_use_service,
-)
 from open_notebook.services.deepseek_direct_service import (
     configure as configure_direct,
 )
@@ -63,6 +61,7 @@ class DeepSeekWebRequest(BaseModel):
 
 class DeepSeekWebResponse(BaseModel):
     response: Optional[str]
+    thinking: Optional[str] = None
     error: Optional[str]
     manual_login_required: bool
     rate_limited: bool
@@ -77,20 +76,13 @@ class DeepSeekWebSessionStatus(BaseModel):
     credentials_configured: bool
     manual_login_required: bool
     rate_limited: bool
-    # True only when a challenge would arrive and this device cannot answer
-    # it. Credentials alone are not a usable session.
     pow_required: bool
     pow_solver_available: bool
 
 
 class DeepSeekCredentials(BaseModel):
-    ds_session_id: str = Field(
-        ..., description="ds_session_id cookie from chat.deepseek.com"
-    )
-    authorization_token: str = Field(
-        ...,
-        description="Authorization Bearer token from chat.deepseek.com request headers",
-    )
+    ds_session_id: str = Field(..., description="ds_session_id cookie from chat.deepseek.com")
+    authorization_token: str = Field(..., description="Authorization Bearer token from chat.deepseek.com request headers")
 
 
 class DeepSeekPCFallbackRequest(BaseModel):
@@ -151,11 +143,54 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
 
         # 4. Upload attachments to deepseek-web to get ref_file_ids
         ref_file_ids: List[str] = []
+        failed_attachments: List[str] = []
+        attachment_parts: List[str] = []
         if request.attachments:
             for file_path in request.attachments:
-                file_id = deepseek_direct_service.upload_file(file_path)
-                if file_id:
-                    ref_file_ids.append(file_id)
+                try:
+                    path = Path(file_path)
+                    if path.exists() and path.is_file():
+                        # Upload to deepseek-web so the model can reference
+                        # the file directly (covers binary files too).
+                        try:
+                            file_id = deepseek_direct_service.upload_file(file_path)
+                            if file_id:
+                                ref_file_ids.append(file_id)
+                            else:
+                                failed_attachments.append(Path(file_path).name)
+                        except Exception:
+                            failed_attachments.append(Path(file_path).name)
+
+                        # Read text content for message prepend (text files only).
+                        try:
+                            content = path.read_text(encoding="utf-8", errors="replace")
+                            replacement_ratio = content.count("\ufffd") / max(
+                                len(content), 1
+                            )
+                            if replacement_ratio <= 0.30:
+                                attachment_parts.append(
+                                    f"\n--- Attachment: {path.name} ---\n{content}\n--- End of {path.name} ---"
+                                )
+                        except Exception:
+                            pass
+                    else:
+                        failed_attachments.append(Path(file_path).name)
+                except Exception:
+                    failed_attachments.append(Path(file_path).name)
+
+            # If attachments were provided but none were successfully uploaded
+            # AND none could be read locally, fail loudly.
+            if failed_attachments and not attachment_parts:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Failed to upload or read the following attachment(s): "
+                        f"{', '.join(failed_attachments)}. "
+                        "Ensure DeepSeek-web credentials are configured in "
+                        "Settings and the PoW solver is installed "
+                        "(pip install deepseek-pow wasmtime)."
+                    ),
+                )
 
         # 5. Build context from notebook's preprocessed sources
         notebook_context_parts: List[str] = []
@@ -170,9 +205,9 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
                 asset = row.get("asset") or {}
                 src_file_path = asset.get("file_path")
                 title_val = row.get("title") or asset.get("filename") or "Untitled"
-                src_title = str(title_val)  # type: ignore
+                src_title = str(title_val)
                 if src_file_path:
-                    md_path = str(src_file_path) + ".md"  # type: ignore[arg-type]
+                    md_path = str(src_file_path) + ".md"
                     if os.path.exists(md_path):
                         try:
                             with open(md_path, "r", encoding="utf-8") as f:
@@ -194,10 +229,14 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
                 f"{chr(10).join(notebook_context_parts)}\n"
                 f"---\n"
             )
+        if attachment_parts:
+            context_message = (
+                f"{context_message}\n\n" + "".join(attachment_parts) + "\n\n---\n"
+            )
         if ref_file_ids:
             context_message = (
                 f"{context_message}\n\n"
-                f"Attached files: {len(ref_file_ids)} file(s) uploaded to chat."
+                f"Attached files: {len(ref_file_ids)} file(s) uploaded to chat.\n"
             )
 
         transformed_prompt = await prompter_service.transform(
@@ -207,7 +246,7 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
             message_type=request.message_type or "chat",
         )
 
-        # 5. Run direct API call (with PoW solving)
+        # 7. Run direct API call (with PoW solving)
         result = deepseek_direct_service.send_message(
             message=transformed_prompt,
             thinking_enabled=request.thinking_enabled or False,
@@ -215,7 +254,7 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
             ref_file_ids=ref_file_ids,
         )
 
-        # 6. Handle errors
+        # 8. Handle errors
         if result.get("manual_login_required"):
             raise HTTPException(
                 status_code=403,
@@ -235,7 +274,7 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
                 ),
             )
 
-        # 7. If PoW required and not solved, offer PC fallback
+        # 9. If PoW required and not solved, offer PC fallback
         if result.get("pow_required") and not result.get("pow_solved"):
             if request.pc_fallback:
                 # Delegate to browser-use on PC
@@ -282,11 +321,12 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
                 detail=f"DeepSeek-web error: {result['error']}",
             )
 
-        # 8. Increment quota on success
+        # 10. Increment quota on success
         await quota_tracker.increment("deepseek", 1)
 
         return DeepSeekWebResponse(
             response=result.get("response"),
+            thinking=result.get("thinking"),
             error=result.get("error"),
             manual_login_required=result.get("manual_login_required", False),
             rate_limited=result.get("rate_limited", False),
@@ -296,7 +336,6 @@ async def deepseek_web_chat(request: DeepSeekWebRequest) -> DeepSeekWebResponse:
             prompt_used=transformed_prompt,
             used_pc_fallback=False,
         )
-
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -333,6 +372,7 @@ async def _run_pc_browser_use(
         )
         return {
             "response": result.get("response"),
+            "thinking": result.get("thinking"),
             "error": result.get("error"),
             "manual_login_required": result.get("manual_login_required", False),
             "rate_limited": result.get("rate_limited", False),
@@ -353,6 +393,7 @@ async def _run_pc_browser_use(
                 data = resp.json()
                 return {
                     "response": data.get("response"),
+                    "thinking": data.get("thinking"),
                     "error": data.get("error"),
                     "manual_login_required": data.get("manual_login_required", False),
                     "rate_limited": data.get("rate_limited", False),
@@ -442,6 +483,7 @@ async def deepseek_web_pc_fallback(
 
         return DeepSeekWebResponse(
             response=pc_result.get("response"),
+            thinking=pc_result.get("thinking"),
             error=pc_result.get("error"),
             manual_login_required=pc_result.get("manual_login_required", False),
             rate_limited=pc_result.get("rate_limited", False),
@@ -451,7 +493,6 @@ async def deepseek_web_pc_fallback(
             prompt_used=transformed_prompt,
             used_pc_fallback=True,
         )
-
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -459,32 +500,6 @@ async def deepseek_web_pc_fallback(
         raise HTTPException(
             status_code=500, detail=f"DeepSeek-web PC fallback failed: {str(e)}"
         )
-
-
-@router.get("/chat/deepseek-web/session", response_model=DeepSeekWebSessionStatus)
-async def deepseek_web_session_status() -> DeepSeekWebSessionStatus:
-    """Return current DeepSeek-web session/credential status.
-
-    ``pow_required`` used to be hardcoded false, which told the UI that
-    everything was fine even on a device where the solver was missing and
-    every chat would fail at the challenge. Report the real capability.
-    """
-    try:
-        flags = await ProcessingFlags.get_instance()
-        configured = bool(
-            flags.deepseek_ds_session_id and flags.deepseek_authorization_token
-        )
-        solver = pow_solver_available()
-        return DeepSeekWebSessionStatus(
-            credentials_configured=configured,
-            manual_login_required=not configured,
-            rate_limited=False,
-            pow_required=configured and not solver,
-            pow_solver_available=solver,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"DeepSeek-web session status error: {e}")
-        raise HTTPException(status_code=500, detail=f"Session status failed: {str(e)}")
 
 
 @router.post("/chat/deepseek-web/session/configure", response_model=Dict[str, Any])
@@ -539,7 +554,28 @@ async def deepseek_web_session_refresh() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Session refresh failed: {str(e)}")
 
 
-@router.get("/chat/deepseek-web/available", response_model=Dict[str, Any])
+@router.get("/chat/deepseek-web/session", response_model=DeepSeekWebSessionStatus)
+async def deepseek_web_session_status() -> DeepSeekWebSessionStatus:
+    """Return current DeepSeek-web session/credential status."""
+    try:
+        flags = await ProcessingFlags.get_instance()
+        configured = bool(
+            flags.deepseek_ds_session_id and flags.deepseek_authorization_token
+        )
+        solver = pow_solver_available()
+        return DeepSeekWebSessionStatus(
+            credentials_configured=configured,
+            manual_login_required=not configured,
+            rate_limited=False,
+            pow_required=configured and not solver,
+            pow_solver_available=solver,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"DeepSeek-web session status error: {e}")
+        raise HTTPException(status_code=500, detail=f"Session status failed: {str(e)}")
+
+
+@router.get("/api/chat/deepseek-web/available", response_model=Dict[str, Any])
 async def deepseek_web_available() -> Dict[str, Any]:
     """Return whether DeepSeek-web direct API is configured and internet is available."""
     import socket
@@ -565,7 +601,9 @@ async def deepseek_web_available() -> Dict[str, Any]:
     }
 
 
-@router.get("/chat/deepseek-web/pc-fallback-available", response_model=Dict[str, Any])
+@router.get(
+    "/chat/deepseek-web/pc-fallback-available", response_model=Dict[str, Any]
+)
 async def deepseek_web_pc_fallback_available() -> Dict[str, Any]:
     """Return whether PC browser-use fallback is available.
 
