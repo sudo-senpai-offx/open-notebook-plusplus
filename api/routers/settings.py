@@ -335,9 +335,7 @@ async def update_settings(settings_update: SettingsUpdate):
 
         # Update allow_local_processing in ProcessingFlags record
         if settings_update.allow_local_processing is not None:
-            flags = await ProcessingFlags.get_instance()
             flags.allow_local_processing = bool(settings_update.allow_local_processing)
-            await flags.update()
 
             # Also write to Termux-side file so termux-launch.sh can read it
             # before SurrealDB starts on cold boot.
@@ -347,6 +345,9 @@ async def update_settings(settings_update: SettingsUpdate):
                     f.write("1" if flags.allow_local_processing else "0")
             except Exception:
                 pass  # Non-critical; SurrealDB is the source of truth
+
+        # Persist all ProcessingFlags changes (provider URLs, credentials, etc.)
+        await flags.update()
 
         await settings.update()
 

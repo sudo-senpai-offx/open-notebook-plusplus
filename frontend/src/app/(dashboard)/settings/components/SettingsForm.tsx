@@ -95,9 +95,9 @@ export function SettingsForm() {
   const [ttsSttLoading, setTtsSttLoading] = useState(false)
   const [preprocessGroups, setPreprocessGroups] = useState<Record<string, boolean>>({})
   const [browserAiLoading, setBrowserAiLoading] = useState(false)
-  const [googleAiModeUrl, setGoogleAiModeUrl] = useState('https://google.com/search?udm=14')
+  const [googleAiModeUrl, setGoogleAiModeUrl] = useState('http://127.0.0.1:18080/v1')
   const [geminiApiKey, setGeminiApiKey] = useState('')
-  const [duckAiUrl, setDuckAiUrl] = useState('https://duck.ai/chat')
+  const [duckAiUrl, setDuckAiUrl] = useState('http://localhost:3006/v1')
   const [browserAiConfigureMessage, setBrowserAiConfigureMessage] = useState<string | null>(null)
   const [browserAiConfigureError, setBrowserAiConfigureError] = useState<string | null>(null)
   const [browserAiStatus, setBrowserAiStatus] = useState<{

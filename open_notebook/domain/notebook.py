@@ -23,7 +23,7 @@ from open_notebook.storage.blobs import resolve_blob_path, unlink_if_unreference
 class Notebook(ObjectModel):
     table_name: ClassVar[str] = "notebook"
     name: str
-    description: str
+    description: Optional[str] = None
     archived: Optional[bool] = False
     last_viewed_at: Optional[datetime] = None
     # Study OS course classification (Phase 2)
@@ -920,10 +920,12 @@ class ChatSession(ObjectModel):
     nullable_fields: ClassVar[set[str]] = {
         "model_override",
         "deepseek_session_series_id",
+        "provider_session_id",
     }
     title: Optional[str] = None
     model_override: Optional[str] = None
     deepseek_session_series_id: Optional[str] = None
+    provider_session_id: Optional[str] = None
 
     async def relate_to_notebook(self, notebook_id: str) -> Any:
         if not notebook_id:
@@ -1226,11 +1228,21 @@ async def persist_chat_messages(
         if not content.strip():
             continue
 
+        # Extract edit metadata from additional_kwargs if present
+        extra = getattr(message, "additional_kwargs", None) or {}
+        edit_count = int(extra.get("edit_count", 0)) if isinstance(extra, dict) else 0
+        edited_at = extra.get("edited_at") if isinstance(extra, dict) else None
+        original_content = (
+            extra.get("original_content") if isinstance(extra, dict) else None
+        )
+
         await repo_query(
             """
             CREATE $id CONTENT {
                 session: $sid, seq: $seq, role: $role,
-                content: $content, updated: time::now()
+                content: $content, created: time::now(), updated: time::now(),
+                edit_count: $edit_count, edited_at: $edited_at,
+                original_content: $original_content
             }
             """,
             {
@@ -1239,7 +1251,57 @@ async def persist_chat_messages(
                 "seq": index,
                 "role": getattr(message, "type", "human"),
                 "content": content,
+                "edit_count": edit_count,
+                "edited_at": edited_at,
+                "original_content": original_content,
             },
         )
         added += 1
     return added
+
+
+async def update_chat_message(
+    session_id: str,
+    message_id: str,
+    new_content: str,
+    edit_count: int,
+) -> bool:
+    """Update an existing chat message's content and edit metadata.
+
+    Used when a user edits a previously sent message. Increments the
+    edit counter and records the edit timestamp. Returns True if the
+    message was updated, False if not found.
+    """
+    try:
+        # Verify the message exists
+        existing = await repo_query(
+            "SELECT * FROM chat_message WHERE id = $mid AND session = $sid",
+            {
+                "mid": ensure_record_id(f"chat_message:{message_id}"),
+                "sid": ensure_record_id(session_id),
+            },
+        )
+        if not existing:
+            return False
+
+        # Partial update (SET, not CONTENT): CONTENT replaces the whole
+        # record, which would wipe session/seq/role/created. Only the
+        # edited fields are touched here.
+        # edited_at is set with time::now() in SurrealQL, not a Python
+        # ISO string - a SCHEMAFULL datetime field rejects string input.
+        await repo_query(
+            """
+            UPDATE $id SET
+                content = $content, edit_count = $edit_count,
+                edited_at = time::now(), updated = time::now()
+            """,
+            {
+                "id": ensure_record_id(f"chat_message:{message_id}"),
+                "content": new_content,
+                "edit_count": edit_count,
+            },
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error updating chat message {message_id}: {e}")
+        raise DatabaseOperationError(f"Failed to update message: {e}")

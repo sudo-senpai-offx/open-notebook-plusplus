@@ -880,8 +880,8 @@ async def execute_chat(request: ExecuteChatRequest):
         message_content = request.message
         ref_file_ids: list[str] = []
         failed_attachments: list[str] = []
+        attachment_parts: list[str] = []
         if request.attachments:
-            attachment_parts: list[str] = []
             for file_path in request.attachments:
                 try:
                     path = Path(file_path)

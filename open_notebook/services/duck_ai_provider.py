@@ -41,8 +41,8 @@ class DuckAIProvider(BaseProvider):
         super().__init__(PROVIDER_DUCK_AI, config)
 
     async def is_available(self) -> bool:
-        """Duck.ai is available if p2d-duck is installed or DUCK_AI_URL is configured."""
-        if importlib.util.find_spec("p2d_duck") is not None:
+        """Duck.ai is available if p2d-duck/duck_ai is installed or DUCK_AI_URL is configured."""
+        if importlib.util.find_spec("p2d_duck") is not None or importlib.util.find_spec("duck_ai") is not None:
             return True
         flags = await ProcessingFlags.get_instance()
         return bool(flags.duck_ai_url)
@@ -60,8 +60,8 @@ class DuckAIProvider(BaseProvider):
         """Send a message to Duck.ai via p2d-duck or OpenAI-compatible wrapper."""
         model_name = model or await self._get_default_model()
 
-        # Try p2d-duck first (sync client, run in thread)
-        if importlib.util.find_spec("p2d_duck") is not None:
+        # Try p2d-duck/duck_ai first (sync client, run in thread)
+        if importlib.util.find_spec("p2d_duck") is not None or importlib.util.find_spec("duck_ai") is not None:
             try:
                 response_text = await asyncio.to_thread(
                     self._p2d_duck_send, message, model_name
@@ -134,14 +134,21 @@ class DuckAIProvider(BaseProvider):
 
     @staticmethod
     def _p2d_duck_send(prompt: str, model: Optional[str]) -> str:
-        """Send via p2d-duck sync client (runs in a thread)."""
-        import p2d_duck  # type: ignore
-
-        client = p2d_duck.Client()
-        if model:
-            response = client.chat(prompt, model=model)
-        else:
-            response = client.chat(prompt)
+        """Send via p2d-duck/duck_ai sync client (runs in a thread)."""
+        try:
+            import p2d_duck  # type: ignore
+            client = p2d_duck.Client()
+            if model:
+                response = client.chat(prompt, model=model)
+            else:
+                response = client.chat(prompt)
+        except ImportError:
+            import duck_ai as duck_ai_module  # type: ignore
+            client = duck_ai_module.DuckChat()
+            if model:
+                response = client.ask(prompt, model=model)
+            else:
+                response = client.ask(prompt)
         return response.text if hasattr(response, "text") else str(response)
 
     async def _get_default_model(self) -> str:
@@ -171,6 +178,6 @@ class DuckAIProvider(BaseProvider):
         ).ProcessingFlags
         return {
             "provider": self.provider_id,
-            "p2d_duck_available": importlib.util.find_spec("p2d_duck") is not None,
+            "p2d_duck_available": importlib.util.find_spec("p2d_duck") is not None or importlib.util.find_spec("duck_ai") is not None,
             "has_duck_ai_url": False,  # Would need flags instance; simplified
         }

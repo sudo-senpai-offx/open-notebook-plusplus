@@ -1,8 +1,13 @@
 """
 Google AI Mode (Gemini 4 Hydrogen) provider implementation.
 
-Uses a lightweight OpenAI-compatible wrapper (XD06/google-ai-mode or similar)
-exposed at GOOGLE_AI_MODE_URL. No Playwright/CDP — httpx fast path only.
+Supports two integration methods:
+1. **Local wrapper URL** (GOOGLE_AI_MODE_URL) — points to a lightweight
+   OpenAI-compatible wrapper (e.g. XD06/google-ai-mode). No Playwright/CDP.
+2. **Direct Gemini API** (GEMINI_API_KEY) — uses Google's official
+   OpenAI-compatible endpoint at
+   https://generativelanguage.googleapis.com/v1beta/openai/
+   Requires a free Gemini API key from Google AI Studio.
 
 Context feeding: Google AI Mode has a sliding window context (32K free tier),
 so older turns drop out when the limit is exceeded. ON++ preprocesses and feeds
@@ -11,6 +16,7 @@ full context via continuation prompts when switching to/from this provider.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -26,23 +32,55 @@ from open_notebook.ai.providers import (
 
 
 class GoogleAIModeProvider(BaseProvider):
-    """Google AI Mode provider: lightweight OpenAI-compatible wrapper via httpx."""
+    """Google AI Mode provider: lightweight OpenAI-compatible access via
+    either a local wrapper URL or the direct Gemini API."""
 
     def __init__(self, config: ProviderConfig):
         super().__init__(PROVIDER_GOOGLE_AI_MODE, config)
 
+    # ------------------------------------------------------------------
+    # Configuration helpers
+    # ------------------------------------------------------------------
+
+    async def _get_flags(self) -> ProcessingFlags:
+        """Get ProcessingFlags instance (async)."""
+        from open_notebook.ai.models import ProcessingFlags as PF  # noqa: PLC0415
+        return await PF.get_instance()
+
+    async def _gemini_api_key(self) -> Optional[str]:
+        return os.getenv("GEMINI_API_KEY") or (await self._get_flags()).gemini_api_key
+
+    def _gemini_base_url(self) -> str:
+        return os.getenv(
+            "GEMINI_API_BASE_URL",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        )
+
+    async def _wrapper_url(self) -> Optional[str]:
+        return (await self._get_flags()).google_ai_mode_url
+
+    # ------------------------------------------------------------------
+    # Availability
+    # ------------------------------------------------------------------
+
     async def is_available(self) -> bool:
-        """Google AI Mode is available if GOOGLE_AI_MODE_URL is configured and reachable."""
-        flags = await ProcessingFlags.get_instance()
-        url = flags.google_ai_mode_url
-        if not url:
-            return False
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{url.rstrip('/')}/health")
-                return resp.status_code == 200
-        except Exception:  # noqa: BLE001
-            return False
+        """Google AI Mode is available if either a wrapper URL is configured
+        and reachable, or a Gemini API key is set."""
+        flags = await self._get_flags()
+        if flags.google_ai_mode_url:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{flags.google_ai_mode_url.rstrip('/')}/health"
+                    )
+                    return resp.status_code == 200
+            except Exception:  # noqa: BLE001
+                pass
+        return bool(await self._gemini_api_key())
+
+    # ------------------------------------------------------------------
+    # Send message
+    # ------------------------------------------------------------------
 
     async def send_message(
         self,
@@ -54,42 +92,78 @@ class GoogleAIModeProvider(BaseProvider):
         timeout: float = 120.0,
         model: Optional[str] = None,
     ) -> ProviderSendResult:
-        """Send a message to Google AI Mode via the local wrapper API."""
-        flags = await ProcessingFlags.get_instance()
-        ai_mode_url = flags.google_ai_mode_url
-        if not ai_mode_url:
+        """Send a message to Google AI Mode.
+
+        Tries the local wrapper URL first (GOOGLE_AI_MODE_URL), then falls
+        back to the direct Gemini API (GEMINI_API_KEY).
+        """
+        # --- Option 1: Local wrapper URL ---
+        wrapper_url = await self._wrapper_url()
+        if wrapper_url:
+            return await self._send_via_wrapper(
+                wrapper_url, message, session_id, thinking_enabled,
+                ref_file_ids, timeout,
+            )
+
+        # --- Option 2: Direct Gemini API ---
+        api_key = await self._gemini_api_key()
+        if not api_key:
             return ProviderSendResult(
                 ok=False,
                 error=(
                     "Google AI Mode not configured. "
-                    "Set GOOGLE_AI_MODE_URL in Settings to point to your "
-                    "local OpenAI-compatible wrapper (e.g. XD06/google-ai-mode)."
+                    "Set GOOGLE_AI_MODE_URL to point to a local wrapper, "
+                    "or set GEMINI_API_KEY to use the Gemini API directly."
                 ),
                 used_provider=self.provider_id,
             )
 
-        # Build payload for the wrapper endpoint.
-        # The wrapper (XD06/google-ai-mode) exposes POST /v1/web/ai-mode
-        # with {prompt, country, language, session_token}.
+        return await self._send_via_gemini_api(
+            api_key, message, session_id, thinking_enabled, ref_file_ids, timeout, model
+        )
+
+    # ------------------------------------------------------------------
+    # Wrapper path (XD06/google-ai-mode or similar)
+    # ------------------------------------------------------------------
+
+    async def _send_via_wrapper(
+        self,
+        ai_mode_url: str,
+        message: str,
+        session_id: Optional[str],
+        thinking_enabled: bool,
+        ref_file_ids: Optional[List[str]],
+        timeout: float,
+    ) -> ProviderSendResult:
+        """Send via XD06/google-ai-mode OpenAI-compatible wrapper at /v1/chat/completions."""
+        model_name = "google-ai-mode"
         payload: Dict[str, Any] = {
-            "prompt": message,
-            "country": "us",
-            "language": "en",
+            "model": model_name,
+            "messages": [{"role": "user", "content": message}],
+            "stream": False,
         }
-        if session_id:
-            payload["session_token"] = session_id
+        # Google AI Mode ignores system role; only last user message is used.
+        # Session continuation is handled by passing full message history.
 
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
-                    f"{ai_mode_url.rstrip('/')}/v1/web/ai-mode",
+                    f"{ai_mode_url.rstrip('/')}/v1/chat/completions",
                     json=payload,
                 )
         except Exception as exc:  # noqa: BLE001
-            logger.error(f"Google AI Mode request failed: {exc}")
+            logger.error(f"Google AI Mode wrapper request failed: {exc}")
             return ProviderSendResult(
                 ok=False,
-                error=f"Google AI Mode request failed: {exc}",
+                error=f"Google AI Mode wrapper request failed: {exc}",
+                used_provider=self.provider_id,
+            )
+
+        if resp.status_code == 401:
+            return ProviderSendResult(
+                ok=False,
+                error="Google AI Mode wrapper: cookies expired. Re-export cookies from browser.",
+                manual_login_required=True,
                 used_provider=self.provider_id,
             )
 
@@ -104,7 +178,7 @@ class GoogleAIModeProvider(BaseProvider):
         if resp.status_code != 200:
             return ProviderSendResult(
                 ok=False,
-                error=f"Google AI Mode API returned HTTP {resp.status_code}",
+                error=f"Google AI Mode wrapper returned HTTP {resp.status_code}: {resp.text[:200]}",
                 used_provider=self.provider_id,
             )
 
@@ -113,32 +187,181 @@ class GoogleAIModeProvider(BaseProvider):
         except Exception as exc:  # noqa: BLE001
             return ProviderSendResult(
                 ok=False,
-                error=f"Google AI Mode invalid response: {exc}",
+                error=f"Google AI Mode wrapper invalid response: {exc}",
                 used_provider=self.provider_id,
             )
 
-        reply_parts = data.get("reply_parts", [])
-        response_text = self._extract_reply_parts(reply_parts)
-        new_session = data.get("session_token") or session_id
+        choices = data.get("choices", [])
+        if not choices:
+            return ProviderSendResult(
+                ok=False,
+                error="Google AI Mode wrapper returned no choices.",
+                used_provider=self.provider_id,
+            )
+
+        message_data = choices[0].get("message", {})
+        response_text = message_data.get("content", "")
 
         if not response_text:
             return ProviderSendResult(
                 ok=False,
-                error="Empty response from Google AI Mode.",
+                error="Empty response from Google AI Mode wrapper.",
                 used_provider=self.provider_id,
             )
 
         return ProviderSendResult(
             ok=True,
             response=response_text,
-            session_id=new_session,
+            session_id=session_id,
             used_provider=self.provider_id,
             ref_file_ids=ref_file_ids or [],
         )
 
+    # ------------------------------------------------------------------
+    # Direct Gemini API path (OpenAI-compatible)
+    # ------------------------------------------------------------------
+
+    async def _send_via_gemini_api(
+        self,
+        api_key: str,
+        message: str,
+        session_id: Optional[str],
+        thinking_enabled: bool,
+        ref_file_ids: Optional[List[str]],
+        timeout: float,
+        model: Optional[str],
+    ) -> ProviderSendResult:
+        """Send a message via the Gemini API OpenAI-compatible endpoint."""
+        base_url = self._gemini_base_url().rstrip("/")
+        model_name = model or "gemini-4-hydrogen"
+
+        payload: Dict[str, Any] = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": message}],
+            "temperature": 0.7,
+            "max_tokens": 4096,
+        }
+        if session_id:
+            # Gemini doesn't have native session IDs; we pass it as metadata
+            payload["metadata"] = {"session_id": session_id}
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Gemini API request failed: {exc}")
+            return ProviderSendResult(
+                ok=False,
+                error=f"Gemini API request failed: {exc}",
+                used_provider=self.provider_id,
+            )
+
+        if resp.status_code == 429:
+            return ProviderSendResult(
+                ok=False,
+                error="Gemini API rate limited. Wait for quota reset.",
+                rate_limited=True,
+                used_provider=self.provider_id,
+            )
+
+        if resp.status_code == 401:
+            return ProviderSendResult(
+                ok=False,
+                error="Gemini API invalid API key. Check GEMINI_API_KEY.",
+                manual_login_required=True,
+                used_provider=self.provider_id,
+            )
+
+        if resp.status_code != 200:
+            return ProviderSendResult(
+                ok=False,
+                error=f"Gemini API returned HTTP {resp.status_code}: {resp.text[:200]}",
+                used_provider=self.provider_id,
+            )
+
+        try:
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            return ProviderSendResult(
+                ok=False,
+                error=f"Gemini API invalid response: {exc}",
+                used_provider=self.provider_id,
+            )
+
+        choices = data.get("choices", [])
+        if not choices:
+            return ProviderSendResult(
+                ok=False,
+                error="Gemini API returned no choices.",
+                used_provider=self.provider_id,
+            )
+
+        message_data = choices[0].get("message", {})
+        response_text = message_data.get("content", "")
+
+        if not response_text:
+            return ProviderSendResult(
+                ok=False,
+                error="Empty response from Gemini API.",
+                used_provider=self.provider_id,
+            )
+
+        return ProviderSendResult(
+            ok=True,
+            response=response_text,
+            session_id=session_id,
+            used_provider=self.provider_id,
+            ref_file_ids=ref_file_ids or [],
+        )
+
+    # ------------------------------------------------------------------
+    # Attachments / session
+    # ------------------------------------------------------------------
+
+    async def upload_attachment(self, file_path: str) -> Optional[str]:
+        """Google AI Mode doesn't support direct file upload via wrapper.
+        Attachments are handled by ON++ preprocessor (text extraction +
+        context feeding).
+        """
+        logger.warning(
+            "Google AI Mode does not support direct file upload via wrapper. "
+            "Use ON++ preprocessor for context feeding."
+        )
+        return None
+
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete a Google AI Mode session (best effort — anonymous,
+        no server-side delete)."""
+        logger.info(
+            f"Google AI Mode session deletion is automatic (anonymous): {session_id}"
+        )
+        return True
+
+    async def get_credentials(self) -> Dict[str, Any]:
+        """Return provider-specific credentials for diagnostics."""
+        flags = await self._get_flags()
+        return {
+            "provider": self.provider_id,
+            "has_wrapper_url": bool(flags.google_ai_mode_url),
+            "has_api_key": bool(await self._gemini_api_key()),
+        }
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _extract_reply_parts(reply_parts: List[Dict[str, Any]]) -> str:
-        """Extract text from Google AI Mode reply_parts."""
+        """Extract text from Google AI Mode wrapper reply_parts."""
         parts = []
         for part in reply_parts:
             ptype = part.get("type", "")
@@ -151,30 +374,3 @@ class GoogleAIModeProvider(BaseProvider):
                 for item in items:
                     parts.append(f"- {item}")
         return "\n".join(parts).strip()
-
-    async def upload_attachment(self, file_path: str) -> Optional[str]:
-        """Google AI Mode doesn't support direct file upload via this wrapper.
-        Attachments are handled by ON++ preprocessor (text extraction + context feeding).
-        """
-        logger.warning(
-            "Google AI Mode does not support direct file upload via wrapper. "
-            "Use ON++ preprocessor for context feeding."
-        )
-        return None
-
-    async def delete_session(self, session_id: str) -> bool:
-        """Delete a Google AI Mode session (best effort — anonymous, no server-side delete)."""
-        # Google AI Mode is anonymous; sessions are lost when browser closes.
-        # No server-side delete needed.
-        logger.info(f"Google AI Mode session deletion is automatic (anonymous): {session_id}")
-        return True
-
-    def get_credentials(self) -> Dict[str, Any]:
-        """Return provider-specific credentials for diagnostics."""
-        return {
-            "provider": self.provider_id,
-            "has_url": bool(
-                __import__("open_notebook.ai.models", fromlist=["ProcessingFlags"])
-                .ProcessingFlags
-            ),
-        }
