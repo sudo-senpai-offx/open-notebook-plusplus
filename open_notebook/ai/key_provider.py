@@ -17,7 +17,7 @@ from typing import Dict, Optional
 
 from loguru import logger
 
-from open_notebook.ai.provider_registry import PROVIDERS
+from open_notebook.ai.providers import PROVIDERS
 from open_notebook.domain.credential import Credential
 
 # =============================================================================

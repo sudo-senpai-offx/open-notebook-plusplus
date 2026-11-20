@@ -23,7 +23,7 @@ from esperanto import (
 from esperanto.common_types import ChatCompletion
 from loguru import logger
 
-from open_notebook.ai.provider_registry import PROVIDERS
+from open_notebook.ai.providers import PROVIDERS
 from open_notebook.utils.ssl_config import httpx_verify_setting
 from open_notebook.utils.url_validation import prepare_pinned_http_target
 

@@ -137,7 +137,13 @@ export const processingFlags = {
     return response.data
   },
 
-  update: async (data: { allow_local_processing?: boolean; deepseek_pc_url?: string | null }) => {
+  update: async (data: {
+    allow_local_processing?: boolean
+    deepseek_pc_url?: string | null
+    google_ai_mode_url?: string | null
+    duck_ai_url?: string | null
+    duck_ai_default_model?: string | null
+  }) => {
     const response = await apiClient.put<ProcessingFlagsResponse>(
       '/processing-flags',
       data

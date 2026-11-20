@@ -25,6 +25,11 @@ from api.routers._chat_shared import (
     transcript_sync_state,
 )
 from open_notebook.ai.models import ProcessingFlags
+from open_notebook.ai.provider_registry import get_provider_registry
+from open_notebook.ai.providers import PROVIDER_DEEPSEEK_WEB
+from open_notebook.services.deepseek_direct_service import (
+    deepseek_direct_service,
+)
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.attachment import Attachment
 from open_notebook.domain.notebook import (
@@ -38,13 +43,6 @@ from open_notebook.exceptions import (
     OpenNotebookError,
 )
 from open_notebook.graphs.chat import graph as chat_graph
-from open_notebook.services.deepseek_direct_service import (
-    deepseek_direct_service,
-    pow_solver_available,
-)
-from open_notebook.services.deepseek_session_service import (
-    deepseek_session_service,
-)
 from open_notebook.services.prompter_service import prompter_service
 from open_notebook.services.quota_tracker import quota_tracker
 from open_notebook.utils import token_count
@@ -89,6 +87,85 @@ async def _probe_internet() -> bool:
     _internet_probe_cache["result"] = result
     _internet_probe_cache["ts"] = now
     return result
+
+
+def _resolve_provider_and_model(
+    model_override: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve provider_id and model_name from a model_override string.
+
+    Accepts:
+    - None -> (None, None)  [use defaults]
+    - "deepseek-web" -> ("deepseek-web", None)  [provider only, default model]
+    - "duck-ai:gpt-6-luna" -> ("duck-ai", "gpt-6-luna")  [provider:model]
+    - "model:deepseek-web" -> ("deepseek-web", None)  [legacy SurrealDB record ID format]
+    """
+    if not model_override:
+        return None, None
+
+    # Strip SurrealDB record ID prefix if present.
+    value = model_override
+    if value.startswith("model:"):
+        value = value[len("model:"):]
+
+    if ":" in value:
+        provider_id, model_name = value.split(":", 1)
+        return provider_id, model_name or None
+
+    # Treat as provider ID only.
+    return value, None
+
+
+def _get_default_provider() -> str:
+    """Return the default cloud provider (deepseek-web)."""
+    return PROVIDER_DEEPSEEK_WEB
+
+
+async def _send_via_provider(
+    provider_id: str,
+    model_name: Optional[str],
+    message: str,
+    *,
+    session_id: Optional[str] = None,
+    thinking_enabled: bool = False,
+    ref_file_ids: Optional[List[str]] = None,
+    timeout: float = 120.0,
+) -> Any:
+    """Send a message through the specified provider using the ProviderRegistry.
+
+    Returns a ProviderSendResult.
+    """
+    registry = get_provider_registry()
+    provider = registry.get(provider_id)
+    if provider is None:
+        from open_notebook.ai.providers import ProviderSendResult
+
+        return ProviderSendResult(
+            ok=False,
+            error=f"Provider '{provider_id}' is not registered.",
+            used_provider=provider_id,
+        )
+
+    if not await provider.is_available():
+        from open_notebook.ai.providers import ProviderSendResult
+
+        return ProviderSendResult(
+            ok=False,
+            error=(
+                f"Provider '{provider_id}' is not available. "
+                "Check credentials and configuration in Settings."
+            ),
+            used_provider=provider_id,
+        )
+
+    return await provider.send_message(
+        message=message,
+        session_id=session_id,
+        thinking_enabled=thinking_enabled,
+        ref_file_ids=ref_file_ids,
+        timeout=timeout,
+        model=model_name,
+    )
 
 
 from open_notebook.utils.graph_utils import (
@@ -789,6 +866,13 @@ async def execute_chat(request: ExecuteChatRequest):
         state_values["notebook"] = notebook
         state_values["model_override"] = model_override
 
+        # Resolve provider for attachment upload
+        provider_id_for_attach, _ = _resolve_provider_and_model(model_override)
+        if not provider_id_for_attach:
+            provider_id_for_attach = _get_default_provider()
+        from open_notebook.ai.provider_registry import get_provider_registry
+        attach_provider = get_provider_registry().get(provider_id_for_attach)
+
         # Add user message to state
         from langchain_core.messages import HumanMessage
 
@@ -805,7 +889,7 @@ async def execute_chat(request: ExecuteChatRequest):
                         # Upload to deepseek-web so the model can reference
                         # the file directly (covers binary files too).
                         try:
-                            file_id = deepseek_direct_service.upload_file(file_path)
+                            file_id = attach_provider.upload_attachment(file_path)
                             if file_id:
                                 ref_file_ids.append(file_id)
                                 logger.info(
@@ -882,188 +966,247 @@ async def execute_chat(request: ExecuteChatRequest):
         user_message = HumanMessage(content=message_content, id=str(uuid4()))
         state_values["messages"].append(user_message)
 
-        # --- DeepSeek-web routing via deepseek_session_service (A1, A3, A5) ---
-        # The service manages the session series lifecycle: lazy creation,
-        # token budget tracking (1M cap per DeepSeek session), continuation
-        # (warn at 80%, new session at 95%), auto-delete of retired sessions,
-        # and rate limiting (max 1-2 concurrent).
-        if model_override == "deepseek-web":
-            # Quota check for deepseek-web
-            if not await quota_tracker.can_request("deepseek"):
-                flags = await ProcessingFlags.get_instance()
-                if flags.allow_local_processing:
-                    model_override = "llama"
-                    logger.info(
-                        "Quota exceeded for deepseek-web; switching to local llama"
-                    )
-                else:
-                    raise HTTPException(
-                        status_code=429,
-                        detail=(
-                            "DeepSeek-web quota exhausted. "
-                            "Enable 'Allow local processing' in Settings to use "
-                            "local models, or wait for quota reset."
-                        ),
+        # --- Provider-based routing (DeepSeek-web, Google AI Mode, Duck.ai) ---
+        # All three cloud providers are equal priority; default is deepseek-web.
+        # model_override can be "provider_id" or "provider_id:model_name".
+        provider_id, model_name = _resolve_provider_and_model(model_override)
+        if not provider_id:
+            provider_id = _get_default_provider()
+
+        # Determine the provider config for attachment limits.
+        from open_notebook.ai.providers import get_provider_config, ProviderSendResult
+
+        provider_cfg = get_provider_config(provider_id)
+
+        # Validate attachment limits for the selected provider.
+        if request.attachments and provider_cfg:
+            if len(request.attachments) > provider_cfg.max_files:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Too many attachments for {provider_cfg.display_name}: "
+                        f"max {provider_cfg.max_files} files per chat session."
+                    ),
+                )
+            for file_path in request.attachments:
+                path = Path(file_path)
+                if path.exists() and path.is_file():
+                    size_mb = path.stat().st_size / (1024 * 1024)
+                    if size_mb > provider_cfg.max_size_mb:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Attachment {path.name} ({size_mb:.1f} MB) exceeds "
+                                f"{provider_cfg.display_name} max size "
+                                f"({provider_cfg.max_size_mb} MB)."
+                            ),
+                        )
+
+        # Upload attachments via the provider (if supported).
+        provider_ref_file_ids: List[str] = []
+        if request.attachments and provider_cfg and provider_cfg.supports_attachments:
+            for file_path in request.attachments:
+                try:
+                    path = Path(file_path)
+                    if path.exists() and path.is_file():
+                        # Upload to the provider so the model can reference
+                        # the file directly (covers binary files too).
+                        file_id = await provider.upload_attachment(file_path)
+                        if file_id:
+                            provider_ref_file_ids.append(file_id)
+                            logger.info(
+                                f"Attachment {path.name} uploaded to "
+                                f"{provider_id} as {file_id}"
+                            )
+                        else:
+                            failed_attachments.append(path.name)
+                            logger.warning(
+                                f"Attachment {path.name}: {provider_id} "
+                                f"file upload returned no file ID"
+                            )
+                    else:
+                        failed_attachments.append(Path(file_path).name)
+                        logger.warning(f"Attachment not found: {file_path}")
+                except Exception as exc:  # noqa: BLE001
+                    failed_attachments.append(Path(file_path).name)
+                    logger.warning(
+                        f"Could not process attachment {file_path}: {exc}"
                     )
 
-            # Transform message through prompter (session-aware).
-            # message_content (built above) includes attachment text when
-            # attachments are present; request.message alone does not.
-            transformed_prompt = await prompter_service.transform(
-                raw_message=message_content,
-                session_id=request.session_id,
-                notebook_id=notebook.id if notebook else None,
-                message_type="chat",
+        # If attachments were provided but none were successfully uploaded
+        # AND none could be read locally, fail loudly.
+        if (
+            request.attachments
+            and failed_attachments
+            and not attachment_parts
+            and not provider_ref_file_ids
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Failed to upload or read the following attachment(s): "
+                    f"{', '.join(failed_attachments)}. "
+                    f"Ensure {provider_cfg.display_name} credentials are "
+                    f"configured in Settings."
+                ),
             )
 
-            # PoW solver must be available on this device; no PC browser-use
-            # fallback here (that path stays in /api/chat/deepseek-web/pc-fallback).
-            if not pow_solver_available():
+        # Build the message content with attachment text prepended.
+        if attachment_parts:
+            message_content = (
+                request.message + "\n\n" + "".join(attachment_parts) + "\n\n---\n"
+            )
+        else:
+            message_content = request.message
+
+        # Explicit id so a failed turn can remove it from the checkpoint.
+        user_message = HumanMessage(content=message_content, id=str(uuid4()))
+        state_values["messages"].append(user_message)
+
+        # Transform message through prompter (session-aware).
+        transformed_prompt = await prompter_service.transform(
+            raw_message=message_content,
+            session_id=request.session_id,
+            notebook_id=notebook.id if notebook else None,
+            message_type="chat",
+        )
+
+        # Internet-aware send with retry: when offline, retry up to 10
+        # times with exponential backoff (5s doubling, cap 60s) before
+        # asking the user to fall back to a local model.
+        send_result = None
+        last_error: Optional[str] = None
+        backoff = 5.0
+        for attempt in range(1, 11):
+            if not internet_available:
+                last_error = (
+                    f"No internet connectivity (attempt {attempt}/10). "
+                    f"Retrying in {min(backoff, 60.0)}s..."
+                )
+                logger.warning(last_error)
+                await asyncio.sleep(min(backoff, 60.0))
+                backoff = min(backoff * 2, 60.0)
+                internet_available = await _probe_internet()
+                continue
+            try:
+                send_result = await _send_via_provider(
+                    provider_id=provider_id,
+                    model_name=model_name,
+                    message=transformed_prompt,
+                    session_id=request.session_id,
+                    thinking_enabled=True,
+                    ref_file_ids=provider_ref_file_ids or None,
+                    timeout=120.0,
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                last_error = msg
+                logger.warning(
+                    f"Provider '{provider_id}' send failed (attempt {attempt}/10): {msg}"
+                )
+                await asyncio.sleep(min(backoff, 60.0))
+                backoff = min(backoff * 2, 60.0)
+
+        if send_result is None or not send_result.ok:
+            # Determine the appropriate error response.
+            if send_result and send_result.manual_login_required:
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        "DeepSeek PoW solver unavailable on this device. "
-                        "Install deepseek-pow + wasmtime, or use a different model."
+                        f"{provider_cfg.display_name if provider_cfg else provider_id} "
+                        f"session expired or invalid credentials. "
+                        f"Re-log in and update credentials in Settings."
                     ),
                 )
-
-            # Internet-aware send with retry: when offline, retry up to 10
-            # times with exponential backoff (5s doubling, cap 60s) before
-            # asking the user to fall back to a local model.
-            nb_id = str(notebook.id) if notebook and notebook.id else ""
-            send_result = None
-            last_error: Optional[str] = None
-            backoff = 5.0
-            for attempt in range(1, 11):
-                if not internet_available:
-                    last_error = (
-                        f"No internet connectivity (attempt {attempt}/10). "
-                        "Retrying in "
-                        f"{min(backoff, 60.0)}s..."
-                    )
-                    logger.warning(last_error)
-                    await asyncio.sleep(min(backoff, 60.0))
-                    backoff = min(backoff * 2, 60.0)
-                    internet_available = await _probe_internet()
-                    continue
-                try:
-                    send_result = await deepseek_session_service.send_message(
-                        notebook_id=nb_id,
-                        classification="chat",
-                        message=transformed_prompt,
-                        chat_session_id=request.session_id,
-                        thinking_enabled=True,
-                        timeout=120.0,
-                        ref_file_ids=ref_file_ids or None,
-                    )
-                    break
-                except OpenNotebookError as exc:
-                    msg = str(exc)
-                    last_error = msg
-                    if "rate limited" in msg.lower():
-                        raise HTTPException(
-                            status_code=429,
-                            detail=(
-                                "DeepSeek-web rate limited. "
-                                "Wait for quota reset or enable 'Allow local processing' "
-                                "in Settings to use local models."
-                            ),
-                        )
-                    if "expired" in msg.lower() or "login" in msg.lower():
-                        raise HTTPException(
-                            status_code=403,
-                            detail=(
-                                "DeepSeek-web session expired. Manual login required: "
-                                "open chat.deepseek.com in a browser, log in, and the session "
-                                "cookies will be persisted for future requests."
-                            ),
-                        )
-                    # Network error on an otherwise-online connection: retry.
-                    logger.warning(
-                        f"DeepSeek-web send failed (attempt {attempt}/10): {msg}"
-                    )
-                    await asyncio.sleep(min(backoff, 60.0))
-                    backoff = min(backoff * 2, 60.0)
-
-            if send_result is None:
+            if send_result and send_result.rate_limited:
                 raise HTTPException(
-                    status_code=503,
+                    status_code=429,
                     detail=(
-                        f"DeepSeek-web unavailable after 10 retries: {last_error}. "
-                        "Enable 'Allow local processing' in Settings to use "
-                        "local models offline, or check your internet connection."
+                        f"{provider_cfg.display_name if provider_cfg else provider_id} "
+                        f"rate limited. Wait for quota reset or enable 'Allow local "
+                        f"processing' in Settings to use local models."
                     ),
                 )
-
-            response_text = send_result.response
-            thinking_text = send_result.thinking
-            if not response_text and not thinking_text:
-                raise HTTPException(
-                    status_code=502,
-                    detail="Empty response from DeepSeek-web.",
-                )
-
-            # Increment quota
-            await quota_tracker.increment("deepseek", 1)
-
-            # Link the ON++ chat session to its DeepSeek session series.
-            try:
-                nb_query = await repo_query(
-                    "SELECT out FROM refers_to WHERE in = $sid",
-                    {"sid": ensure_record_id(full_session_id)},
-                )
-                if nb_query:
-                    # Ensure chat_session has deepseek_session_series_id set.
-                    session.deepseek_session_series_id = (
-                        send_result.deepseek_session_id or ""
-                    )
-                    await session.save()
-            except Exception as exc:  # noqa: BLE001 - never fail a turn over this
-                logger.warning(f"Could not link chat session to deepseek series: {exc}")
-
-            # Build assistant message
-            from langchain_core.messages import AIMessage
-
-            assistant_message = AIMessage(
-                content=response_text or "",
-                id=str(uuid4()),
-                additional_kwargs={"thinking": thinking_text} if thinking_text else {},
-            )
-            state_values["messages"].append(assistant_message)
-
-            # Persist the turn
-            await session.save()
-            turn_messages = [user_message, assistant_message]
-            try:
-                added = await persist_chat_messages(full_session_id, turn_messages)
-                if added:
-                    logger.info(
-                        f"Persisted {added} chat message(s) for {full_session_id}"
-                    )
-            except Exception as exc:
-                logger.warning(
-                    f"Could not persist chat messages for {full_session_id}: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-
-            messages = extract_chat_messages(turn_messages)
-
-            return ExecuteChatResponse(
-                session_id=request.session_id,
-                messages=messages,
-                history_selection=HistorySelectionReport(
-                    kept_exchanges=1,
-                    dropped_exchanges=0,
-                    total_exchanges=1,
-                    reason=(
-                        "deepseek-web continuation"
-                        if send_result.is_continuation
-                        else "deepseek-web"
-                    ),
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"{provider_cfg.display_name if provider_cfg else provider_id} "
+                    f"unavailable after 10 retries: {last_error or 'unknown error'}. "
+                    f"Enable 'Allow local processing' in Settings to use "
+                    f"local models offline, or check your internet connection."
                 ),
-                cloud_available=internet_available,
-                switch_to_cloud_suggested=False,
             )
+
+        response_text = send_result.response or ""
+        thinking_text = send_result.thinking
+        if not response_text and not thinking_text:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Empty response from {provider_cfg.display_name if provider_cfg else provider_id}.",
+            )
+
+        # Increment quota for this provider.
+        quota_provider = provider_id if provider_id != "ollama" else "local"
+        await quota_tracker.increment(quota_provider, 1)
+
+        # Link the ON++ chat session to its provider session series.
+        try:
+            nb_query = await repo_query(
+                "SELECT out FROM refers_to WHERE in = $sid",
+                {"sid": ensure_record_id(full_session_id)},
+            )
+            if nb_query:
+                session.provider_session_id = send_result.session_id or ""
+                await session.save()
+        except Exception as exc:  # noqa: BLE001 - never fail a turn over this
+            logger.warning(
+                f"Could not link chat session to provider series: {exc}"
+            )
+
+        # Build assistant message
+        from langchain_core.messages import AIMessage
+
+        assistant_message = AIMessage(
+            content=response_text or "",
+            id=str(uuid4()),
+            additional_kwargs={"thinking": thinking_text} if thinking_text else {},
+            additional_kwargs2={
+                "provider": provider_id,
+                "model": model_name or (provider_cfg.default_model if provider_cfg else None),
+            } if (provider_id or model_name) else {},
+        )
+        state_values["messages"].append(assistant_message)
+
+        # Persist the turn
+        await session.save()
+        turn_messages = [user_message, assistant_message]
+        try:
+            added = await persist_chat_messages(full_session_id, turn_messages)
+            if added:
+                logger.info(
+                    f"Persisted {added} chat message(s) for {full_session_id}"
+                )
+        except Exception as exc:
+            logger.warning(
+                f"Could not persist chat messages for {full_session_id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        messages = extract_chat_messages(turn_messages)
+
+        return ExecuteChatResponse(
+            session_id=request.session_id,
+            messages=messages,
+            history_selection=HistorySelectionReport(
+                kept_exchanges=1,
+                dropped_exchanges=0,
+                total_exchanges=1,
+                reason=f"{provider_id} response",
+            ),
+            cloud_available=internet_available,
+            switch_to_cloud_suggested=False,
+        )
 
         # Execute chat graph in a thread so the synchronous LangGraph invoke
         # (SqliteSaver checkpoints are sync) doesn't block the event loop and
@@ -1073,31 +1216,32 @@ async def execute_chat(request: ExecuteChatRequest):
         # turn fails, so a retry doesn't add it twice.
         #
         # Quota check for non-deepseek-web cloud providers.
-        is_cloud_model = bool(model_override) and (
-            "gpt" in str(model_override).lower()
-            or "claude" in str(model_override).lower()
-            or "gemini" in str(model_override).lower()
-        )
+        # model_override may now be "provider_id" or "provider_id:model_name".
+        provider_id_for_quota, _ = _resolve_provider_and_model(model_override)
+        if not provider_id_for_quota:
+            provider_id_for_quota = _get_default_provider()
+        is_cloud_model = provider_id_for_quota != "ollama"
         if is_cloud_model:
-            if not await quota_tracker.can_request("cloud"):
+            if not await quota_tracker.can_request(provider_id_for_quota):
                 flags = await ProcessingFlags.get_instance()
                 if flags.allow_local_processing:
-                    model_override = "llama"
+                    model_override = "ollama"
+                    provider_id_for_quota = "ollama"
                     logger.info(
-                        "Quota exceeded for gpt/claude/gemini; switching to local llama"
+                        f"Quota exceeded for {provider_id_for_quota}; switching to local llama"
                     )
                 else:
                     raise HTTPException(
                         status_code=429,
                         detail=(
-                            "Cloud quota exhausted. "
-                            "Enable 'Allow local processing' in Settings to use "
-                            "local models, or wait for quota reset."
+                            f"Cloud quota exceeded for {provider_id_for_quota}. "
+                            f"Enable 'Allow local processing' in Settings to use "
+                            f"local models, or wait for quota reset."
                         ),
                     )
 
         # Suggest switching to cloud when on a local model and internet is back.
-        is_local_model = bool(model_override) and not is_cloud_model
+        is_local_model = provider_id_for_quota == "ollama"
         switch_to_cloud = internet_available and is_local_model
 
         result = await asyncio.to_thread(
@@ -1291,6 +1435,14 @@ async def edit_chat_message(
         message_content = request.new_content
         ref_file_ids: list[str] = []
         attachment_parts: list[str] = []
+
+        # Resolve provider for attachment upload
+        attach_provider_id, _ = _resolve_provider_and_model(model_override)
+        if not attach_provider_id:
+            attach_provider_id = _get_default_provider()
+        from open_notebook.ai.provider_registry import get_provider_registry
+        attach_provider = get_provider_registry().get(attach_provider_id)
+
         if request.new_attachments:
             for file_path in request.new_attachments:
                 try:
@@ -1298,7 +1450,7 @@ async def edit_chat_message(
                     if path.exists() and path.is_file():
                         # Upload to deepseek-web for ref_file_ids
                         try:
-                            file_id = deepseek_direct_service.upload_file(file_path)
+                            file_id = attach_provider.upload_attachment(file_path)
                             if file_id:
                                 ref_file_ids.append(file_id)
                         except Exception:
@@ -1344,86 +1496,120 @@ async def edit_chat_message(
             # Use build_context logic inline for simplicity
             context = {"sources": [], "notes": []}
 
-        # --- Model invocation ---
-        if model_override == "deepseek-web":
-            # Quota check
-            if not await quota_tracker.can_request("deepseek"):
-                flags = await ProcessingFlags.get_instance()
-                if flags.allow_local_processing:
-                    model_override = "llama"
-                else:
-                    raise HTTPException(
-                        status_code=429,
-                        detail=(
-                            "DeepSeek-web quota exhausted. "
-                            "Enable 'Allow local processing' in Settings."
-                        ),
-                    )
+        # --- Model invocation via Provider registry ---
+        provider_id, model_name = _resolve_provider_and_model(model_override)
+        if not provider_id:
+            provider_id = _get_default_provider()
 
-            transformed_prompt = await prompter_service.transform(
-                raw_message=message_content,
-                session_id=session_id,
-                notebook_id=notebook.id if notebook else None,
-                message_type="chat",
-            )
+        from open_notebook.ai.providers import get_provider_config, ProviderSendResult
 
-            if not pow_solver_available():
+        provider_cfg = get_provider_config(provider_id)
+
+        # Quota check for the selected provider.
+        quota_provider = provider_id if provider_id != "ollama" else "local"
+        if not await quota_tracker.can_request(quota_provider):
+            flags = await ProcessingFlags.get_instance()
+            if flags.allow_local_processing:
+                model_override = "llama"
+                provider_id = "ollama"
+                model_name = None
+                logger.info(
+                    f"Quota exceeded for {provider_cfg.display_name if provider_cfg else provider_id}; switching to local llama"
+                )
+            else:
                 raise HTTPException(
-                    status_code=403,
+                    status_code=429,
                     detail=(
-                        "DeepSeek PoW solver unavailable on this device. "
-                        "Install deepseek-pow + wasmtime."
+                        f"{provider_cfg.display_name if provider_cfg else provider_id} "
+                        f"quota exhausted. Enable 'Allow local processing' in Settings."
                     ),
                 )
 
-            nb_id = str(notebook.id) if notebook and notebook.id else ""
-            send_result = await deepseek_session_service.send_message(
-                notebook_id=nb_id,
-                classification="chat",
-                message=transformed_prompt,
-                chat_session_id=session_id,
-                thinking_enabled=True,
-                timeout=120.0,
-                ref_file_ids=ref_file_ids or None,
-            )
+        # Transform message through prompter (session-aware).
+        transformed_prompt = await prompter_service.transform(
+            raw_message=message_content,
+            session_id=session_id,
+            notebook_id=notebook.id if notebook else None,
+            message_type="chat",
+        )
 
-            response_text = send_result.response
-            thinking_text = send_result.thinking
-            if not response_text and not thinking_text:
+        # Send via provider.
+        send_result = await _send_via_provider(
+            provider_id=provider_id,
+            model_name=model_name,
+            message=transformed_prompt,
+            session_id=session_id,
+            thinking_enabled=True,
+            ref_file_ids=ref_file_ids or None,
+            timeout=120.0,
+        )
+
+        if not send_result.ok:
+            if send_result.manual_login_required:
                 raise HTTPException(
-                    status_code=502, detail="Empty response from DeepSeek-web."
+                    status_code=403,
+                    detail=(
+                        f"{provider_cfg.display_name if provider_cfg else provider_id} "
+                        f"session expired or invalid credentials. "
+                        f"Re-log in and update credentials in Settings."
+                    ),
                 )
-
-            await quota_tracker.increment("deepseek", 1)
-
-            # Build assistant message
-            from langchain_core.messages import AIMessage
-
-            assistant_message = AIMessage(
-                content=response_text or "",
-                id=str(uuid4()),
-                additional_kwargs={"thinking": thinking_text} if thinking_text else {},
+            if send_result.rate_limited:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"{provider_cfg.display_name if provider_cfg else provider_id} "
+                        f"rate limited. Wait for quota reset."
+                    ),
+                )
+            raise HTTPException(
+                status_code=502,
+                detail=f"{provider_cfg.display_name if provider_cfg else provider_id} error: {send_result.error or 'unknown error'}",
             )
 
-            # Persist the turn (edited human message already updated above)
-            turn_messages = [assistant_message]
-            try:
-                added = await persist_chat_messages(full_session_id, turn_messages)
-                if added:
-                    logger.info(
-                        f"Persisted {added} chat message(s) for {full_session_id}"
-                    )
-            except Exception as exc:
-                logger.warning(f"Could not persist chat messages: {exc}")
-
-            messages_out = extract_chat_messages(turn_messages)
-
-            return EditMessageResponse(
-                session_id=session_id,
-                messages=messages_out,
-                edit_count=new_edit_count,
-                continuations_deleted=continuations_deleted,
+        response_text = send_result.response or ""
+        thinking_text = send_result.thinking
+        if not response_text and not thinking_text:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Empty response from {provider_cfg.display_name if provider_cfg else provider_id}.",
             )
+
+        # Increment quota for this provider.
+        await quota_tracker.increment(quota_provider, 1)
+
+        # Build assistant message
+        from langchain_core.messages import AIMessage
+
+        assistant_message = AIMessage(
+            content=response_text or "",
+            id=str(uuid4()),
+            additional_kwargs={"thinking": thinking_text} if thinking_text else {},
+            additional_kwargs2={
+                "provider": provider_id,
+                "model": model_name or (provider_cfg.default_model if provider_cfg else None),
+            } if (provider_id or model_name) else {},
+        )
+
+        # Persist the turn (edited human message already updated above)
+        turn_messages = [assistant_message]
+        try:
+            added = await persist_chat_messages(full_session_id, turn_messages)
+            if added:
+                logger.info(
+                    f"Persisted {added} chat message(s) for {full_session_id}"
+                )
+        except Exception as exc:
+            logger.warning(f"Could not persist chat messages: {exc}")
+
+        messages_out = extract_chat_messages(turn_messages)
+
+        return EditMessageResponse(
+            session_id=session_id,
+            messages=messages_out,
+            edit_count=new_edit_count,
+            continuations_deleted=continuations_deleted,
+        )
 
         # Non-deepseek-web: use LangGraph graph
         from langchain_core.messages import AIMessage, HumanMessage

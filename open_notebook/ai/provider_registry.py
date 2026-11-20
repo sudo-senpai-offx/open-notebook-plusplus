@@ -1,118 +1,88 @@
 """
-Provider Registry — the single source of truth for AI provider metadata.
+Provider registry initialization.
 
-Adding a provider used to require keeping ~6 independent dicts in sync
-(env config, modalities, test models, discovery table, API Literal,
-frontend table). Now the backend surfaces are all derived from the
-`PROVIDERS` registry below:
+Reads provider configuration from ProcessingFlags (SurrealDB) and registers
+provider instances with the global ProviderRegistry.
 
-- `api/credentials_service.py` `PROVIDER_ENV_CONFIG` / `PROVIDER_MODALITIES`
-- `open_notebook/ai/connection_tester.py` `TEST_MODELS`
-- `open_notebook/ai/model_discovery.py` `OPENAI_COMPAT_PROVIDERS`
-- `GET /api/providers` (api/routers/providers.py)
-
-One place still needs a manual edit when adding a provider — enforced by
-tests (tests/test_credential_provider_validation.py): the
-`SupportedProvider` Literal in `api/models.py` (typing can't be built at
-runtime from this dict). The frontend consumes `GET /api/providers` at
-runtime, so it needs no edit.
-
-The declaration order below is the display order the frontend renders —
-`GET /api/providers` returns `PROVIDERS.values()` as declared.
-
-This module is pure data: it must not import anything from the rest of
-the project so it stays importable from anywhere without cycles.
+Called at application startup and whenever provider configuration changes.
 """
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from __future__ import annotations
 
+from loguru import logger
 
-@dataclass(frozen=True)
-class ProviderSpec:
-    """Everything the backend needs to know about one AI provider."""
-
-    name: str
-    display_name: str
-    # Default modalities offered when creating a credential for this provider.
-    modalities: Tuple[str, ...]
-    # Env var configuration for env-based setup/migration:
-    # - required_env: ALL must be set for the provider to count as configured.
-    # - required_any_env: at least ONE must be set.
-    # - optional_env: read during migration but not required.
-    required_env: Tuple[str, ...] = ()
-    required_any_env: Tuple[str, ...] = ()
-    optional_env: Tuple[str, ...] = ()
-    # Cheapest model used by the provider connection test. None means the
-    # test is dynamic (first available model) or handled by a bespoke tester.
-    test_model: Optional[str] = None
-    test_model_type: str = "language"
-    # Where users get an API key / set the provider up.
-    docs_url: Optional[str] = None
-    # For providers exposing an OpenAI-compatible GET /models endpoint,
-    # the discovery URL. Drives OPENAI_COMPAT_PROVIDERS in model_discovery.
-    openai_compat_discovery_url: Optional[str] = None
-
-    @property
-    def base_url_env(self) -> Optional[str]:
-        """Optional env var overriding the provider's endpoint (`*_BASE_URL`).
-
-        Declared through `optional_env`; providers that have one accept a
-        user-supplied base URL for discovery (e.g. regional endpoints).
-        """
-        return next((v for v in self.optional_env if v.endswith("_BASE_URL")), None)
-
-    def env_config(self) -> Dict[str, List[str]]:
-        """Env var config in the legacy PROVIDER_ENV_CONFIG dict shape."""
-        config: Dict[str, List[str]] = {}
-        if self.required_env:
-            config["required"] = list(self.required_env)
-        if self.required_any_env:
-            config["required_any"] = list(self.required_any_env)
-        if self.optional_env:
-            config["optional"] = list(self.optional_env)
-        return config
-
-
-_LANGUAGE_ONLY = ("language",)
-_ALL_MODALITIES = ("language", "embedding", "speech_to_text", "text_to_speech")
-
-
-_PROVIDER_SPECS: Tuple[ProviderSpec, ...] = (
-    ProviderSpec(
-        name="ollama",
-        display_name="Ollama",
-        modalities=("language", "embedding"),
-        required_env=("OLLAMA_API_BASE",),
-        test_model=None,  # Dynamic - uses first available model
-    ),
-    ProviderSpec(
-        name="omlx",
-        display_name="oMLX",
-        modalities=("language", "embedding"),
-        required_env=("OMLX_API_BASE",),
-        optional_env=("OMLX_API_KEY",),
-        test_model=None,  # Dynamic - uses first available model via /v1/models
-        docs_url="https://github.com/lfnovo/open-notebook/blob/main/docs/5-CONFIGURATION/omlx.md",
-        # No openai_compat_discovery_url: base URL is user-supplied (default
-        # http://localhost:11435/v1) and API key is optional — discovery is
-        # handled like openai_compatible, not the fixed-URL OPENAI_COMPAT table.
-    ),
+from open_notebook.ai.providers import (
+    PROVIDER_DEEPSEEK_WEB,
+    PROVIDER_DUCK_AI,
+    PROVIDER_GOOGLE_AI_MODE,
+    PROVIDER_OLLAMA,
+    PROVIDER_METADATA,
+    registry,
 )
+from open_notebook.services.deepseek_web_provider import DeepSeekWebProvider
+from open_notebook.services.google_ai_mode_provider import GoogleAIModeProvider
+from open_notebook.services.duck_ai_provider import DuckAIProvider
 
 
-def _build_registry(specs: Tuple[ProviderSpec, ...]) -> Dict[str, ProviderSpec]:
-    """Build the name -> spec map, refusing duplicate names at import time.
+async def initialize_providers() -> None:
+    """Read ProcessingFlags and register all configured providers."""
+    # Import ProcessingFlags lazily to avoid circular import with
+    # open_notebook.ai.connection_tester -> provider_registry -> models
+    from open_notebook.ai.models import ProcessingFlags
 
-    A plain dict comprehension would silently drop the earlier spec on a
-    name collision; fail loudly instead.
-    """
-    registry: Dict[str, ProviderSpec] = {}
-    for spec in specs:
-        if spec.name in registry:
-            raise ValueError(f"Duplicate provider name in registry: {spec.name!r}")
-        registry[spec.name] = spec
+    flags = await ProcessingFlags.get_instance()
+
+    # --- DeepSeek-web ---
+    deepseek_config = PROVIDER_METADATA[PROVIDER_DEEPSEEK_WEB]
+    registry.register(DeepSeekWebProvider(deepseek_config))
+    logger.info("Registered provider: deepseek-web")
+
+    # --- Google AI Mode ---
+    google_config = PROVIDER_METADATA[PROVIDER_GOOGLE_AI_MODE]
+    registry.register(GoogleAIModeProvider(google_config))
+    logger.info("Registered provider: google-ai-mode")
+
+    # --- Duck.ai ---
+    duck_config = PROVIDER_METADATA[PROVIDER_DUCK_AI]
+    # Override default model from flags if configured
+    if flags.duck_ai_default_model:
+        from dataclasses import replace
+
+        duck_config = replace(duck_config, default_model=flags.duck_ai_default_model)
+    registry.register(DuckAIProvider(duck_config))
+    logger.info("Registered provider: duck-ai")
+
+    # --- Ollama (local) ---
+    ollama_config = PROVIDER_METADATA[PROVIDER_OLLAMA]
+    registry.register(
+        type(
+            "OllamaProvider",
+            (object,),
+            {
+                "provider_id": PROVIDER_OLLAMA,
+                "config": ollama_config,
+                "is_available": lambda self: True,
+                "send_message": lambda self, **kwargs: _ollama_placeholder(),
+                "upload_attachment": lambda self, path: None,
+                "delete_session": lambda self, sid: True,
+                "get_credentials": lambda self: {"provider": PROVIDER_OLLAMA},
+            },
+        )(ollama_config)
+    )
+    logger.info("Registered provider: ollama (local placeholder)")
+
+
+async def _ollama_placeholder():
+    """Placeholder for Ollama provider — not yet implemented."""
+    from open_notebook.ai.providers import ProviderSendResult
+
+    return ProviderSendResult(
+        ok=False,
+        error="Ollama provider not yet implemented in the new provider abstraction.",
+        used_provider="ollama",
+    )
+
+
+def get_provider_registry():
+    """Return the global provider registry."""
     return registry
-
-
-PROVIDERS: Dict[str, ProviderSpec] = _build_registry(_PROVIDER_SPECS)

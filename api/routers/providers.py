@@ -15,7 +15,7 @@ from fastapi import APIRouter
 
 from api.credentials_service import check_env_configured
 from api.models import ProviderInfoResponse
-from open_notebook.ai.provider_registry import PROVIDERS
+from open_notebook.ai.providers import PROVIDERS
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 

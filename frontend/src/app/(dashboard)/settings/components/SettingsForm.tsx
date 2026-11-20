@@ -112,6 +112,9 @@ export function SettingsForm() {
   const [configureMessage, setConfigureMessage] = useState<string | null>(null)
   const [configureError, setConfigureError] = useState<string | null>(null)
   const [deepSeekPcUrl, setDeepSeekPcUrl] = useState('')
+  const [duckAiDefaultModel, setDuckAiDefaultModel] = useState('gpt-6-luna')
+  const [duckAiConfigured, setDuckAiConfigured] = useState(false)
+  const [googleAiModeConfigured, setGoogleAiModeConfigured] = useState(false)
 
   useEffect(() => {
     let mounted = true
@@ -210,6 +213,11 @@ export function SettingsForm() {
         const data = await processingFlags.get()
         if (mounted) {
           setDeepSeekPcUrl(data.deepseek_pc_url ?? '')
+          setGoogleAiModeUrl(data.google_ai_mode_url ?? '')
+          setDuckAiUrl(data.duck_ai_url ?? '')
+          setDuckAiDefaultModel(data.duck_ai_default_model ?? 'gpt-6-luna')
+          setGoogleAiModeConfigured(!!data.google_ai_mode_url)
+          setDuckAiConfigured(!!data.duck_ai_url)
         }
       } catch {
         // Non-critical; PC fallback URL is optional
@@ -1209,6 +1217,144 @@ export function SettingsForm() {
                   disabled={deepseekLoading}
                 >
                   {t('settings.deepseekPcUrlSave')}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Google AI Mode Configuration Card */}
+          <Card>
+            <CardHeader>
+              <CardTitle>{t('settings.googleAiModeTitle')}</CardTitle>
+              <CardDescription>{t('settings.googleAiModeDesc')}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between text-sm">
+                  <span>{t('settings.googleAiModeConfigured')}</span>
+                  <span className={[
+                    'px-2 py-0.5 rounded text-xs font-medium',
+                    googleAiModeConfigured
+                      ? 'bg-green-100 text-green-700'
+                      : 'bg-gray-100 text-gray-600',
+                  ].join(' ')}>
+                    {googleAiModeConfigured ? t('settings.configured') : t('settings.notConfigured')}
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="google_ai_mode_url">{t('settings.googleAiModeUrl')}</Label>
+                  <input
+                    id="google_ai_mode_url"
+                    type="text"
+                    value={googleAiModeUrl}
+                    onChange={(e) => setGoogleAiModeUrl(e.target.value)}
+                    placeholder={t('settings.googleAiModeUrlPlaceholder')}
+                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
+                    disabled={deepseekLoading}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.googleAiModeUrlHelp')}
+                  </p>
+                </div>
+                <Button
+                  onClick={async () => {
+                    setConfigureError(null)
+                    setConfigureMessage(null)
+                    try {
+                      const result = await processingFlags.update({
+                        google_ai_mode_url: googleAiModeUrl || null,
+                      })
+                      setConfigureMessage('Google AI Mode URL saved')
+                      setGoogleAiModeUrl(result.google_ai_mode_url ?? '')
+                      setGoogleAiModeConfigured(!!result.google_ai_mode_url)
+                    } catch (e) {
+                      const err = e as { response?: { data?: { detail?: string } } };
+                      setConfigureError(err?.response?.data?.detail || t('settings.googleAiModeSaveFailed'))
+                    }
+                  }}
+                  disabled={deepseekLoading}
+                >
+                  {t('settings.googleAiModeSave')}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Duck.ai Configuration Card */}
+          <Card>
+            <CardHeader>
+              <CardTitle>{t('settings.duckAiTitle')}</CardTitle>
+              <CardDescription>{t('settings.duckAiDesc')}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between text-sm">
+                  <span>{t('settings.duckAiConfigured')}</span>
+                  <span className={[
+                    'px-2 py-0.5 rounded text-xs font-medium',
+                    duckAiConfigured
+                      ? 'bg-green-100 text-green-700'
+                      : 'bg-gray-100 text-gray-600',
+                  ].join(' ')}>
+                    {duckAiConfigured ? t('settings.configured') : t('settings.notConfigured')}
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="duck_ai_url">{t('settings.duckAiUrl')}</Label>
+                  <input
+                    id="duck_ai_url"
+                    type="text"
+                    value={duckAiUrl}
+                    onChange={(e) => setDuckAiUrl(e.target.value)}
+                    placeholder={t('settings.duckAiUrlPlaceholder')}
+                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
+                    disabled={deepseekLoading}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.duckAiUrlHelp')}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="duck_ai_default_model">{t('settings.duckAiDefaultModel')}</Label>
+                  <select
+                    id="duck_ai_default_model"
+                    value={duckAiDefaultModel}
+                    onChange={(e) => setDuckAiDefaultModel(e.target.value)}
+                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
+                    disabled={deepseekLoading}
+                  >
+                    <option value="gpt-6-luna">GPT-6 Luna (default)</option>
+                    <option value="claude-haiku-5.5">Claude Haiku 5.5</option>
+                    <option value="gpt-5.4-mini">GPT-5.4 mini</option>
+                    <option value="mistral-small-4">Mistral Small 4</option>
+                    <option value="gpt-oss-120b">GPT-OSS 120B</option>
+                    <option value="gemma-4-31b">Gemma 4 31B</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.duckAiModelHelp')}
+                  </p>
+                </div>
+                <Button
+                  onClick={async () => {
+                    setConfigureError(null)
+                    setConfigureMessage(null)
+                    try {
+                      const result = await processingFlags.update({
+                        duck_ai_url: duckAiUrl || null,
+                        duck_ai_default_model: duckAiDefaultModel || null,
+                      })
+                      setConfigureMessage('Duck.ai settings saved')
+                      setDuckAiUrl(result.duck_ai_url ?? '')
+                      setDuckAiDefaultModel(result.duck_ai_default_model ?? 'gpt-6-luna')
+                      setDuckAiConfigured(!!result.duck_ai_url)
+                    } catch (e) {
+                      const err = e as { response?: { data?: { detail?: string } } };
+                      setConfigureError(err?.response?.data?.detail || t('settings.duckAiSaveFailed'))
+                    }
+                  }}
+                  disabled={deepseekLoading}
+                >
+                  {t('settings.duckAiSave')}
                 </Button>
               </div>
             </CardContent>

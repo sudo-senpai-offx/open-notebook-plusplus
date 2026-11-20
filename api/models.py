@@ -338,6 +338,9 @@ class SettingsResponse(BaseModel):
     deepseek_ds_session_id: Optional[str] = None
     deepseek_authorization_token: Optional[str] = None
     deepseek_pc_url: Optional[str] = None
+    google_ai_mode_url: Optional[str] = None
+    duck_ai_url: Optional[str] = None
+    duck_ai_default_model: Optional[str] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -353,6 +356,9 @@ class SettingsUpdate(BaseModel):
     deepseek_ds_session_id: Optional[str] = None
     deepseek_authorization_token: Optional[str] = None
     deepseek_pc_url: Optional[str] = None
+    google_ai_mode_url: Optional[str] = None
+    duck_ai_url: Optional[str] = None
+    duck_ai_default_model: Optional[str] = None
 
 
 # Sources API models

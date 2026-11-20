@@ -248,6 +248,9 @@ async def get_settings():
             deepseek_ds_session_id=flags.deepseek_ds_session_id,
             deepseek_authorization_token=flags.deepseek_authorization_token,
             deepseek_pc_url=flags.deepseek_pc_url,
+            google_ai_mode_url=flags.google_ai_mode_url,
+            duck_ai_url=flags.duck_ai_url,
+            duck_ai_default_model=flags.duck_ai_default_model,
         )
     except HTTPException:
         raise
@@ -273,14 +276,20 @@ async def update_settings(settings_update: SettingsUpdate):
             settings.default_content_processing_engine_doc = cast(
                 Literal["auto", "docling", "simple"],
                 settings_update.default_content_processing_engine_doc,
-            )
+                google_ai_mode_url=flags.google_ai_mode_url,
+            duck_ai_url=flags.duck_ai_url,
+            duck_ai_default_model=flags.duck_ai_default_model,
+        )
         if settings_update.default_content_processing_engine_url is not None:
             from typing import Literal, cast
 
             settings.default_content_processing_engine_url = cast(
                 Literal["auto", "firecrawl", "jina", "crawl4ai", "simple"],
                 settings_update.default_content_processing_engine_url,
-            )
+                google_ai_mode_url=flags.google_ai_mode_url,
+            duck_ai_url=flags.duck_ai_url,
+            duck_ai_default_model=flags.duck_ai_default_model,
+        )
         if settings_update.default_embedding_option is not None:
             from typing import Literal, cast
 
@@ -314,6 +323,12 @@ async def update_settings(settings_update: SettingsUpdate):
             )
         if settings_update.deepseek_pc_url is not None:
             flags.deepseek_pc_url = settings_update.deepseek_pc_url
+        if settings_update.google_ai_mode_url is not None:
+            flags.google_ai_mode_url = settings_update.google_ai_mode_url
+        if settings_update.duck_ai_url is not None:
+            flags.duck_ai_url = settings_update.duck_ai_url
+        if settings_update.duck_ai_default_model is not None:
+            flags.duck_ai_default_model = settings_update.duck_ai_default_model
 
         # Update allow_local_processing in ProcessingFlags record
         if settings_update.allow_local_processing is not None:
@@ -345,6 +360,9 @@ async def update_settings(settings_update: SettingsUpdate):
             deepseek_ds_session_id=flags.deepseek_ds_session_id,
             deepseek_authorization_token=flags.deepseek_authorization_token,
             deepseek_pc_url=flags.deepseek_pc_url,
+            google_ai_mode_url=flags.google_ai_mode_url,
+            duck_ai_url=flags.duck_ai_url,
+            duck_ai_default_model=flags.duck_ai_default_model,
         )
     except HTTPException:
         raise

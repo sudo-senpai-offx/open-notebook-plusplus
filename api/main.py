@@ -237,6 +237,32 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"Failed to run database migrations: {str(e)}") from e
 
     logger.success("API initialization completed successfully")
+    # Load persisted DeepSeek-web credentials into the direct service singleton
+    # so they are immediately available after a restart (no user re-entry needed).
+    try:
+        from open_notebook.ai.models import ProcessingFlags
+        from open_notebook.services.deepseek_direct_service import (
+            configure as configure_direct,
+        )
+
+        flags = await ProcessingFlags.get_instance()
+        if flags.deepseek_ds_session_id and flags.deepseek_authorization_token:
+            configure_direct(
+                flags.deepseek_ds_session_id,
+                flags.deepseek_authorization_token,
+            )
+            logger.info("DeepSeek-web credentials loaded from storage on startup")
+    except Exception as e:  # noqa: BLE001 - credential load must never block boot
+        logger.debug(f"DeepSeek-web credential load skipped: {e}")
+
+    # Initialize provider registry with all configured providers
+    try:
+        from open_notebook.ai.provider_registry import initialize_providers
+
+        await initialize_providers()
+        logger.info("Provider registry initialized with all providers")
+    except Exception as e:  # noqa: BLE001 - provider init must never block boot
+        logger.debug(f"Provider registry init skipped: {e}")
     # T3 governor: a draining=true persisted by a crashed run must not
     # survive into this boot. Idempotent; safe to run on every startup.
     try:
