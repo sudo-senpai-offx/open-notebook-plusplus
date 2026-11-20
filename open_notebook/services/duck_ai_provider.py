@@ -85,9 +85,14 @@ class DuckAIProvider(BaseProvider):
                     "model": model_name,
                     "messages": [{"role": "user", "content": message}],
                 }
+                base = duck_ai_url.rstrip("/")
+                # Duck.ai proxy servers (e.g. pavnxet/duckai-api) expose
+                # /v1/chat/completions directly.  If the URL already ends
+                # with /v1, don't double-append it.
+                endpoint = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     resp = await client.post(
-                        f"{duck_ai_url.rstrip('/')}/v1/chat/completions",
+                        endpoint,
                         json=payload,
                     )
                 if resp.status_code == 200:

@@ -147,8 +147,12 @@ class GoogleAIModeProvider(BaseProvider):
 
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
+                base = ai_mode_url.rstrip("/")
+                # XD06/google-ai-mode exposes /v1/chat/completions directly.
+                # If the URL already ends with /v1, don't double-append it.
+                endpoint = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
                 resp = await client.post(
-                    f"{ai_mode_url.rstrip('/')}/v1/chat/completions",
+                    endpoint,
                     json=payload,
                 )
         except Exception as exc:  # noqa: BLE001
