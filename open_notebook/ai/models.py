@@ -217,12 +217,14 @@ class ProcessingFlags(RecordModel):
     deepseek_pc_url: Optional[str] = None
     # Google AI Mode (Gemini 4 Hydrogen) configuration.
     # URL of the local lightweight OpenAI-compatible wrapper (e.g. XD06/google-ai-mode).
+    # Defaults to a public wrapper if available; can be overridden in Settings.
     google_ai_mode_url: Optional[str] = None
     # Gemini API key for direct access to Gemini 4 Hydrogen via
     # https://generativelanguage.googleapis.com/v1beta/openai/
     gemini_api_key: Optional[str] = None
     # Duck.ai configuration.
     # URL of the local lightweight OpenAI-compatible wrapper (e.g. pavnxet/duckai-api or amirkabiri/duckai).
+    # Defaults to a public wrapper if available; can be overridden in Settings.
     duck_ai_url: Optional[str] = None
     # Default Duck.ai model (one of: gpt-6-luna, claude-haiku-5.5, gpt-5.4-mini,
     # mistral-small-4, gpt-oss-120b, gemma-4-31b).

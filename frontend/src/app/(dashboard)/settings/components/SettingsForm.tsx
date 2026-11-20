@@ -95,9 +95,9 @@ export function SettingsForm() {
   const [ttsSttLoading, setTtsSttLoading] = useState(false)
   const [preprocessGroups, setPreprocessGroups] = useState<Record<string, boolean>>({})
   const [browserAiLoading, setBrowserAiLoading] = useState(false)
-  const [googleAiModeUrl, setGoogleAiModeUrl] = useState('')
+  const [googleAiModeUrl, setGoogleAiModeUrl] = useState('https://google.com/search?udm=14')
   const [geminiApiKey, setGeminiApiKey] = useState('')
-  const [duckAiUrl, setDuckAiUrl] = useState('')
+  const [duckAiUrl, setDuckAiUrl] = useState('https://duck.ai/chat')
   const [browserAiConfigureMessage, setBrowserAiConfigureMessage] = useState<string | null>(null)
   const [browserAiConfigureError, setBrowserAiConfigureError] = useState<string | null>(null)
   const [browserAiStatus, setBrowserAiStatus] = useState<{
@@ -114,8 +114,8 @@ export function SettingsForm() {
   const [configureError, setConfigureError] = useState<string | null>(null)
   const [deepSeekPcUrl, setDeepSeekPcUrl] = useState('')
   const [duckAiDefaultModel, setDuckAiDefaultModel] = useState('gpt-6-luna')
-  const [duckAiConfigured, setDuckAiConfigured] = useState(false)
-  const [googleAiModeConfigured, setGoogleAiModeConfigured] = useState(false)
+  const [duckAiConfigured, setDuckAiConfigured] = useState(true)
+  const [googleAiModeConfigured, setGoogleAiModeConfigured] = useState(true)
 
   useEffect(() => {
     let mounted = true
