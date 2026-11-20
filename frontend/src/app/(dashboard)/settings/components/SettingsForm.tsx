@@ -97,7 +97,7 @@ export function SettingsForm() {
   const [browserAiLoading, setBrowserAiLoading] = useState(false)
   const [googleAiModeUrl, setGoogleAiModeUrl] = useState('http://127.0.0.1:18080/v1')
   const [geminiApiKey, setGeminiApiKey] = useState('')
-  const [duckAiUrl, setDuckAiUrl] = useState('http://localhost:3006/v1')
+  const [duckAiUrl, setDuckAiUrl] = useState('http://127.0.0.1:8765/v1')
   const [browserAiConfigureMessage, setBrowserAiConfigureMessage] = useState<string | null>(null)
   const [browserAiConfigureError, setBrowserAiConfigureError] = useState<string | null>(null)
   const [browserAiStatus, setBrowserAiStatus] = useState<{
