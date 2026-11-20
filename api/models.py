@@ -339,6 +339,7 @@ class SettingsResponse(BaseModel):
     deepseek_authorization_token: Optional[str] = None
     deepseek_pc_url: Optional[str] = None
     google_ai_mode_url: Optional[str] = None
+    gemini_api_key: Optional[str] = None
     duck_ai_url: Optional[str] = None
     duck_ai_default_model: Optional[str] = None
 
@@ -357,6 +358,7 @@ class SettingsUpdate(BaseModel):
     deepseek_authorization_token: Optional[str] = None
     deepseek_pc_url: Optional[str] = None
     google_ai_mode_url: Optional[str] = None
+    gemini_api_key: Optional[str] = None
     duck_ai_url: Optional[str] = None
     duck_ai_default_model: Optional[str] = None
 

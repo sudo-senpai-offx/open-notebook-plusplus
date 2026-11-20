@@ -249,6 +249,7 @@ async def get_settings():
             deepseek_authorization_token=flags.deepseek_authorization_token,
             deepseek_pc_url=flags.deepseek_pc_url,
             google_ai_mode_url=flags.google_ai_mode_url,
+            gemini_api_key=flags.gemini_api_key,
             duck_ai_url=flags.duck_ai_url,
             duck_ai_default_model=flags.duck_ai_default_model,
         )
@@ -325,6 +326,8 @@ async def update_settings(settings_update: SettingsUpdate):
             flags.deepseek_pc_url = settings_update.deepseek_pc_url
         if settings_update.google_ai_mode_url is not None:
             flags.google_ai_mode_url = settings_update.google_ai_mode_url
+        if settings_update.gemini_api_key is not None:
+            flags.gemini_api_key = settings_update.gemini_api_key
         if settings_update.duck_ai_url is not None:
             flags.duck_ai_url = settings_update.duck_ai_url
         if settings_update.duck_ai_default_model is not None:
@@ -361,6 +364,7 @@ async def update_settings(settings_update: SettingsUpdate):
             deepseek_authorization_token=flags.deepseek_authorization_token,
             deepseek_pc_url=flags.deepseek_pc_url,
             google_ai_mode_url=flags.google_ai_mode_url,
+            gemini_api_key=flags.gemini_api_key,
             duck_ai_url=flags.duck_ai_url,
             duck_ai_default_model=flags.duck_ai_default_model,
         )

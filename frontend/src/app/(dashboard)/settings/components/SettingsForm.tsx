@@ -96,6 +96,7 @@ export function SettingsForm() {
   const [preprocessGroups, setPreprocessGroups] = useState<Record<string, boolean>>({})
   const [browserAiLoading, setBrowserAiLoading] = useState(false)
   const [googleAiModeUrl, setGoogleAiModeUrl] = useState('')
+  const [geminiApiKey, setGeminiApiKey] = useState('')
   const [duckAiUrl, setDuckAiUrl] = useState('')
   const [browserAiConfigureMessage, setBrowserAiConfigureMessage] = useState<string | null>(null)
   const [browserAiConfigureError, setBrowserAiConfigureError] = useState<string | null>(null)
@@ -214,9 +215,10 @@ export function SettingsForm() {
         if (mounted) {
           setDeepSeekPcUrl(data.deepseek_pc_url ?? '')
           setGoogleAiModeUrl(data.google_ai_mode_url ?? '')
+          setGeminiApiKey(data.gemini_api_key ?? '')
           setDuckAiUrl(data.duck_ai_url ?? '')
           setDuckAiDefaultModel(data.duck_ai_default_model ?? 'gpt-6-luna')
-          setGoogleAiModeConfigured(!!data.google_ai_mode_url)
+          setGoogleAiModeConfigured(!!data.google_ai_mode_url || !!data.gemini_api_key)
           setDuckAiConfigured(!!data.duck_ai_url)
         }
       } catch {
@@ -1256,6 +1258,21 @@ export function SettingsForm() {
                     {t('settings.googleAiModeUrlHelp')}
                   </p>
                 </div>
+                <div className="space-y-2">
+                  <Label htmlFor="gemini_api_key">{t('settings.geminiApiKey')}</Label>
+                  <input
+                    id="gemini_api_key"
+                    type="text"
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                    placeholder={t('settings.geminiApiKeyPlaceholder')}
+                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
+                    disabled={deepseekLoading}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.geminiApiKeyHelp')}
+                  </p>
+                </div>
                 <Button
                   onClick={async () => {
                     setConfigureError(null)
@@ -1263,10 +1280,12 @@ export function SettingsForm() {
                     try {
                       const result = await processingFlags.update({
                         google_ai_mode_url: googleAiModeUrl || null,
+                        gemini_api_key: geminiApiKey || null,
                       })
-                      setConfigureMessage('Google AI Mode URL saved')
+                      setConfigureMessage('Google AI Mode settings saved')
                       setGoogleAiModeUrl(result.google_ai_mode_url ?? '')
-                      setGoogleAiModeConfigured(!!result.google_ai_mode_url)
+                      setGeminiApiKey(result.gemini_api_key ?? '')
+                      setGoogleAiModeConfigured(!!result.google_ai_mode_url || !!result.gemini_api_key)
                     } catch (e) {
                       const err = e as { response?: { data?: { detail?: string } } };
                       setConfigureError(err?.response?.data?.detail || t('settings.googleAiModeSaveFailed'))

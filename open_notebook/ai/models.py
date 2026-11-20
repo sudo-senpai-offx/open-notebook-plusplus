@@ -215,6 +215,21 @@ class ProcessingFlags(RecordModel):
     # PC fallback URL for browser-use automation (x86 machine with Chromium).
     # When PoW solving fails locally, the phone delegates to the PC's API.
     deepseek_pc_url: Optional[str] = None
+    # Google AI Mode (Gemini 4 Hydrogen) configuration.
+    # URL of the local lightweight OpenAI-compatible wrapper (e.g. XD06/google-ai-mode).
+    google_ai_mode_url: Optional[str] = None
+    # Gemini API key for direct access to Gemini 4 Hydrogen via
+    # https://generativelanguage.googleapis.com/v1beta/openai/
+    gemini_api_key: Optional[str] = None
+    # Duck.ai configuration.
+    # URL of the local lightweight OpenAI-compatible wrapper (e.g. pavnxet/duckai-api or amirkabiri/duckai).
+    duck_ai_url: Optional[str] = None
+    # Default Duck.ai model (one of: gpt-6-luna, claude-haiku-5.5, gpt-5.4-mini,
+    # mistral-small-4, gpt-oss-120b, gemma-4-31b).
+    duck_ai_default_model: Optional[str] = "gpt-6-luna"
+    # Generic provider configuration storage: {provider_id: {key: value}}.
+    # Used for provider-specific settings not covered by dedicated fields above.
+    provider_configs: Dict[str, Dict[str, Any]] = {}
 
     @classmethod
     async def get_instance(cls) -> "ProcessingFlags":
