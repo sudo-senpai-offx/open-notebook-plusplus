@@ -1,66 +1,59 @@
 # Progress Log — ON++ Three-Provider Cloud AI Integration
 
-## Session: Fri Nov 20 2026 (Start)
+## Session: Fri Nov 20 2026
 
 ## Completed (prior to this session)
 - PC stack running: API:5055, SurrealDB:8000, Frontend:8502
-- DeepSeek-web credentials configured and working (chat tested: "Hello from DeepSeek-web")
+- DeepSeek-web credentials configured and working (chat tested end-to-end)
 - Model defaults set: default_chat_model = deepseek-web
 - Attachments working through /api/chat/execute with deepseek-web
 - SettingsForm.tsx restored with PC fallback URL field
 - TypeScript compiles with zero errors
-- All changes committed and pushed to plusplus/main (commits 9432642e, d403317f)
+- All changes committed and pushed to plusplus/main
 
 ## Completed (this session)
-- Phase 1: Model vs Provider separation refactoring — COMPLETE
-  - ProcessingFlags updated with Google AI Mode, Duck.ai, and Gemini API key fields
-  - Provider abstraction layer created (providers.py, provider_registry.py)
-  - Provider implementations: DeepSeekWebProvider, GoogleAIModeProvider, DuckAIProvider
-  - chat.py updated to use Provider registry for execute_chat and edit_message
-  - Backend settings.py updated with new ProcessingFlags fields
-  - Backend main.py updated to call initialize_providers() at startup
-  - Frontend types/api.ts updated with new ProcessingFlagsResponse fields
-  - Frontend settings.ts API updated with new update fields
-  - Frontend SettingsForm - added Google AI Mode URL + Duck.ai URL + model selector + Gemini API key cards
-  - All 14 locale files updated with new translation keys
-  - TypeScript compiles with zero errors
-  - Backend chat with attachments working end-to-end via /api/chat/execute
-  - All changes committed and pushed to plusplus/main (commit 5cd5381f)
+### Infrastructure fixes:
+1. **Google AI Mode provider** — Fixed async `_get_flags()` (was returning coroutine), changed endpoint from `/v1/web/ai-mode` to OpenAI-compatible `/v1/chat/completions` matching XD06/google-ai-mode wrapper
+2. **Duck.ai provider** — Fixed to support both `p2d_duck.Client()` and `duck_ai.DuckChat()` classes; fixed package name detection
+3. **chat.py** — Fixed `attachment_parts` UnboundLocalError when no attachments sent
+4. **settings.py** — Fixed `flags.update()` not being called (only called inside `allow_local_processing` block); now always persists provider field changes
+5. **providers.py** — Fixed `spec.provider_id` instead of non-existent `spec.name`; added `GET /providers/status` endpoint with per-provider diagnostics
+6. **notebook.py** — Added `provider_session_id` field to ChatSession domain model
+7. **Frontend defaults** — Google AI Mode URL: `http://127.0.0.1:18080/v1`, Duck.ai URL: `http://localhost:3006/v1`
 
-## In Progress
-- Phase 2: Test Google AI Mode integration (needs GEMINI_API_KEY or GOOGLE_AI_MODE_URL)
-- Phase 3: Test Duck.ai integration (p2d-duck installed but PoW challenge failing)
-- Phase 4: Commit all remaining changes
+### Verified working:
+- DeepSeek-web chat: ✅ WORKING (4-sentence quantum computing explanation, PoW solved)
+- DeepSeek-web attachments: ✅ WORKING (AI summary of attached document)
+- Session continuation: ✅ WORKING (follow-up messages in same session)
+- Provider status/detection: ✅ WORKING (GET /providers/status returns per-provider availability + diagnostics)
+- Settings save: ✅ WORKING (google_ai_mode_url, duck_ai_url, gemini_api_key all persist)
+- TypeScript: ✅ compiles with zero errors
 
-## Blocked
-- Duck.ai PoW challenge: duck_ai library fails with ChallengeError (server rejected challenge: 418). Requires JavaScript execution which we intentionally avoided (no Playwright/CDP per user decision). Solution: user must run a Duck.ai proxy server at DUCK_AI_URL.
-- Google AI Mode: Needs GEMINI_API_KEY environment variable or GOOGLE_AI_MODE_URL wrapper URL to function.
+### Known limitations:
+- Duck.ai direct access: ❌ BLOCKED by PoW challenge (418 ERR_CHALLENGE) — both p2d-duck and duck_ai libraries fail. Requires JavaScript execution (Playwright) which we intentionally avoided per user decision.
+- Duck.ai proxy (pavnxet/duckai-api): ⚠️ Server runs and reports healthy, but token chunks don't flow from Duck.ai (anti-bot measures updated). Empty responses.
+- Google AI Mode wrapper: ❌ Not running — requires XD06/google-ai-mode at port 18080 with browser cookies exported from a logged-in Google session.
+- quota_tracker.increment: ⚠️ Fails silently (by design — fail-safe, non-critical)
 
-## Errors Encountered
-| Error | Attempt | Resolution |
-|-------|---------|------------|
-| replaceAll corrupted settings.py | Manual fix | Fixed each corrupted block individually |
-| deepseek_direct_service not imported in chat.py | Add import back | Re-added import |
-| provider not defined in attachment loop | Get provider from registry | Added get_provider_registry().get() call |
-| attach_provider is None (providers not registered) | Call initialize_providers() at startup | Added to api/main.py lifespan |
-| PROVIDERS import from provider_registry in multiple files | Import from providers.py | Changed import in 4 files |
-| SurrealDB RocksDB permission denied | chown files, restart | Fixed permissions, restarted SurrealDB |
-| Duck.ai ChallengeError (418) | p2d-duck/duck_ai library | PoW challenge requires JS execution; user must run proxy at DUCK_AI_URL |
+## Files Changed (this session)
+- api/routers/chat.py — attachment_parts fix
+- api/routers/providers.py — status endpoint, provider_id fix
+- api/routers/settings.py — flags.update() persistence fix
+- api/models.py — gemini_api_key field
+- open_notebook/ai/models.py — gemini_api_key field
+- open_notebook/services/google_ai_mode_provider.py — async fixes, endpoint fix
+- open_notebook/services/duck_ai_provider.py — duck_ai class support
+- open_notebook/domain/notebook.py — provider_session_id field
+- frontend/src/app/(dashboard)/settings/components/SettingsForm.tsx — default URLs
+- frontend/src/lib/types/api.ts — gemini_api_key field
+- frontend/src/lib/api/settings.ts — gemini_api_key field
+- frontend/src/lib/locales/en-US/index.ts — placeholder update
 
-## Files Created This Session
-- task_plan.md, findings.md, progress.md
-- open_notebook/ai/providers.py, provider_registry.py
-- open_notebook/services/deepseek_web_provider.py, google_ai_mode_provider.py, duck_ai_provider.py
+## All Code Pushed
+- Commit 1eb18344 pushed to plusplus/main on sudo-senpai-offx/open-notebook-plusplus
 
-## Files Modified This Session
-- open_notebook/ai/models.py, ai/model_discovery.py, ai/key_provider.py
-- api/main.py, api/models.py, api/routers/chat.py, api/routers/settings.py, api/routers/providers.py, api/credentials_service.py
-- frontend/src/lib/types/api.ts, lib/api/settings.ts
-- frontend/src/app/(dashboard)/settings/components/SettingsForm.tsx
-- frontend/src/lib/locales/*/index.ts (14 files)
-
-## Next Actions
-1. User sets GEMINI_API_KEY env var or runs XD06/google-ai-mode wrapper at GOOGLE_AI_MODE_URL
-2. User runs Duck.ai proxy at DUCK_AI_URL (or p2d-duck works after PoW fix)
-3. Test Google AI Mode and Duck.ai end-to-end
-4. Commit and push remaining changes to plusplus/main
+## Remaining (require user action)
+1. **Google AI Mode**: Run XD06/google-ai-mode wrapper at port 18080 with Google browser cookies
+2. **Duck.ai**: Requires JavaScript execution (Playwright/CDP) — intentionally avoided per user decision. Direct p2d-duck/duck_ai access blocked by PoW challenge.
+3. Test mid-conversation provider switching
+4. Test attachments with Google AI Mode and Duck.ai (once proxies are working)
