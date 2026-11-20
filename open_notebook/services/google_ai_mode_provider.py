@@ -1,10 +1,15 @@
 """
 Google AI Mode (Gemini 4 Hydrogen) provider implementation.
 
-Supports two integration methods:
+Supports three integration methods, tried in order:
+
 1. **Local wrapper URL** (GOOGLE_AI_MODE_URL) — points to a lightweight
    OpenAI-compatible wrapper (e.g. XD06/google-ai-mode). No Playwright/CDP.
-2. **Direct Gemini API** (GEMINI_API_KEY) — uses Google's official
+2. **Lightpanda CDP server** (LIGHTPANDA_CDP_URL) — Zig-based headless
+   browser (~123MB RAM vs Chrome's 2GB+) that speaks CDP. Playwright connects
+   via connect_over_cdp(). No API key needed — uses your own browser session.
+   Run: lightpanda serve --host 127.0.0.1 --port 9222
+3. **Direct Gemini API** (GEMINI_API_KEY) — uses Google's official
    OpenAI-compatible endpoint at
    https://generativelanguage.googleapis.com/v1beta/openai/
    Requires a free Gemini API key from Google AI Studio.
@@ -16,6 +21,7 @@ full context via continuation prompts when switching to/from this provider.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Dict, List, Optional
 
@@ -32,8 +38,8 @@ from open_notebook.ai.providers import (
 
 
 class GoogleAIModeProvider(BaseProvider):
-    """Google AI Mode provider: lightweight OpenAI-compatible access via
-    either a local wrapper URL or the direct Gemini API."""
+    """Google AI Mode provider: lightweight access via wrapper URL,
+    Lightpanda CDP server, or direct Gemini API."""
 
     def __init__(self, config: ProviderConfig):
         super().__init__(PROVIDER_GOOGLE_AI_MODE, config)
@@ -59,23 +65,46 @@ class GoogleAIModeProvider(BaseProvider):
     async def _wrapper_url(self) -> Optional[str]:
         return (await self._get_flags()).google_ai_mode_url
 
+    async def _lightpanda_cdp_url(self) -> Optional[str]:
+        return (await self._get_flags()).lightpanda_cdp_url
+
     # ------------------------------------------------------------------
     # Availability
     # ------------------------------------------------------------------
 
     async def is_available(self) -> bool:
-        """Google AI Mode is available if either a wrapper URL is configured
-        and reachable, or a Gemini API key is set."""
+        """Google AI Mode is available if any of:
+        - A wrapper URL is configured and reachable
+        - A Lightpanda CDP server is running and reachable
+        - A Gemini API key is set
+        """
         flags = await self._get_flags()
+
+        # Option 1: Wrapper URL
         if flags.google_ai_mode_url:
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     resp = await client.get(
                         f"{flags.google_ai_mode_url.rstrip('/')}/health"
                     )
-                    return resp.status_code == 200
+                    if resp.status_code == 200:
+                        return True
             except Exception:  # noqa: BLE001
                 pass
+
+        # Option 2: Lightpanda CDP server
+        if flags.lightpanda_cdp_url:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{flags.lightpanda_cdp_url.rstrip('/')}/json/version"
+                    )
+                    if resp.status_code == 200:
+                        return True
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Option 3: Direct Gemini API
         return bool(await self._gemini_api_key())
 
     # ------------------------------------------------------------------
@@ -94,8 +123,10 @@ class GoogleAIModeProvider(BaseProvider):
     ) -> ProviderSendResult:
         """Send a message to Google AI Mode.
 
-        Tries the local wrapper URL first (GOOGLE_AI_MODE_URL), then falls
-        back to the direct Gemini API (GEMINI_API_KEY).
+        Tries methods in order:
+        1. Local wrapper URL (GOOGLE_AI_MODE_URL)
+        2. Lightpanda CDP server (LIGHTPANDA_CDP_URL)
+        3. Direct Gemini API (GEMINI_API_KEY)
         """
         # --- Option 1: Local wrapper URL ---
         wrapper_url = await self._wrapper_url()
@@ -105,7 +136,15 @@ class GoogleAIModeProvider(BaseProvider):
                 ref_file_ids, timeout,
             )
 
-        # --- Option 2: Direct Gemini API ---
+        # --- Option 2: Lightpanda CDP server ---
+        lightpanda_url = await self._lightpanda_cdp_url()
+        if lightpanda_url:
+            return await self._send_via_lightpanda_cdp(
+                lightpanda_url, message, session_id, thinking_enabled,
+                ref_file_ids, timeout,
+            )
+
+        # --- Option 3: Direct Gemini API ---
         api_key = await self._gemini_api_key()
         if not api_key:
             return ProviderSendResult(
@@ -113,6 +152,7 @@ class GoogleAIModeProvider(BaseProvider):
                 error=(
                     "Google AI Mode not configured. "
                     "Set GOOGLE_AI_MODE_URL to point to a local wrapper, "
+                    "set LIGHTPANDA_CDP_URL to a Lightpanda CDP server, "
                     "or set GEMINI_API_KEY to use the Gemini API directly."
                 ),
                 used_provider=self.provider_id,
@@ -150,7 +190,11 @@ class GoogleAIModeProvider(BaseProvider):
                 base = ai_mode_url.rstrip("/")
                 # XD06/google-ai-mode exposes /v1/chat/completions directly.
                 # If the URL already ends with /v1, don't double-append it.
-                endpoint = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
+                endpoint = (
+                    f"{base}/chat/completions"
+                    if base.endswith("/v1")
+                    else f"{base}/v1/chat/completions"
+                )
                 resp = await client.post(
                     endpoint,
                     json=payload,
@@ -220,6 +264,100 @@ class GoogleAIModeProvider(BaseProvider):
             used_provider=self.provider_id,
             ref_file_ids=ref_file_ids or [],
         )
+
+    # ------------------------------------------------------------------
+    # Lightpanda CDP path (Playwright connect_over_cdp)
+    # ------------------------------------------------------------------
+
+    async def _send_via_lightpanda_cdp(
+        self,
+        cdp_url: str,
+        message: str,
+        session_id: Optional[str],
+        thinking_enabled: bool,
+        ref_file_ids: Optional[List[str]],
+        timeout: float,
+    ) -> ProviderSendResult:
+        """Send via Lightpanda browser over CDP (Playwright connect_over_cdp).
+
+        Lightpanda is a Zig-based headless browser (~123MB RAM vs Chrome's 2GB+)
+        that speaks CDP. No Playwright binary download needed — it speaks CDP
+        natively. Google sees a real browser TLS fingerprint, bypassing the
+        SG_REL soft-block that curl_cffi-based wrappers hit.
+        """
+        from playwright.async_api import async_playwright
+
+        ws_url = cdp_url.rstrip("/")
+        if not ws_url.startswith("ws://") and not ws_url.startswith("wss://"):
+            ws_url = f"ws://{ws_url}"
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.connect_over_cdp(ws_url, timeout=timeout)
+                context = await browser.new_context()
+                page = await context.new_page()
+
+                # Navigate to Google AI Mode
+                await page.goto(
+                    "https://www.google.com/search?udm=50&hl=en",
+                    wait_until="networkidle",
+                    timeout=timeout,
+                )
+
+                # Fill the search box and submit
+                # Google AI Mode search box selector
+                await page.fill('textarea[name="q"]', message)
+                await page.press('textarea[name="q"]', "Enter")
+
+                # Wait for AI Mode response to appear
+                await page.wait_for_selector(
+                    '.n6owBd, .T286Pc, [data-mstk]',
+                    timeout=timeout,
+                )
+
+                # Extract response text
+                response_text = await page.evaluate(
+                    """() => {
+                        const blocks = document.querySelectorAll('.n6owBd, .T286Pc');
+                        return Array.from(blocks).map(b => b.innerText).join('\\n');
+                    }"""
+                )
+
+                await context.close()
+                await browser.close()
+
+                if not response_text or not response_text.strip():
+                    return ProviderSendResult(
+                        ok=False,
+                        error="Empty response from Google AI Mode via Lightpanda CDP.",
+                        used_provider=self.provider_id,
+                    )
+
+                return ProviderSendResult(
+                    ok=True,
+                    response=response_text.strip(),
+                    session_id=session_id,
+                    used_provider=self.provider_id,
+                    ref_file_ids=ref_file_ids or [],
+                )
+
+        except ImportError:
+            logger.error("Playwright not installed. Install with: pip install playwright")
+            return ProviderSendResult(
+                ok=False,
+                error=(
+                    "Lightpanda CDP requires Playwright. "
+                    "Install with: pip install playwright && playwright install chromium"
+                ),
+                used_provider=self.provider_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Lightpanda CDP request failed: {exc}")
+            return ProviderSendResult(
+                ok=False,
+                error=f"Lightpanda CDP request failed: {exc}",
+                used_provider=self.provider_id,
+            )
 
     # ------------------------------------------------------------------
     # Direct Gemini API path (OpenAI-compatible)
@@ -332,12 +470,12 @@ class GoogleAIModeProvider(BaseProvider):
     # ------------------------------------------------------------------
 
     async def upload_attachment(self, file_path: str) -> Optional[str]:
-        """Google AI Mode doesn't support direct file upload via wrapper.
+        """Google AI Mode doesn't support direct file upload via wrapper/CDP.
         Attachments are handled by ON++ preprocessor (text extraction +
         context feeding).
         """
         logger.warning(
-            "Google AI Mode does not support direct file upload via wrapper. "
+            "Google AI Mode does not support direct file upload via wrapper/CDP. "
             "Use ON++ preprocessor for context feeding."
         )
         return None
@@ -356,6 +494,7 @@ class GoogleAIModeProvider(BaseProvider):
         return {
             "provider": self.provider_id,
             "has_wrapper_url": bool(flags.google_ai_mode_url),
+            "has_lightpanda_cdp_url": bool(flags.lightpanda_cdp_url),
             "has_api_key": bool(await self._gemini_api_key()),
         }
 

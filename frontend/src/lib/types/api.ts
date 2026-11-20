@@ -377,6 +377,7 @@ export interface ProcessingFlagsResponse {
   allow_local_processing: boolean
   deepseek_pc_url: string | null
   google_ai_mode_url: string | null
+  lightpanda_cdp_url: string | null
   gemini_api_key: string | null
   duck_ai_url: string | null
   duck_ai_default_model: string | null

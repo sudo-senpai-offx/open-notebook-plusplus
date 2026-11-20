@@ -1011,6 +1011,10 @@ browserLaunchFailed: "Browser launch failed.",
     googleAiModeUrl: "Google AI Mode URL",
     googleAiModeUrlPlaceholder: "http://localhost:3006/v1",
     googleAiModeUrlHelp: "URL of your local Google AI Mode wrapper exposing OpenAI-compatible /v1/web/ai-mode endpoint",
+
+    lightpandaCdpUrl: "Lightpanda CDP URL",
+    lightpandaCdpUrlPlaceholder: "ws://127.0.0.1:9222",
+    lightpandaCdpUrlHelp: "Lightpanda headless browser CDP server URL. Run: lightpanda serve --host 127.0.0.1 --port 9222 (~123MB RAM vs Chrome's 2GB+)",
     googleAiModeSave: "Save Google AI Mode URL",
     googleAiModeSaveFailed: "Failed to save Google AI Mode URL",
 

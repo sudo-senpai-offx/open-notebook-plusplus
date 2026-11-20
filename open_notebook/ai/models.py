@@ -219,6 +219,11 @@ class ProcessingFlags(RecordModel):
     # URL of the local lightweight OpenAI-compatible wrapper (e.g. XD06/google-ai-mode).
     # Defaults to a public wrapper if available; can be overridden in Settings.
     google_ai_mode_url: Optional[str] = None
+    # Lightpanda CDP server URL for Google AI Mode browser automation.
+    # Lightpanda is a Zig-based headless browser (~123MB RAM vs Chrome's 2GB+)
+    # that speaks CDP and Playwright can connect via connect_over_cdp().
+    # Run: lightpanda serve --host 127.0.0.1 --port 9222
+    lightpanda_cdp_url: Optional[str] = None
     # Gemini API key for direct access to Gemini 4 Hydrogen via
     # https://generativelanguage.googleapis.com/v1beta/openai/
     gemini_api_key: Optional[str] = None

@@ -96,6 +96,7 @@ export function SettingsForm() {
   const [preprocessGroups, setPreprocessGroups] = useState<Record<string, boolean>>({})
   const [browserAiLoading, setBrowserAiLoading] = useState(false)
   const [googleAiModeUrl, setGoogleAiModeUrl] = useState('http://127.0.0.1:18080/v1')
+  const [lightpandaCdpUrl, setLightpandaCdpUrl] = useState('http://127.0.0.1:9222')
   const [geminiApiKey, setGeminiApiKey] = useState('')
   const [duckAiUrl, setDuckAiUrl] = useState('http://127.0.0.1:8765/v1')
   const [browserAiConfigureMessage, setBrowserAiConfigureMessage] = useState<string | null>(null)
@@ -215,10 +216,15 @@ export function SettingsForm() {
         if (mounted) {
           setDeepSeekPcUrl(data.deepseek_pc_url ?? '')
           setGoogleAiModeUrl(data.google_ai_mode_url ?? '')
+          setLightpandaCdpUrl(data.lightpanda_cdp_url ?? '')
           setGeminiApiKey(data.gemini_api_key ?? '')
           setDuckAiUrl(data.duck_ai_url ?? '')
           setDuckAiDefaultModel(data.duck_ai_default_model ?? 'gpt-6-luna')
-          setGoogleAiModeConfigured(!!data.google_ai_mode_url || !!data.gemini_api_key)
+          setGoogleAiModeConfigured(
+            !!data.google_ai_mode_url
+            || !!data.lightpanda_cdp_url
+            || !!data.gemini_api_key
+          )
           setDuckAiConfigured(!!data.duck_ai_url)
         }
       } catch {
@@ -1259,6 +1265,21 @@ export function SettingsForm() {
                   </p>
                 </div>
                 <div className="space-y-2">
+                  <Label htmlFor="lightpanda_cdp_url">{t('settings.lightpandaCdpUrl')}</Label>
+                  <input
+                    id="lightpanda_cdp_url"
+                    type="text"
+                    value={lightpandaCdpUrl}
+                    onChange={(e) => setLightpandaCdpUrl(e.target.value)}
+                    placeholder={t('settings.lightpandaCdpUrlPlaceholder')}
+                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
+                    disabled={deepseekLoading}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.lightpandaCdpUrlHelp')}
+                  </p>
+                </div>
+                <div className="space-y-2">
                   <Label htmlFor="gemini_api_key">{t('settings.geminiApiKey')}</Label>
                   <input
                     id="gemini_api_key"
@@ -1280,12 +1301,18 @@ export function SettingsForm() {
                     try {
                       const result = await processingFlags.update({
                         google_ai_mode_url: googleAiModeUrl || null,
+                        lightpanda_cdp_url: lightpandaCdpUrl || null,
                         gemini_api_key: geminiApiKey || null,
                       })
                       setConfigureMessage('Google AI Mode settings saved')
                       setGoogleAiModeUrl(result.google_ai_mode_url ?? '')
+                      setLightpandaCdpUrl(result.lightpanda_cdp_url ?? '')
                       setGeminiApiKey(result.gemini_api_key ?? '')
-                      setGoogleAiModeConfigured(!!result.google_ai_mode_url || !!result.gemini_api_key)
+                      setGoogleAiModeConfigured(
+                        !!result.google_ai_mode_url
+                        || !!result.lightpanda_cdp_url
+                        || !!result.gemini_api_key
+                      )
                     } catch (e) {
                       const err = e as { response?: { data?: { detail?: string } } };
                       setConfigureError(err?.response?.data?.detail || t('settings.googleAiModeSaveFailed'))

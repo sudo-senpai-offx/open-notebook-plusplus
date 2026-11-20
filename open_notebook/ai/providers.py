@@ -115,6 +115,9 @@ PROVIDER_METADATA: Dict[str, ProviderConfig] = {
         test_model_type="chat",
         modalities=("language",),
         env_config=_default_env_config,
+        # Lightpanda CDP server URL for browser-based Google AI Mode access.
+        # Run: lightpanda serve --host 127.0.0.1 --port 9222
+        base_url_env="LIGHTPANDA_CDP_URL",
     ),
     PROVIDER_DUCK_AI: ProviderConfig(
         provider_id=PROVIDER_DUCK_AI,
