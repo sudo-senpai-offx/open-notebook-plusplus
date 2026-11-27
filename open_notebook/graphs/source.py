@@ -32,6 +32,7 @@ from open_notebook.utils.runtime_capabilities import (
     docling_available,
     engine_runtime_missing,
 )
+from open_notebook.preprocess.tools.pdf import extract_pdf
 
 # content-core >= 2.1 disables its own Loguru logging for library consumers.
 # Both the API and the worker import this module before extracting anything,
@@ -69,6 +70,19 @@ STAGE_TIMEOUT_EXTRACT = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_EXTRACT", "
 STAGE_TIMEOUT_CHUNK = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_CHUNK", "30"))
 STAGE_TIMEOUT_EMBED = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_EMBED", "120"))
 STAGE_TIMEOUT_INDEX = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_INDEX", "60"))
+
+
+class _ExtractionOutput:
+    """Simple extraction output wrapper for native binary tool results.
+
+    normalize_stage expects `extraction.content` and `extraction.title`.
+    Native binary wrappers return dicts; this adapts them to the expected
+    interface without importing content-core ExtractionOutput.
+    """
+
+    def __init__(self, content: str, title: str = "") -> None:
+        self.content = content
+        self.title = title
 
 
 class SourceState(TypedDict):
@@ -1088,11 +1102,12 @@ async def route_stage(state: Source7StageState) -> dict:
 
 
 async def extract_stage(state: Source7StageState) -> dict:
-    """Stage 3: Extract — run content-core extraction.
+    """Stage 3: Extract — run content-core extraction or native wrapper.
 
-    Delegates to the existing content_process logic (content-core +
-    optional OCR / speech-to-text fallback). Stores the ExtractionOutput
-    in state.extraction for the normalize stage.
+    Routes to native binary wrappers when available (pdftotext for PDFs),
+    falling back to content-core for unsupported formats. Stores the
+    ExtractionOutput-compatible result in state.extraction for the
+    normalize stage.
 
     On failure, adds the error to state.errors and returns so the
     graph's compensation edge can route to compensate_extract.
@@ -1102,11 +1117,92 @@ async def extract_stage(state: Source7StageState) -> dict:
     await raise_if_cancelled(cmd_id)
 
     errors = list(state.get("errors", []))
+    content_state = state.get("content_state") or {}
+    content_type = state.get("content_type", "url")
+    file_path = content_state.get("file_path")
+    url = content_state.get("url") or ""
+
+    # PDF extraction via pdftotext wrapper (Failure #3 completion).
+    if content_type == "pdf" and file_path:
+        return await _extract_pdf_stage(state, cmd_id, errors, file_path, content_state)
+
+    # Fall back to content-core for URLs, text, media, and unknown types.
+    return await _extract_content_core_stage(state, cmd_id, errors, content_state, url)
+
+
+async def _extract_pdf_stage(
+    state: Source7StageState,
+    cmd_id: Optional[str],
+    errors: List[str],
+    file_path: str,
+    content_state: Dict[str, Any],
+) -> dict:
+    """PDF extraction via pdftotext wrapper with per-range timeout + checkpoint."""
+    from open_notebook.preprocess.tools.pdf import extract_pdf
+
+    # Get page count from content_state or estimate
+    page_count = content_state.get("page_count") or 1
+    language = content_state.get("language") or ""
+
+    try:
+        result = await extract_pdf(
+            command_id=cmd_id or "",
+            file_path=file_path,
+            page_count=int(page_count),
+            language=language,
+        )
+    except asyncio.TimeoutError:
+        errors.append(f"extract: pdf timeout after {STAGE_TIMEOUT_EXTRACT}s")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"extract: pdf wrapper error: {exc}")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    extraction = _ExtractionOutput(
+        content=result.get("text", ""),
+        title=content_state.get("title", ""),
+    )
+
+    if not extraction.content.strip():
+        errors.append("extract: pdf returned no text content")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    return {
+        "extraction": extraction,
+        "errors": errors,
+        "stage": "extract",
+    }
+
+
+async def _extract_content_core_stage(
+    state: Source7StageState,
+    cmd_id: Optional[str],
+    errors: List[str],
+    content_state: Dict[str, Any],
+    url: str,
+) -> dict:
+    """Fallback to content-core extraction for URLs, text, media, unknown types."""
+    from typing import cast
 
     # Reuse the existing content_process node logic via a compatibility
     # shim: build a SourceState-compatible dict and call content_process.
     compat_state = {
-        "content_state": state.get("content_state") or {},
+        "content_state": content_state,
         "source_id": state.get("source_id", ""),
         "notebook_ids": state.get("notebook_ids", []),
         "apply_transformations": state.get("apply_transformations", []),
@@ -1114,7 +1210,6 @@ async def extract_stage(state: Source7StageState) -> dict:
         "source": state.get("source"),
         "transformation": [],
     }
-    from typing import cast
 
     try:
         result = await asyncio.wait_for(
