@@ -100,6 +100,55 @@ STALE_THRESHOLD_SECONDS = 300
 _last_ttl_sweep: float | None = None
 TTL_SWEEP_INTERVAL_SECONDS = 300.0
 
+# Batch mode: on Android 4 GB floor devices, heavy lane runs only when Ollama
+# is unloaded. When Ollama is loaded (serving chat/embedding), heavy jobs are
+# held until Ollama is unloaded. Gated by OPEN_NOTEBOOK_BATCH_MODE=1.
+_LAST_OLLAMA_CHECK: float | None = None
+OLLAMA_CHECK_INTERVAL_SECONDS = 30.0
+_OLLAMA_CACHED_BLOCKED: bool | None = None
+
+
+def _ollama_blocked() -> bool:
+    """Whether Ollama is currently loaded (heavy lane should be deferred).
+
+    Probes Ollama's /api/tags endpoint. Connection refused = unloaded = heavy
+    lane OK. Any successful response = loaded = heavy lane deferred.
+
+    Gated by OPEN_NOTEBOOK_BATCH_MODE=1 so PC deployments (where Ollama may
+    always be loaded) are unaffected. Throttled to once per
+    OLLAMA_CHECK_INTERVAL_SECONDS to avoid hammering Ollama on every pass.
+    """
+    global _LAST_OLLAMA_CHECK, _OLLAMA_CACHED_BLOCKED
+
+    if os.getenv("OPEN_NOTEBOOK_BATCH_MODE", "false").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return False
+
+    import time
+
+    now = time.monotonic()
+    if (
+        _LAST_OLLAMA_CHECK is not None
+        and (now - _LAST_OLLAMA_CHECK) < OLLAMA_CHECK_INTERVAL_SECONDS
+        and _OLLAMA_CACHED_BLOCKED is not None
+    ):
+        return _OLLAMA_CACHED_BLOCKED
+
+    import httpx
+
+    ollama_url = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    try:
+        with httpx.Client(timeout=httpx.Timeout(connect=2.0, read=2.0)) as client:
+            response = client.get(f"{ollama_url}/api/tags")
+        blocked = response.status_code == 200
+    except Exception:
+        blocked = False  # connection refused = unloaded = OK for heavy lane
+
+    _LAST_OLLAMA_CHECK = now
+    _OLLAMA_CACHED_BLOCKED = blocked
+    return blocked
+
 
 def device_cap() -> int:
     """This device's hardware ceiling.
@@ -752,6 +801,15 @@ async def dispatch_once(
         lane_cap = _LANE_CAPS.get(lane, _LANE_CAPS["instant"])
         if _in_flight_by_lane.get(lane, 0) >= lane_cap:
             reason = f"lane-cap:{lane}"
+            outcome.held_reasons[reason] = outcome.held_reasons.get(reason, 0) + 1
+            await _record_hold(str(row.get("id")), reason)
+            continue
+
+        # Batch mode: on Android 4 GB, heavy lane jobs run only when Ollama
+        # is unloaded. If Ollama is loaded, hold heavy jobs until it is
+        # unloaded. Instant/deferred lanes are unaffected.
+        if lane == "heavy" and _ollama_blocked():
+            reason = "ollama_loaded"
             outcome.held_reasons[reason] = outcome.held_reasons.get(reason, 0) + 1
             await _record_hold(str(row.get("id")), reason)
             continue

@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from loguru import logger
 from surreal_commands import CommandInput, CommandOutput, command
 
-from open_notebook.database.repository import ensure_record_id
+from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Asset, Notebook, Source
 from open_notebook.domain.site import Site
 from open_notebook.exceptions import ConfigurationError
@@ -60,32 +60,50 @@ async def _ingest_page(
     notebook_ids: List[str],
     transformations: List[str],
     embed: bool,
+    new_hash: str,
 ) -> bool:
-    """Create a ``Source`` for one crawled page, attach it to notebooks, and enqueue ingest.
+    """Create or update a ``Source`` for one crawled page and enqueue ingest.
 
-    Each page is handled in isolation so a single failure cannot abort the rest
-    of the crawl. ``notebook_ids`` must already be validated by the caller.
-    Returns ``True`` when the source was created and enqueued.
+    If a Source already exists for this URL+site_id (re-crawl with changed
+    content), its content_hash is updated and the job is re-submitted.
+    Otherwise a new Source is created. Each page is handled in isolation so
+    a single failure cannot abort the rest of the crawl.
+    Returns ``True`` when the source was created/updated and enqueued.
     """
     try:
-        async with INGEST_WRITE_LOCK:
-            source = Source(
-                title=_title_from_url(page_url),
-                asset=Asset(url=page_url),
-                site_id=ensure_record_id(site_id),
+        # Check whether a Source already exists for this URL on this site.
+        rows = await repo_query(
+            "SELECT id FROM source WHERE site_id = $site_id AND asset.url = $url",
+            {"site_id": ensure_record_id(site_id), "url": page_url},
+        )
+        if rows:
+            # Re-crawl with changed content: update hash, re-submit.
+            source_id = str(rows[0]["id"])
+            await repo_query(
+                "UPDATE $id MERGE $patch",
+                {
+                    "id": ensure_record_id(source_id),
+                    "patch": {"content_hash": new_hash},
+                },
             )
-            await source.save()
+        else:
+            async with INGEST_WRITE_LOCK:
+                source = Source(
+                    title=_title_from_url(page_url),
+                    asset=Asset(url=page_url),
+                    site_id=ensure_record_id(site_id),
+                )
+                await source.save()
+                source_id = str(source.id)
 
-            for notebook_id in notebook_ids:
-                # `validate=False`: notebooks were validated once up front by the
-                # command, so skip the full Notebook.get per relate.
-                await source.add_to_notebook(notebook_id, validate=False)
+                for notebook_id in notebook_ids:
+                    await source.add_to_notebook(notebook_id, validate=False)
 
         submit_held(
             "open_notebook",
             "process_source",
             {
-                "source_id": str(source.id),
+                "source_id": source_id,
                 "content_state": {"url": page_url},
                 "notebook_ids": notebook_ids,
                 "transformations": transformations,
@@ -122,8 +140,11 @@ async def crawl_site_command(input_data: CrawlSiteInput) -> CrawlSiteOutput:
     then submitted to the existing ``process_source`` command so content-core
     handles extraction, chunking, transformations, and embedding.
 
-    Re-crawling is incremental: pages already sourced for this site are skipped,
-    so the command is safe to re-run manually or after a transient failure.
+    Re-crawling is content-aware: each page's HTML is hashed and compared
+    against the stored ``content_hash``. Pages whose content hasn't changed are
+    skipped; only new or changed pages are (re)processed. This fixes the
+    previous behavior where re-crawls skipped all previously-seen URLs even
+    when their content had changed (Failure #2).
     """
     start_time = time.time()
     site_id = input_data.site_id
@@ -147,7 +168,21 @@ async def crawl_site_command(input_data: CrawlSiteInput) -> CrawlSiteOutput:
             input_data.max_pages if input_data.max_pages is not None else site.max_pages
         )
 
-        existing_urls = await site.get_source_urls()
+        # Get existing sources with content hashes for change detection.
+        existing_rows = await repo_query(
+            "SELECT id, asset.url, content_hash FROM source "
+            "WHERE site_id = $site_id AND asset.url != NONE",
+            {"site_id": ensure_record_id(site_id)},
+        )
+        existing_hashes: dict[str, str] = {}
+        for row in existing_rows or []:
+            asset = row.get("asset") or {}
+            url = asset.get("url")
+            ch = row.get("content_hash")
+            if url and ch:
+                existing_hashes[url] = ch
+
+        # Crawl with content-hash awareness: returns url → new_hash (or None if unchanged).
         pages = await crawl_site(
             site.url,
             user_agent=site.user_agent or DEFAULT_USER_AGENT,
@@ -155,7 +190,7 @@ async def crawl_site_command(input_data: CrawlSiteInput) -> CrawlSiteOutput:
             restrict_to_origin=site.restrict_to_origin,
             respect_robots_txt=site.respect_robots_txt,
             follow_sitemap=site.follow_sitemap,
-            existing_urls=existing_urls,
+            existing_hashes=existing_hashes,
         )
         logger.info(f"Crawled {len(pages)} pages for site {site_id}")
 
@@ -173,7 +208,7 @@ async def crawl_site_command(input_data: CrawlSiteInput) -> CrawlSiteOutput:
 
         semaphore = asyncio.Semaphore(INGEST_CONCURRENCY)
 
-        async def _bounded(page_url: str) -> bool:
+        async def _bounded(page_url: str, new_hash: Optional[str]) -> bool:
             async with semaphore:
                 return await _ingest_page(
                     page_url,
@@ -181,9 +216,16 @@ async def crawl_site_command(input_data: CrawlSiteInput) -> CrawlSiteOutput:
                     validated_notebooks,
                     input_data.transformations,
                     input_data.embed,
+                    new_hash,
                 )
 
-        results = await asyncio.gather(*(_bounded(url) for url in pages))
+        # Only submit pages that are new or changed (new_hash is not None).
+        to_process = [
+            (url, new_hash) for url, new_hash in pages.items() if new_hash is not None
+        ]
+        results = await asyncio.gather(
+            *(_bounded(url, new_hash) for url, new_hash in to_process)
+        )
         sources_created = sum(1 for ok in results if ok)
 
         processing_time = time.time() - start_time

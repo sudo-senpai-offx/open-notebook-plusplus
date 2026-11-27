@@ -12,6 +12,7 @@ crawler must never call ``httpx.get()`` directly on a user-supplied hostname.
 """
 
 import asyncio
+import hashlib
 from collections import deque
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -28,6 +29,21 @@ from open_notebook.utils.url_validation import (
 )
 
 DEFAULT_USER_AGENT = "OpenNotebookBot/1.0 (+site crawler)"
+
+
+def _html_content_hash(html: str) -> str:
+    """Compute a content hash from HTML, stripping boilerplate tags.
+
+    Strips <script>, <style>, <nav>, <footer>, <header> before hashing so
+    that boilerplate changes (e.g. a new analytics script) don't trigger
+    false "changed" detections. Returns the SHA-256 hex digest of the
+    remaining visible text.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header"]):
+        tag.decompose()
+    text = soup.get_text(separator=" ", strip=True)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 # DNS re-resolution is the expensive part of each fetch; hosts are few on any
 # crawl (same-origin bias), so cache the pinned netloc + Host/SNI overrides per
@@ -264,18 +280,23 @@ async def crawl_site(
     restrict_to_origin: bool = True,
     respect_robots_txt: bool = True,
     follow_sitemap: bool = True,
-    existing_urls: Optional[Set[str]] = None,
-) -> List[str]:
-    """Breadth-first crawl ``seed_url`` and return discovered page URLs.
+    existing_hashes: Optional[Dict[str, str]] = None,
+) -> Dict[str, Optional[str]]:
+    """Breadth-first crawl ``seed_url`` and return discovered pages with content hashes.
 
     Robots.txt is honored when ``respect_robots_txt`` is set (default), sitemap
     URLs seed the frontier when ``follow_sitemap`` is set, and discovered links
     outside the seed origin are dropped when ``restrict_to_origin`` is set.
-    Pages already present in ``existing_urls`` are never returned, so re-crawls
-    are incremental.
+
+    Returns a dict mapping each discovered page URL to its content hash:
+      - ``None``  → page already exists with identical content (unchanged, skip)
+      - ``str``   → page is new or content changed (re-process)
+
+    Unlike the old URL-only dedupe, this detects when an already-crawled page's
+    content has changed and returns its new hash so the caller can re-process it.
     """
     seed = _normalize_url(seed_url)
-    existing = existing_urls or set()
+    existing = existing_hashes or {}
 
     robots = await fetch_robots_txt(seed, user_agent) if respect_robots_txt else None
 
@@ -285,8 +306,6 @@ async def crawl_site(
         if restrict_to_origin and not _same_origin(url, seed):
             return False
         if robots is not None and not robots.can_fetch(user_agent, url):
-            return False
-        if url in existing:
             return False
         return True
 
@@ -304,7 +323,7 @@ async def crawl_site(
             seen.add(url)
             frontier.append(url)
 
-    discovered: List[str] = []
+    discovered: Dict[str, Optional[str]] = {}
     semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
 
     async def _fetch_bounded(url: str) -> Optional[httpx.Response]:
@@ -329,7 +348,14 @@ async def crawl_site(
             if "text/html" not in content_type and "xhtml" not in content_type:
                 continue
 
-            discovered.append(url)
+            # Compute content hash from fetched HTML and compare with stored hash.
+            new_hash = _html_content_hash(response.text)
+            stored_hash = existing.get(url)
+            if stored_hash == new_hash:
+                discovered[url] = None  # unchanged, skip re-processing
+            else:
+                discovered[url] = new_hash  # new or changed
+
             if len(discovered) >= max_pages:
                 break
 
