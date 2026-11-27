@@ -47,8 +47,11 @@ from open_notebook.scheduler.dispatcher import (
     DEFAULT_INTERVAL_SECONDS as READ_INTERVAL,
 )
 from open_notebook.scheduler.dispatcher import (
+    _get_ollama_residency,
     device_cap,
+    is_chat_idle,
     read_window,
+    set_batch_force_now,
     write_window,
 )
 from open_notebook.scheduler.gate import default_reserve
@@ -126,6 +129,25 @@ class LaneDepth(BaseModel):
 class QueueDepthResponse(BaseModel):
     lanes: List[LaneDepth] = Field(..., description="Per-lane depth and cap status")
     total_held: int = Field(..., description="Total held jobs across all lanes")
+    ollama_loaded: bool = Field(
+        ..., description="Whether Ollama has a model loaded in RAM"
+    )
+    chat_idle: bool = Field(
+        ...,
+        description="Whether chat has been idle for >= 5 minutes (heavy/deferred jobs may run)",
+    )
+    estimated_wait_seconds: int = Field(
+        ...,
+        description="Estimated seconds until the queue drains (held jobs × avg lane duration)",
+    )
+
+
+class BatchRunNowResponse(BaseModel):
+    accepted: bool = Field(..., description="Whether the batch run-now request was accepted")
+    batch_force_now: bool = Field(
+        ...,
+        description="Whether the force-now flag is set (bypasses chat-idle wait)",
+    )
 
 
 class TtlJobInfo(BaseModel):
@@ -359,7 +381,49 @@ async def queue_depth() -> QueueDepthResponse:
             )
         )
 
-    return QueueDepthResponse(lanes=lanes, total_held=total_held)
+    # Residency: whether Ollama has a model loaded in RAM.
+    ollama_loaded = False
+    try:
+        ollama = _get_ollama_residency()
+        if ollama is not None:
+            ollama_loaded = await ollama.is_loaded()
+    except Exception:  # noqa: BLE001 - best effort enrichment
+        logger.debug("ollama_loaded unavailable")
+
+    # Chat idle state: whether chat has been idle for >= 5 minutes.
+    try:
+        chat_idle = is_chat_idle()
+    except Exception:  # noqa: BLE001 - best effort enrichment
+        logger.debug("chat_idle unavailable")
+        chat_idle = False
+
+    # Estimated wait: held jobs × average lane duration.
+    # Heavy and deferred jobs are ~5 minutes; instant jobs are ~10 seconds.
+    lane_durations = {"instant": 10, "heavy": 300, "deferred": 300}
+    estimated_wait_seconds = sum(
+        lane.held * lane_durations.get(lane.lane, 0) for lane in lanes
+    )
+
+    return QueueDepthResponse(
+        lanes=lanes,
+        total_held=total_held,
+        ollama_loaded=ollama_loaded,
+        chat_idle=chat_idle,
+        estimated_wait_seconds=estimated_wait_seconds,
+    )
+
+
+@router.post("/processing/batch/run-now", response_model=BatchRunNowResponse)
+async def batch_run_now() -> BatchRunNowResponse:
+    """Bypass the 5-minute chat-idle wait and immediately unload Ollama,
+    then drain held heavy/deferred jobs.
+
+    Lets a user on Android tap "Run Batch Now" in the UI to force the next
+    dispatcher pass to unload Ollama and admit heavy/deferred jobs even while
+    chat is active.
+    """
+    set_batch_force_now(True)
+    return BatchRunNowResponse(accepted=True, batch_force_now=True)
 
 
 @router.get("/processing/ttl-info", response_model=TtlInfoResponse)

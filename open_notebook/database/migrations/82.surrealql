@@ -1,0 +1,30 @@
+-- Migration 82: Formalize job_checkpoint table with schema + composite index
+--
+-- The job_checkpoint table was previously SCHEMALESS (auto-created by UPSERT
+-- from JobCheckpoint.upsert_for_command). This migration formalizes it as
+-- SCHEMAFULL with typed fields so that checkpoint lookups on Android eMMC
+-- never fall back to full table scans.
+--
+-- Fields match what JobCheckpoint.upsert_for_command writes:
+--   command_id, checkpoint, attempt_count, max_attempts,
+--   last_attempt_at, created_at, updated_at, updated
+-- (repo_upsert with add_timestamp=True adds the `updated` field.)
+
+-- 1. Make job_checkpoint a SCHEMAFULL table
+DEFINE TABLE IF NOT EXISTS job_checkpoint SCHEMAFULL;
+
+-- 2. Typed fields matching JobCheckpoint's write payload
+DEFINE FIELD IF NOT EXISTS command_id ON job_checkpoint TYPE string;
+DEFINE FIELD IF NOT EXISTS checkpoint ON job_checkpoint TYPE object;
+DEFINE FIELD IF NOT EXISTS attempt_count ON job_checkpoint TYPE int;
+DEFINE FIELD IF NOT EXISTS max_attempts ON job_checkpoint TYPE int;
+DEFINE FIELD IF NOT EXISTS last_attempt_at ON job_checkpoint TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created_at ON job_checkpoint TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated_at ON job_checkpoint TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON job_checkpoint TYPE option<datetime>;
+
+-- 3. Composite index for checkpoint lookups.
+--    command_id is the record key suffix (job_checkpoint:<command_id>).
+--    checkpoint.stage and checkpoint.position are the nested fields used
+--    by intra-stage resume logic (find where a job left off).
+DEFINE INDEX IF NOT EXISTS idx_job_checkpoint_lookup ON job_checkpoint FIELDS command_id, checkpoint.stage, checkpoint.position;

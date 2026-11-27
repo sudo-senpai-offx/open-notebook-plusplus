@@ -1,0 +1,11 @@
+-- Migration 82 down: Remove job_checkpoint schema + composite index
+REMOVE INDEX IF EXISTS idx_job_checkpoint_lookup ON job_checkpoint;
+REMOVE FIELD IF NOT EXISTS updated ON job_checkpoint;
+REMOVE FIELD IF NOT EXISTS updated_at ON job_checkpoint;
+REMOVE FIELD IF NOT EXISTS created_at ON job_checkpoint;
+REMOVE FIELD IF NOT EXISTS last_attempt_at ON job_checkpoint;
+REMOVE FIELD IF NOT EXISTS max_attempts ON job_checkpoint;
+REMOVE FIELD IF NOT EXISTS attempt_count ON job_checkpoint;
+REMOVE FIELD IF NOT EXISTS checkpoint ON job_checkpoint;
+REMOVE FIELD IF NOT EXISTS command_id ON job_checkpoint;
+REMOVE TABLE IF EXISTS job_checkpoint;

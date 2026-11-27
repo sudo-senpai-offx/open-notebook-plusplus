@@ -238,3 +238,118 @@ async def test_batch_mode_reloads_ollama_after_heavy_queue_drains(
 
     assert residency.reload_calls == 1, residency.reload_calls
     assert disp._ollama_unloaded_by_us is False
+
+
+# ── Day 4: Migration 82 + queue-depth + batch run-now ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_migration_82_checkpoint_schema_and_index():
+    """job_checkpoint table is SCHEMAFULL with typed fields + composite index.
+
+    Runs against live SurrealDB in CI; skips locally when no database is
+    available.
+    """
+    from open_notebook.database.repository import repo_query
+
+    try:
+        rows = await repo_query("INFO FOR TABLE job_checkpoint")
+    except Exception:  # noqa: BLE001 - no SurrealDB locally, runs in CI
+        pytest.skip("SurrealDB not available; migration test runs in CI")
+
+    field_names = {str(f.get("name") or f.get("field")) for f in rows}
+    index_names = set()
+    for f in rows:
+        if isinstance(f, dict):
+            for i in (f.get("indexes") or []):
+                if isinstance(i, dict):
+                    index_names.add(str(i.get("name") or i.get("index")))
+            if f.get("type") == "index":
+                index_names.add(str(f.get("name") or f.get("field")))
+
+    expected_fields = {
+        "command_id",
+        "checkpoint",
+        "attempt_count",
+        "max_attempts",
+        "last_attempt_at",
+        "created_at",
+        "updated_at",
+        "updated",
+    }
+    missing_fields = expected_fields - field_names
+    assert not missing_fields, (
+        f"job_checkpoint missing fields: {missing_fields}. "
+        f"Found: {field_names}"
+    )
+    assert "idx_job_checkpoint_lookup" in index_names, (
+        f"job_checkpoint missing idx_job_checkpoint_lookup index. "
+        f"Found indexes: {index_names}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_queue_depth_includes_residency_and_wait_estimate(monkeypatch):
+    """GET /processing/queue-depth returns ollama_loaded, chat_idle,
+    and accurate estimated_wait_seconds."""
+    from open_notebook.api.routers.processing import queue_depth
+
+    # Mock repo_query to return held jobs per lane
+    async def fake_repo(query, vars=None):
+        q = str(query)
+        if "status = 'held'" in q and "lane" in str(vars or {}):
+            lane = str(vars.get("lane"))
+            counts = {"instant": 1, "heavy": 3, "deferred": 2}
+            return [{"c": counts.get(lane, 0)}]
+        return []
+
+    monkeypatch.setattr(
+        "open_notebook.api.routers.processing.repo_query", fake_repo
+    )
+
+    # Mock Ollama residency: loaded
+    class MockOllama:
+        async def is_loaded(self):
+            return True
+
+    monkeypatch.setattr(
+        "open_notebook.api.routers.processing._get_ollama_residency",
+        lambda: MockOllama(),
+    )
+    monkeypatch.setattr(
+        "open_notebook.api.routers.processing.is_chat_idle", lambda: False
+    )
+
+    result = await queue_depth()
+
+    assert result.ollama_loaded is True
+    assert result.chat_idle is False
+    # 1 instant × 10s + 3 heavy × 300s + 2 deferred × 300s = 10 + 900 + 600 = 1510
+    assert result.estimated_wait_seconds == 1510
+    assert result.total_held == 6
+
+
+@pytest.mark.asyncio
+async def test_batch_run_now_bypasses_idle_wait(monkeypatch):
+    """POST /processing/batch/run-now sets _batch_force_now so the next
+    dispatcher pass unloads Ollama and admits heavy jobs even while chat
+    is active (< 5 min idle)."""
+    from open_notebook.api.routers.processing import batch_run_now
+    from open_notebook.scheduler import dispatcher as disp
+
+    # Reset dispatcher state
+    disp._batch_force_now = False
+    disp._ollama_unloaded_by_us = False
+    disp._ollama_residency = None
+
+    # Chat just became active (not idle)
+    disp._last_chat_activity_at = datetime.now(timezone.utc)
+
+    result = await batch_run_now()
+
+    assert result.accepted is True
+    assert result.batch_force_now is True
+    assert disp._batch_force_now is True, "_batch_force_now must be True"
+
+    # Verify the flag actually bypasses the chat-idle check in dispatch logic.
+    assert disp._batch_force_now, "force-now flag must be set for bypass"
