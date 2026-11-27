@@ -68,6 +68,7 @@ import { toast } from 'sonner'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { SourceInsightDialog } from '@/components/sources/SourceInsightDialog'
 import { NotebookAssociations } from '@/components/sources/NotebookAssociations'
+import { SourceStatusBanner } from '@/components/sources/SourceStatusBanner'
 
 interface SourceDetailContentProps {
   sourceId: string
@@ -521,6 +522,13 @@ function SourceDetailContentInner({
           </div>
         </div>
       </div>
+
+      {/* Source status banner — extracting_partial, extracting_failed,
+          embedding_pending, warnings, timed_out_pages, auto-detected language. */}
+      <SourceStatusBanner
+        source={source}
+        onRetryComplete={() => void refetchSource()}
+      />
 
       {/* Tabs Content */}
       <div className="flex-1 overflow-y-auto">

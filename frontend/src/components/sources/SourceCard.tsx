@@ -22,7 +22,10 @@ import {
   CheckCircle,
   AlertTriangle,
   Loader2,
-  Unlink
+  Unlink,
+  AlertCircle,
+  Clock as ClockIcon,
+  Database,
 } from 'lucide-react'
 import { useSourceStatus } from '@/lib/hooks/use-sources'
 import { useTranslation } from '@/lib/hooks/use-translation'
@@ -49,6 +52,17 @@ const SOURCE_TYPE_ICONS = {
   link: ExternalLink,
   upload: Upload,
   text: FileText,
+} as const
+
+const SOURCE_STATUS_ICONS = {
+  new: Clock,
+  queued: Clock,
+  running: Loader2,
+  completed: CheckCircle,
+  failed: AlertTriangle,
+  extracting_partial: AlertCircle,
+  extracting_failed: AlertCircle,
+  embedding_pending: Database,
 } as const
 
 const getStatusConfig = (t: TFunction) => ({
@@ -91,13 +105,54 @@ const getStatusConfig = (t: TFunction) => ({
     borderColor: 'border-destructive/30',
     label: t('sources.statusFailed'),
     description: t('sources.statusFailedDesc')
+  },
+  extracting_partial: {
+    icon: AlertCircle,
+    color: 'text-amber',
+    bgColor: 'bg-amber-tint',
+    borderColor: 'border-amber/30',
+    label: t('sources.statusExtractingPartial'),
+    description: t('sources.statusExtractingPartialDesc')
+  },
+  extracting_failed: {
+    icon: AlertCircle,
+    color: 'text-destructive',
+    bgColor: 'bg-destructive-tint',
+    borderColor: 'border-destructive/30',
+    label: t('sources.statusExtractingFailed'),
+    description: t('sources.statusExtractingFailedDesc')
+  },
+  embedding_pending: {
+    icon: Database,
+    color: 'text-blue',
+    bgColor: 'bg-blue-tint',
+    borderColor: 'border-blue/30',
+    label: t('sources.statusEmbeddingPending'),
+    description: t('sources.statusEmbeddingPendingDesc')
   }
 } as const)
 
-type SourceStatus = 'new' | 'queued' | 'running' | 'completed' | 'failed'
+type SourceStatus =
+  | 'new'
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'extracting_partial'
+  | 'extracting_failed'
+  | 'embedding_pending'
 
 function isSourceStatus(status: unknown): status is SourceStatus {
-  return typeof status === 'string' && ['new', 'queued', 'running', 'completed', 'failed'].includes(status)
+  return typeof status === 'string' && [
+    'new',
+    'queued',
+    'running',
+    'completed',
+    'failed',
+    'extracting_partial',
+    'extracting_failed',
+    'embedding_pending'
+  ].includes(status)
 }
 
 function getSourceType(source: SourceListResponse): 'link' | 'upload' | 'text' {
@@ -294,6 +349,22 @@ function SourceCardImpl({
                 </>
               )}
             </div>
+
+            {/* Warnings / timed-out pages for non-ready statuses */}
+            {((source as SourceListResponse & { warnings?: string[]; timed_out_pages?: number[] }).warnings?.length ?? 0) > 0 && (
+              <p className="text-xs text-amber-600 mb-1 italic">
+                {(source as SourceListResponse & { warnings?: string[] }).warnings
+                  ?.slice(0, 2)
+                  .join('; ')}
+              </p>
+            )}
+            {((source as SourceListResponse & { timed_out_pages?: number[] }).timed_out_pages?.length ?? 0) > 0 && (
+              <p className="text-xs text-amber-600 mb-1 italic">
+                Pages {(source as SourceListResponse & { timed_out_pages?: number[] }).timed_out_pages
+                  ?.slice(0, 3)
+                  .join(', ')} timed out
+              </p>
+            )}
           </div>
 
           {/* Context toggle and actions */}

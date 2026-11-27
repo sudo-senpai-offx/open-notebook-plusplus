@@ -110,6 +110,19 @@ export const sourcesApi = {
     return response.data
   },
 
+  /** Re-run processing for a failed/partial source. Optionally updates the
+   *  source's language first (for STT re-processing after correcting the
+   *  detected language), then submits the retry command. */
+  retrySource: async (id: string, options?: { language?: string }) => {
+    // If a language override is supplied, persist it first so the retry uses
+    // the corrected language (e.g. after a Whisper auto-detection was wrong).
+    if (options?.language !== undefined) {
+      await apiClient.put(`/sources/${id}`, { language: options.language })
+    }
+    const response = await apiClient.post<SourceResponse>(`/sources/${id}/retry`)
+    return response.data
+  },
+
   downloadFile: async (id: string): Promise<AxiosResponse<Blob>> => {
     return apiClient.get(`/sources/${id}/download`, {
       responseType: 'blob',
