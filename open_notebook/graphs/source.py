@@ -62,6 +62,14 @@ CHECKPOINT_EXTRACT_PAGES = 5
 CHECKPOINT_CHUNK_EVERY = 250
 CHECKPOINT_EMBED_EVERY = 50
 
+# Per-stage timeouts (Week 3: Failure #3 fix — large PDF 60s silent timeout).
+# Replaces the single 60s execute_command_sync timeout with per-stage limits.
+# Gated by env so deployments can tune per device.
+STAGE_TIMEOUT_EXTRACT = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_EXTRACT", "300"))
+STAGE_TIMEOUT_CHUNK = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_CHUNK", "30"))
+STAGE_TIMEOUT_EMBED = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_EMBED", "120"))
+STAGE_TIMEOUT_INDEX = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_INDEX", "60"))
+
 
 class SourceState(TypedDict):
     # Input describing what to extract: url / file_path / content / delete_source.
@@ -1109,7 +1117,18 @@ async def extract_stage(state: Source7StageState) -> dict:
     from typing import cast
 
     try:
-        result = await content_process(cast(SourceState, compat_state))
+        result = await asyncio.wait_for(
+            content_process(cast(SourceState, compat_state)),
+            timeout=STAGE_TIMEOUT_EXTRACT,
+        )
+    except asyncio.TimeoutError:
+        errors.append(f"extract: timeout after {STAGE_TIMEOUT_EXTRACT}s")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
         errors.append(f"extract: {exc}")
         return {
@@ -1233,9 +1252,18 @@ async def chunk_stage(state: Source7StageState) -> dict:
     file_path = content_state.get("file_path")
 
     try:
-        chunk_infos = chunk_text_with_coords(
-            normalized_text, file_path=file_path
+        chunk_infos = await asyncio.wait_for(
+            asyncio.to_thread(chunk_text_with_coords, normalized_text, file_path=file_path),
+            timeout=STAGE_TIMEOUT_CHUNK,
         )
+    except asyncio.TimeoutError:
+        errors.append(f"chunk: timeout after {STAGE_TIMEOUT_CHUNK}s")
+        return {
+            "chunks": [],
+            "chunk_infos": [],
+            "errors": errors,
+            "stage": "chunk",
+        }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
         errors.append(f"chunk: {exc}")
         return {
@@ -1308,10 +1336,21 @@ async def embed_stage(state: Source7StageState) -> dict:
     )
 
     try:
-        embeddings = await generate_embeddings(
-            chunks,
-            command_id=cmd_id,
+        embeddings = await asyncio.wait_for(
+            generate_embeddings(
+                chunks,
+                command_id=cmd_id,
+            ),
+            timeout=STAGE_TIMEOUT_EMBED,
         )
+    except asyncio.TimeoutError:
+        errors.append(f"embed: timeout after {STAGE_TIMEOUT_EMBED}s")
+        return {
+            "embeddings": [],
+            "embedded_count": 0,
+            "errors": errors,
+            "stage": "embed",
+        }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
         errors.append(f"embed: {exc}")
         return {
@@ -1451,12 +1490,18 @@ async def index_stage(state: Source7StageState) -> dict:
         if not normalized_text.strip():
             continue
         try:
-            result = await transform_graph.ainvoke(  # type: ignore[call-overload]
-                dict(input_text=normalized_text, transformation=transformation),
-                config=RunnableConfig(configurable={"model_id": transformation.model_id}),
+            result = await asyncio.wait_for(
+                transform_graph.ainvoke(  # type: ignore[call-overload]
+                    dict(input_text=normalized_text, transformation=transformation),
+                    config=RunnableConfig(configurable={"model_id": transformation.model_id}),
+                ),
+                timeout=STAGE_TIMEOUT_INDEX,
             )
             await source.add_insight(transformation.title, result["output"])
             insights_created += 1
+        except asyncio.TimeoutError:
+            errors.append(f"index: transformation {transformation.name} timeout after {STAGE_TIMEOUT_INDEX}s")
+            continue
         except Exception as exc:  # noqa: BLE001 - capture for compensation
             errors.append(f"index: transformation {transformation.name} failed: {exc}")
 

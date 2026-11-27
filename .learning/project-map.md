@@ -85,6 +85,7 @@ Training flow: ? (no trainer exists; tier gate → subprocess/sidecar → artifa
 - 2026-11-27 · Poly-pipeline week 2 (Day 2): source_commands.py integration verified — process_source_command passes compatible state fields to source_graph.ainvoke; all command registrations load cleanly.
 - 2026-11-27 · Locale work deferred — ~50 new poly-pipeline keys English-only during build; translation deferred to post-stabilization (zh-CN/zh-TW/ja-JP existing 1,884 keys already complete).
 - 2026-11-27 · Poly-pipeline week 3 (Day 1): Failure #2 fix — site re-crawl content-aware (crawler.py `_html_content_hash`, `crawl_site()` accepts `existing_hashes` dict, returns url→new_hash/None; site_commands.py queries existing sources with hashes, only re-processes changed/new pages). Batch mode orchestrator — dispatcher.py `_ollama_blocked()` probes Ollama `/api/tags`, heavy lane held when Ollama loaded (gated by OPEN_NOTEBOOK_BATCH_MODE=1, throttled 30s). All 53 tests pass, tsc clean.
+- 2026-11-27 · Poly-pipeline week 3 (Day 2): Failure #3 fix — per-stage timeouts replace single 60s timeout. extract 300s, chunk 30s, embed 120s, index 60s (env-overridable via OPEN_NOTEBOOK_STAGE_TIMEOUT_*). Each stage catches asyncio.TimeoutError and routes to compensation handler. All 53 tests pass, tsc clean.
 ## Unknowns
 - Lease-state query fields for the governor's lease guard (T3).
 - Exact tier cutoffs locked per T2 spec; revisit after T5 prototype measurements.
