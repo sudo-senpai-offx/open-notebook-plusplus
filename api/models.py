@@ -91,12 +91,17 @@ class NotebookScopeMixin(BaseModel):
 
 class SearchRequest(NotebookScopeMixin):
     query: str = Field(..., description="Search query")
-    type: Literal["text", "vector"] = Field("text", description="Search type")
-    limit: int = Field(100, description="Maximum number of results", ge=1, le=1000)
+    type: Literal["text", "vector", "hybrid"] = Field(
+        "hybrid", description="Search type: text, vector, or hybrid"
+    )
+    mode: Literal["hybrid", "vector", "text"] = Field(
+        "hybrid", description="Search mode: hybrid (RRF), vector, or text (FTS only)"
+    )
+    limit: int = Field(20, description="Maximum number of results", ge=1, le=100)
     search_sources: bool = Field(True, description="Include sources in search")
     search_notes: bool = Field(True, description="Include notes in search")
     minimum_score: float = Field(
-        0.2, description="Minimum score for vector search", ge=0, le=1
+        0.62, description="Minimum cosine similarity for vector search", ge=0, le=1
     )
 
 
@@ -111,11 +116,34 @@ class AskRequest(NotebookScopeMixin):
     strategy_model: str = Field(..., description="Model ID for query strategy")
     answer_model: str = Field(..., description="Model ID for individual answers")
     final_answer_model: str = Field(..., description="Model ID for final answer")
+    allow_general_knowledge: bool = Field(
+        False,
+        description="Allow general knowledge fallback when sources don't cover the question",
+    )
+    stream: bool = Field(
+        True, description="Stream the response via SSE (true) or return JSON (false)"
+    )
+    session_id: Optional[str] = Field(
+        None, description="Session ID for topic drift tracking"
+    )
 
 
 class AskResponse(BaseModel):
     answer: str = Field(..., description="Final answer from the knowledge base")
     question: str = Field(..., description="Original question")
+    grounded: bool = Field(
+        True, description="Whether the answer is grounded in sources"
+    )
+    mode: str = Field("rag", description="Answering mode: rag or extractive_fallback")
+    model: str | None = Field(None, description="Model used for the answer")
+    provider: str | None = Field(None, description="Provider used for the answer")
+    tokens_used: dict | None = Field(
+        None, description="Token usage {prompt, completion}"
+    )
+    citations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Structured citations with coordinates and verification",
+    )
 
 
 # Models API models
@@ -224,6 +252,58 @@ class TransformationExecuteResponse(BaseModel):
     output: str = Field(..., description="Transformed text")
     transformation_id: str = Field(..., description="ID of the transformation used")
     model_id: Optional[str] = Field(None, description="Model ID used")
+    model_tier: str = Field("local", description="Model tier: cloud|cloud_free|local")
+    is_sandbox: bool = Field(False, description="Whether this was a sandbox run")
+    cached: bool = Field(False, description="Whether result was served from cache")
+    map_reduce_used: bool = Field(
+        False, description="Whether Map-Reduce was triggered (70% context window)"
+    )
+    citations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Structured citations with coordinates",
+    )
+
+
+class TransformationTestingGroundRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    transformation_id: str = Field(..., description="ID of the transformation to test")
+    input_text: Optional[str] = Field(None, description="Text to transform (required if no source_id)")
+    source_id: Optional[str] = Field(None, description="Source ID to extract text from")
+    prompt_override: Optional[str] = Field(None, description="Inline prompt override for testing")
+    model_id: Optional[str] = Field(None, description="Model ID to use for this run")
+
+
+class TransformationTestingGroundResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    output: str = Field(..., description="Transformed text")
+    transformation_id: str = Field(..., description="ID of the transformation used")
+    model_id: Optional[str] = Field(None, description="Model ID used")
+    prompt_used: str = Field(..., description="The actual prompt sent to the model")
+    token_count: int = Field(0, description="Estimated token count of output")
+    estimated_cost: float = Field(0.0, description="Estimated cost in USD")
+    input_chars: int = Field(0, description="Character count of input")
+    output_chars: int = Field(0, description="Character count of output")
+    is_sandbox: bool = Field(True, description="Whether this was a sandbox run")
+    cached: bool = Field(False, description="Whether result was served from cache")
+
+
+class TransformationRunResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    id: str
+    template_id: Optional[str]
+    input_hash: str
+    model_tier: str
+    model: Optional[str]
+    status: str
+    input_chunk_ids: List[str]
+    output_source_id: Optional[str]
+    error_message: Optional[str]
+    created_at: Optional[str]
+    completed_at: Optional[str]
+    is_sandbox: bool
 
 
 # Default Prompt API models
@@ -343,6 +423,26 @@ class SettingsResponse(BaseModel):
     gemini_api_key: Optional[str] = None
     duck_ai_url: Optional[str] = None
     duck_ai_default_model: Optional[str] = None
+    # Session-level cloud/local switching.
+    session_cloud_local_switching: Optional[bool] = None
+    # Context compaction auto-trigger threshold (0.0-1.0).
+    session_auto_compaction_threshold: Optional[float] = None
+    # Hard limit for auto-compaction (0.0-1.0).
+    session_auto_compaction_hard_limit: Optional[float] = None
+    # Days before high-priority sessions become eligible for auto-compaction.
+    session_high_priority_timeout_days: Optional[int] = None
+    # Session lazy loading enabled.
+    session_lazy_load_enabled: Optional[bool] = None
+
+
+class SessionStatusResponse(BaseModel):
+    session_id: Optional[str] = None
+    local_processing_enabled: Optional[bool] = None
+    cloud_processing_enabled: Optional[bool] = None
+    browser_session_active: Optional[bool] = None
+    last_refresh_at: Optional[str] = None
+    rate_limits: Optional[dict] = None
+    allow_local_processing: Optional[bool] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -363,6 +463,16 @@ class SettingsUpdate(BaseModel):
     gemini_api_key: Optional[str] = None
     duck_ai_url: Optional[str] = None
     duck_ai_default_model: Optional[str] = None
+    # Session-level cloud/local switching.
+    session_cloud_local_switching: Optional[bool] = None
+    # Context compaction auto-trigger threshold (0.0-1.0).
+    session_auto_compaction_threshold: Optional[float] = None
+    # Hard limit for auto-compaction (0.0-1.0).
+    session_auto_compaction_hard_limit: Optional[float] = None
+    # Days before high-priority sessions become eligible for auto-compaction.
+    session_high_priority_timeout_days: Optional[int] = None
+    # Session lazy loading enabled.
+    session_lazy_load_enabled: Optional[bool] = None
 
 
 # Sources API models
@@ -475,6 +585,15 @@ class SourceResponse(BaseModel):
     command_id: Optional[str] = None
     status: Optional[str] = None
     processing_info: Optional[Dict] = None
+    # Extraction observability (Week 5 Day 5 / Week 6 Day 1)
+    warnings: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Extraction warnings (partial timeouts, low confidence, etc.)",
+    )
+    timed_out_pages: Optional[List[int]] = Field(
+        default_factory=list,
+        description="Page/segment indices that timed out during extraction",
+    )
     # Notebook associations
     notebooks: Optional[List[str]] = None
 
@@ -501,6 +620,15 @@ class SourceListResponse(BaseModel):
     command_id: Optional[str] = None
     status: Optional[str] = None
     processing_info: Optional[Dict[str, Any]] = None
+    # Extraction observability (Week 5 Day 5 / Week 6 Day 1)
+    warnings: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Extraction warnings (partial timeouts, low confidence, etc.)",
+    )
+    timed_out_pages: Optional[List[int]] = Field(
+        default_factory=list,
+        description="Page/segment indices that timed out during extraction",
+    )
 
 
 # Insights API models

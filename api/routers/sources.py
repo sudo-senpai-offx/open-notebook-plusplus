@@ -569,6 +569,9 @@ def _source_to_response(
         "full_text": source.full_text,
         "embedded": embedded_chunks > 0,
         "embedded_chunks": embedded_chunks,
+        # Extraction observability (Week 5 Day 5 / Week 6 Day 1)
+        "warnings": source.warnings or [],
+        "timed_out_pages": source.timed_out_pages or [],
         "created": str(source.created),
         "updated": str(source.updated),
     }
