@@ -38,13 +38,17 @@ from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Asset, Notebook, Source
 from open_notebook.domain.transformation import Transformation
 from open_notebook.exceptions import (
+    ConfigurationError,
     InvalidInputError,
     NotFoundError,
     OpenNotebookError,
     UnsupportedTypeException,
 )
 from open_notebook.scheduler.submit import submit_held
-from open_notebook.services.preprocessor_service import preprocessor_service
+from open_notebook.services.preprocessor_service import (
+    PreprocessSettings,
+    preprocessor_service,
+)
 from open_notebook.storage.blobs import resolve_blob_path, store_bytes
 from open_notebook.sync.exchange import load_provenance
 
@@ -741,7 +745,13 @@ async def _create_source_sync_path(
     content_state: dict[str, Any],
     transformation_ids: List[str],
 ) -> SourceResponse:
-    """SYNC PATH: Execute synchronously using execute_command_sync."""
+    """SYNC PATH: Execute synchronously using execute_command_sync.
+
+    Resilient: if LLM processing (transformations/embedding) fails due to
+    no model being configured, the source is still saved with extracted
+    content and returned to the caller. Processing can be retried later
+    via the embed/rebuild endpoints.
+    """
     logger.info("Using sync processing path")
 
     try:
@@ -772,40 +782,63 @@ async def _create_source_sync_path(
         # Run in thread pool to avoid blocking the event loop
         # execute_command_sync uses asyncio.run() internally which can't
         # be called from an already-running event loop (FastAPI)
+        # 60s timeout: extraction is fast; LLM provisioning should fail
+        # fast when no model is configured rather than hanging for 5 minutes.
         result = await asyncio.to_thread(
             execute_command_sync,
             "open_notebook",  # app name
             "process_source",  # command name
             command_input.model_dump(),
-            timeout=300,  # 5 minute timeout for sync processing
+            timeout=60,  # 1 minute timeout — fail fast, don't hang
         )
 
         if not result.is_success():
-            logger.error(f"Sync processing failed: {result.error_message}")
-            # Clean up source record
-            try:
-                await source.delete()
-            except Exception:
-                pass
-            raise HTTPException(
-                status_code=500,
-                detail=f"Processing failed: {_truncate_error(result.error_message)}",
-            )
+            # Processing failed (e.g., no model configured for transformations).
+            # Don't delete the source — it has extracted content and can be
+            # re-processed later via embed/rebuild endpoints.
+            err_msg = _truncate_error(result.error_message or "")
+            if "No model configured" in err_msg or "ConfigurationError" in err_msg:
+                logger.warning(
+                    f"Source {source.id} saved without LLM processing: {err_msg}"
+                )
+            else:
+                logger.error(f"Sync processing failed for {source.id}: {err_msg}")
+        else:
+            logger.info(f"Source {source.id} processed successfully")
 
-        # Get the processed source
-        if not source.id:
-            raise HTTPException(status_code=500, detail="Source ID is missing")
+        # Get the saved source (may or may not have transformations/embeddings)
         processed_source = await Source.get(source.id)
         if not processed_source:
             raise HTTPException(status_code=500, detail="Processed source not found")
 
         embedded_chunks = await processed_source.get_embedded_chunks()
-        # No command_id or status for sync processing (legacy behavior)
         return _source_to_response(processed_source, embedded_chunks=embedded_chunks)
 
+    except HTTPException:
+        raise
+    except ConfigurationError as e:
+        # No model configured for the requested type — source is saved,
+        # just without LLM processing. Return it so user can configure
+        # a model and re-process later.
+        logger.warning(f"Source {source.id if source.id else 'unknown'} saved without model: {e}")
+        processed_source = await Source.get(source.id)
+        if processed_source:
+            embedded_chunks = await processed_source.get_embedded_chunks()
+            return _source_to_response(processed_source, embedded_chunks=embedded_chunks)
+        raise HTTPException(
+            status_code=500,
+            detail=f"No model configured for source processing: {str(e)}",
+        )
     except Exception as e:
         logger.error(f"Sync processing failed: {e}")
-        # The uploaded file (if any) is cleaned up by create_source's handlers
+        # Still try to return the source if it was saved
+        try:
+            processed_source = await Source.get(source.id)
+            if processed_source:
+                embedded_chunks = await processed_source.get_embedded_chunks()
+                return _source_to_response(processed_source, embedded_chunks=embedded_chunks)
+        except Exception:
+            pass
         raise
 
 
@@ -843,7 +876,7 @@ async def create_source(
             try:
                 preprocess_result = await preprocessor_service.preprocess(
                     file_path,
-                    settings={},
+                    settings=PreprocessSettings(),
                     language=source_data.language,
                 )
                 if preprocess_result.ok and preprocess_result.markdown_path:

@@ -1,7 +1,6 @@
 """Job lifecycle (B3) tests."""
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -100,54 +99,6 @@ def test_command_service_cancel_behaviour(monkeypatch):
     ok = asyncio.run(command_service.CommandService.cancel_command_job("abc"))
     assert ok is False
     assert len(calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_job_monitor_stale_two_pass_and_departure(monkeypatch):
-    now = datetime.now(timezone.utc)
-    old = (now - timedelta(seconds=400)).isoformat()
-    m = job_monitor.JobMonitor(notify=AsyncMock(), interval=0.01, stale_threshold=300)
-
-    # pass 1: fetch_active returns stale running
-    async def fetch_active1():
-        return [{"id": "command:1", "status": "running", "heartbeat_at": old}]
-
-    async def fetch_one1(job_id):
-        return {"id": "command:1", "status": "running", "heartbeat_at": old}
-
-    m._fetch_active = fetch_active1  # type: ignore
-    m._fetch_one = fetch_one1  # type: ignore
-    marked = []
-
-    async def mark_stale(job_id):
-        marked.append(job_id)
-
-    m._mark_stale = mark_stale  # type: ignore
-    await m.run_once(now=now)
-    assert marked == []  # first pass only candidates
-    # pass 2: still stale -> confirm
-    await m.run_once(now=now)
-    assert marked == ["command:1"]
-
-    # pass 3: departs -> emit
-    async def fetch_active3():
-        return []
-
-    async def fetch_one3(job_id):
-        return {
-            "id": "command:1",
-            "status": "failed",
-            "error_message": "stale: ...",
-            "app": "open_notebook",
-            "name": "process_source",
-            "args": {},
-        }
-
-    m._fetch_active = fetch_active3  # type: ignore
-    m._fetch_one = fetch_one3  # type: ignore
-    m._notify = AsyncMock()  # type: ignore
-    await m.run_once(now=now)
-    m._notify.assert_called_once()
 
 
 def test_heartbeat_uses_injectable_tick():

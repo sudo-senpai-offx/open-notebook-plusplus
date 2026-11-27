@@ -25,11 +25,30 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from loguru import logger
+from pydantic import BaseModel, Field
 
 from open_notebook.services.stt_service import stt_service
 
 #: File groups with per-group preprocessing toggles (B6).
 FILE_GROUPS = {"documents", "audio", "image", "video"}
+
+
+class PreprocessSettings(BaseModel):
+    """Per-group preprocessing toggles with conservative defaults (off).
+
+    When instantiated with no arguments (PreprocessSettings()), every group
+    is disabled. Callers that want preprocessing must explicitly enable each
+    group. This prevents unexpected preprocessing on upload.
+    """
+
+    documents: bool = Field(default=False, description="Preprocess document files (PDF, DOCX, etc.)")
+    audio: bool = Field(default=False, description="Preprocess audio files (transcription)")
+    image: bool = Field(default=False, description="Preprocess image files (OCR + caption)")
+    video: bool = Field(default=False, description="Preprocess video files (audio extraction + transcription)")
+
+    def get(self, key: str, default: bool = False) -> bool:
+        """Dict-compatible access for existing callers."""
+        return getattr(self, key, default)
 
 #: Unsupported/misc extensions where preprocessing is force-enabled (B6).
 _FORCE_EXTENSIONS = {
@@ -117,15 +136,16 @@ class PreprocessorService:
     # Settings
     # ------------------------------------------------------------------
 
-    def group_enabled(self, group: str, settings: dict) -> bool:
+    def group_enabled(self, group: str, settings: dict | PreprocessSettings) -> bool:
         """Whether preprocessing is enabled for a file group.
 
         Unsupported/misc types are force-enabled (B6).
+        Conservative defaults: when settings is empty, every group is off.
         """
         if group not in FILE_GROUPS:
             return False
         key = f"preprocess_{group}"
-        return bool(settings.get(key, True))
+        return bool(settings.get(key, False))
 
     # ------------------------------------------------------------------
     # Single file
@@ -135,7 +155,7 @@ class PreprocessorService:
         self,
         source_path: str | Path,
         *,
-        settings: Optional[dict] = None,
+        settings: Optional[dict | PreprocessSettings] = None,
         language: Optional[str] = None,
     ) -> PreprocessResult:
         """Preprocess one file to `.md`.
@@ -150,7 +170,11 @@ class PreprocessorService:
                 error=f"no such file: {source}",
             )
 
-        settings = settings or {}
+        if settings is None:
+            settings = PreprocessSettings()
+        elif isinstance(settings, dict):
+            settings = PreprocessSettings(**settings)
+
         extension = source.suffix.lower()
         group = _file_group(extension)
         force = _force_preprocess(extension)
@@ -311,10 +335,15 @@ class PreprocessorService:
         self,
         source_paths: Sequence[str | Path],
         *,
-        settings: Optional[dict] = None,
+        settings: Optional[dict | PreprocessSettings] = None,
         language: Optional[str] = None,
     ) -> list[PreprocessResult]:
         """Preprocess multiple files, one at a time (rate-limited, B8)."""
+        if settings is None:
+            settings = PreprocessSettings()
+        elif isinstance(settings, dict):
+            settings = PreprocessSettings(**settings)
+
         results: list[PreprocessResult] = []
         for path in source_paths:
             result = await self.preprocess(path, settings=settings, language=language)

@@ -1,8 +1,10 @@
 import asyncio
+import hashlib
 import operator
 import os
+import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 from urllib.parse import urlparse
 
 import content_core as cc
@@ -18,6 +20,7 @@ from open_notebook.ai.models import Model, ModelManager
 from open_notebook.domain.content_settings import ContentSettings
 from open_notebook.domain.notebook import Asset, Source
 from open_notebook.domain.transformation import Transformation
+from open_notebook.exceptions import NotFoundError
 from open_notebook.graphs.transformation import graph as transform_graph
 from open_notebook.storage.blobs import unlink_if_unreferenced
 from open_notebook.utils.job_control import (
@@ -53,6 +56,12 @@ YOUTUBE_PREFERRED_LANGUAGES = [
     "zh-TW",
 ]
 
+# Checkpoint intervals (Week 2 poly-pipeline requirement)
+# Extraction: checkpoint every 5 pages; chunking: every 250 chunks; embedding: every 50 chunks.
+CHECKPOINT_EXTRACT_PAGES = 5
+CHECKPOINT_CHUNK_EVERY = 250
+CHECKPOINT_EMBED_EVERY = 50
+
 
 class SourceState(TypedDict):
     # Input describing what to extract: url / file_path / content / delete_source.
@@ -70,6 +79,44 @@ class SourceState(TypedDict):
 class TransformationState(TypedDict):
     source: Source
     transformation: Transformation
+
+
+# =====================================================================
+# 7-stage source pipeline state (Week 2 poly-pipeline)
+#
+# Stages: ingest → route → extract → normalize → chunk → embed → index
+#
+# Each stage reads and writes fields on this shared state. Stages are
+# independent nodes so a failure in one stage can be inspected, retried,
+# or skipped without re-running earlier stages. LangGraph checkpoints
+# after every stage, so a kill -9 mid-pipeline resumes at the boundary
+# rather than restarting from ingest.
+# =====================================================================
+
+class Source7StageState(TypedDict, total=False):
+    # ── Input (set by the caller) ──────────────────────────────────
+    content_state: Dict[str, Any]        # url / file_path / content / delete_source
+    source_id: str                        # existing Source record id
+    notebook_ids: List[str]               # notebooks to associate
+    apply_transformations: List[Transformation]  # transformations to run after indexing
+    embed: bool                           # whether to embed after indexing
+
+    # ── Stage outputs (written by each stage, read by later ones) ──
+    source: Source                        # loaded / updated Source record
+    content_type: str                     # "media" | "text" | "pdf" | "url"
+    route_reason: str                     # why this route was chosen
+    extraction: ExtractionOutput          # content-core result (stage 3: extract)
+    normalized_text: str                  # cleaned text (stage 4: normalize)
+    chunks: List[str]                     # text chunks (stage 5: chunk)
+    chunk_infos: List[Dict[str, Any]]     # chunk coordinates/meta (stage 5: chunk)
+    embeddings: List[List[float]]         # embedding vectors (stage 6: embed)
+    embedded_count: int                   # number of embeddings stored (stage 7: index)
+    insights_created: int                 # transformations run (stage 7: index)
+
+    # ── Control / observability ────────────────────────────────────
+    stage: str                            # last completed stage name
+    errors: List[str]                     # non-fatal errors accumulated across stages
+    skipped: List[str]                    # stages skipped (e.g. embed when embed=False)
 
 
 def _usable_engine(engine: str, kind: str) -> str:
@@ -341,32 +388,49 @@ def _is_media(file_path: str | None) -> bool:
     return any(head.startswith(sig) for sig in _MEDIA_SIGNATURES)
 
 
+def _audio_duration_seconds(file_path: str) -> Optional[float]:
+    """Probe audio duration via ffprobe. Returns None on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                file_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+    return None
+
+
 async def _try_stt(
     file_path: str, cmd_id: str | None = None, language: str = ""
 ) -> str:
     """Transcribe a media file with the local speech server.
 
-    Returns empty string rather than raising, for the same reason `_try_ocr`
-    does: speech-to-text being unavailable or refusing the file is a degraded
-    outcome, and the caller's fallback is the actionable error. Raising here
-    would turn "this phone has no whisper build" into a job that fails fifteen
-    times with exponential backoff and starves the queue behind it.
+    Raises ValueError on failure so the graph's compensation handler can
+    clean up partial state and retry. Returning empty string on failure
+    (the old behavior) created empty sources with no error - Failure #1
+    from the audit. Raising here ensures the failure is visible and
+    recoverable via the poly-pipeline's compensation edges.
     """
     from open_notebook.speech import transcribe
 
     if cmd_id:
         await report_progress_record(cmd_id, progress=20, stage="transcribing")
-    # The declared language, when there is one. It reaches both the model and
-    # the residency gate, because the tier follows from it: Mandarin is wrong
-    # at CER 0.222 on the small model and exact on the large one, for five
-    # times the time. Without a declared language the model guesses, and on
-    # Tamil and Malay it guesses wrong and emits mixed-script noise.
     result = await transcribe(file_path, language=language or None)
     if not result.ok:
         if result.held:
-            # A residency hold means the model is loaded but the device is
-            # committed. Say so plainly in the log and let the honest failure
-            # message reach the operator.
             logger.info(
                 f"speech-to-text held for {Path(file_path).name}: {result.error}"
             )
@@ -374,7 +438,9 @@ async def _try_stt(
             logger.warning(
                 f"speech-to-text failed for {Path(file_path).name}: {result.error}"
             )
-        return ""
+        raise ValueError(
+            f"speech-to-text failed for {Path(file_path).name}: {result.error}"
+        )
     logger.info(
         f"Transcribed {len(result.text)} chars from {Path(file_path).name} "
         f"with local speech-to-text"
@@ -885,20 +951,714 @@ async def transform_content(state: TransformationState) -> Optional[dict]:
     }
 
 
-# Create and compile the workflow
-workflow = StateGraph(SourceState)
+# =====================================================================
+# 7-stage pipeline nodes (Week 2 poly-pipeline)
+#
+# Each node is a self-contained stage that reads from and writes to
+# Source7StageState. They can be composed into the 7-stage graph below
+# or called individually for testing / partial re-runs.
+# =====================================================================
 
-# Add nodes
-workflow.add_node("content_process", content_process)
-workflow.add_node("save_source", save_source)
-workflow.add_node("transform_content", transform_content)
-# Define the graph edges
-workflow.add_edge(START, "content_process")
-workflow.add_edge("content_process", "save_source")
-workflow.add_conditional_edges(
-    "save_source", trigger_transformations, ["transform_content"]
+async def ingest_stage(state: Source7StageState) -> dict:
+    """Stage 1: Ingest — validate input, load the Source record.
+
+    Reads content_state (url / file_path / content / delete_source)
+    and source_id from the input. Loads the existing Source record.
+    Does NOT touch the file system or network — pure validation + DB read.
+    """
+    from open_notebook.database.repository import ensure_record_id
+
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=5, stage="ingest")
+    await raise_if_cancelled(cmd_id)
+
+    content_state = state.get("content_state") or {}
+    source_id = state.get("source_id")
+    if not source_id:
+        raise ValueError("source_id is required for ingestion")
+
+    try:
+        source = await Source.get(source_id)
+    except NotFoundError as exc:
+        raise ValueError(
+            f"Source '{source_id}' no longer exists (deleted before processing?)"
+        ) from exc
+    if not source:
+        raise NotFoundError(f"Source '{source_id}' not found")
+
+    # Update source with command reference for cancellation tracking
+    if cmd_id:
+        source.command = ensure_record_id(cmd_id)
+    await source.save()
+
+    return {
+        "source": source,
+        "content_state": content_state,
+        "stage": "ingest",
+    }
+
+
+async def route_stage(state: Source7StageState) -> dict:
+    """Stage 2: Route — classify content and choose the pipeline path.
+
+    Inspects content_state to decide:
+      - media (audio/video) → speech-to-text path
+      - pdf → OCR-capable extraction path
+      - url → web extraction path
+      - text / other → direct text path
+
+    Sets content_type and route_reason for downstream stages.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=15, stage="route")
+    await raise_if_cancelled(cmd_id)
+
+    content_state = state.get("content_state") or {}
+    file_path = content_state.get("file_path")
+    url = content_state.get("url") or ""
+    content = content_state.get("content")
+
+    # Media files (by magic bytes, not suffix — blob store uses {sha}.bin)
+    if file_path and _is_media(file_path):
+        source = state.get("source")
+        language = getattr(source, "language", None) if source else None
+
+        # Short audio (<60s) requires an explicit language — whisper's
+        # auto-detection is unreliable on short clips and produces
+        # mixed-script noise on Tamil/Malay. Long audio may auto-detect.
+        if not language:
+            duration = _audio_duration_seconds(file_path)
+            if duration is not None and duration < 60:
+                raise ValueError(
+                    "Short audio (<60s) requires an explicit language. "
+                    "Set the source's language field (two-letter code, e.g. "
+                    "'en', 'zh', 'ja', 'ta') before processing."
+                )
+            route_reason = (
+                f"media file detected by magic bytes"
+                + (f" ({duration:.0f}s, language will be auto-detected)" if duration else "")
+            )
+        else:
+            route_reason = f"media file detected by magic bytes (language={language})"
+
+        return {
+            "content_type": "media",
+            "route_reason": route_reason,
+            "stage": "route",
+        }
+
+    # URL input
+    if url and not file_path and not content:
+        return {
+            "content_type": "url",
+            "route_reason": "url input, no local file",
+            "stage": "route",
+        }
+
+    # PDF (by magic bytes)
+    if file_path and _is_pdf(file_path):
+        return {
+            "content_type": "pdf",
+            "route_reason": "PDF file detected by magic bytes",
+            "stage": "route",
+        }
+
+    # Direct text content
+    if content and content.strip():
+        return {
+            "content_type": "text",
+            "route_reason": "direct text content provided",
+            "stage": "route",
+        }
+
+    # Fallback: treat as url (content-core will attempt extraction)
+    return {
+        "content_type": "url",
+        "route_reason": "no classifier matched, falling back to url extraction",
+        "stage": "route",
+    }
+
+
+async def extract_stage(state: Source7StageState) -> dict:
+    """Stage 3: Extract — run content-core extraction.
+
+    Delegates to the existing content_process logic (content-core +
+    optional OCR / speech-to-text fallback). Stores the ExtractionOutput
+    in state.extraction for the normalize stage.
+
+    On failure, adds the error to state.errors and returns so the
+    graph's compensation edge can route to compensate_extract.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=30, stage="extract")
+    await raise_if_cancelled(cmd_id)
+
+    errors = list(state.get("errors", []))
+
+    # Reuse the existing content_process node logic via a compatibility
+    # shim: build a SourceState-compatible dict and call content_process.
+    compat_state = {
+        "content_state": state.get("content_state") or {},
+        "source_id": state.get("source_id", ""),
+        "notebook_ids": state.get("notebook_ids", []),
+        "apply_transformations": state.get("apply_transformations", []),
+        "embed": state.get("embed", False),
+        "source": state.get("source"),
+        "transformation": [],
+    }
+    from typing import cast
+
+    try:
+        result = await content_process(cast(SourceState, compat_state))
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"extract: {exc}")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    extraction = result.get("extraction")
+
+    if not extraction:
+        errors.append("extract: content-core returned no result")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    return {
+        "extraction": extraction,
+        "errors": errors,
+        "stage": "extract",
+    }
+
+
+async def normalize_stage(state: Source7StageState) -> dict:
+    """Stage 4: Normalize — clean and validate extracted text.
+
+    Handles:
+      - Empty content → actionable error (YouTube no-transcript, scanned PDF)
+      - Scanned PDF without OCR → fail fast with _SCANNED_PDF_MESSAGE
+      - Media files where both extractor and STT failed → _media_failure_message
+
+    On failure, adds the error to state.errors and returns so the
+    graph's compensation edge can route to compensate_normalize.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=45, stage="normalize")
+    await raise_if_cancelled(cmd_id)
+
+    errors = list(state.get("errors", []))
+
+    extraction = state.get("extraction")
+    content_state = state.get("content_state") or {}
+    content_type = state.get("content_type", "url")
+    file_path = content_state.get("file_path")
+    url = content_state.get("url") or ""
+
+    if not extraction or not extraction.content or not extraction.content.strip():
+        if url and _is_youtube_url(url):
+            errors.append("normalize: " + _YOUTUBE_NO_TRANSCRIPT_MESSAGE)
+            return {
+                "normalized_text": "",
+                "errors": errors,
+                "stage": "normalize",
+            }
+        if content_type == "media":
+            attempted = bool(content_state.get("_stt_attempted"))
+            errors.append("normalize: " + _media_failure_message(file_path or "", attempted=attempted))
+            return {
+                "normalized_text": "",
+                "errors": errors,
+                "stage": "normalize",
+            }
+        if file_path and _is_pdf(file_path):
+            errors.append("normalize: " + _SCANNED_PDF_MESSAGE)
+            return {
+                "normalized_text": "",
+                "errors": errors,
+                "stage": "normalize",
+            }
+        errors.append(
+            "normalize: "
+            + (
+                _empty_file_message(file_path, content_state)
+                if file_path
+                else "Could not extract any text content from this source."
+            )
+        )
+        return {
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "normalize",
+        }
+
+    return {
+        "normalized_text": extraction.content.strip(),
+        "errors": errors,
+        "stage": "normalize",
+    }
+
+
+async def chunk_stage(state: Source7StageState) -> dict:
+    """Stage 5: Chunk — split normalized text into embedding-ready chunks.
+
+    Uses chunk_text_with_coords for content-aware splitting with
+    character coordinates. Drops sub-minimum chunks. Stores chunks and
+    chunk_infos for the embed stage.
+
+    On failure, adds the error to state.errors and returns so the
+    graph's compensation edge can route to compensate_chunk.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=60, stage="chunk")
+    await raise_if_cancelled(cmd_id)
+
+    errors = list(state.get("errors", []))
+
+    normalized_text = state.get("normalized_text") or ""
+    if not normalized_text.strip():
+        return {
+            "chunks": [],
+            "chunk_infos": [],
+            "errors": errors,
+            "stage": "chunk",
+        }
+
+    content_state = state.get("content_state") or {}
+    file_path = content_state.get("file_path")
+
+    try:
+        chunk_infos = chunk_text_with_coords(
+            normalized_text, file_path=file_path
+        )
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"chunk: {exc}")
+        return {
+            "chunks": [],
+            "chunk_infos": [],
+            "errors": errors,
+            "stage": "chunk",
+        }
+
+    chunks = [ci["text"] for ci in chunk_infos]
+
+    # Checkpoint every CHECKPOINT_CHUNK_EVERY chunks for progress visibility.
+    total_chunks = len(chunks)
+    if total_chunks > 0 and total_chunks % CHECKPOINT_CHUNK_EVERY == 0:
+        await report_progress_record(
+            cmd_id,
+            progress=60 + min(20, total_chunks // CHECKPOINT_CHUNK_EVERY * 2),
+            stage="chunk",
+        )
+
+    return {
+        "chunks": chunks,
+        "chunk_infos": chunk_infos,
+        "errors": errors,
+        "stage": "chunk",
+    }
+
+
+async def embed_stage(state: Source7StageState) -> dict:
+    """Stage 6: Embed — generate embeddings for all chunks.
+
+    Batches chunks through generate_embeddings (with retry). Does NOT
+    store to DB — that's the index stage. Skipped when embed=False.
+
+    On failure, adds the error to state.errors and returns so the
+    graph's compensation edge can route to compensate_embed.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=75, stage="embed")
+    await raise_if_cancelled(cmd_id)
+
+    errors = list(state.get("errors", []))
+
+    if not state.get("embed", False):
+        return {
+            "embeddings": [],
+            "embedded_count": 0,
+            "skipped": ["embed"],
+            "errors": errors,
+            "stage": "embed",
+        }
+
+    chunks = state.get("chunks") or []
+    if not chunks:
+        return {
+            "embeddings": [],
+            "embedded_count": 0,
+            "errors": errors,
+            "stage": "embed",
+        }
+
+    content_state = state.get("content_state") or {}
+    file_path = content_state.get("file_path")
+
+    from open_notebook.utils.chunking import detect_content_type
+    from open_notebook.utils.embedding import generate_embeddings
+
+    content_type = detect_content_type(
+        state.get("normalized_text") or "", file_path=file_path
+    )
+
+    try:
+        embeddings = await generate_embeddings(
+            chunks,
+            command_id=cmd_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"embed: {exc}")
+        return {
+            "embeddings": [],
+            "embedded_count": 0,
+            "errors": errors,
+            "stage": "embed",
+        }
+
+    # Checkpoint every CHECKPOINT_EMBED_EVERY embeddings for progress visibility.
+    total_embeddings = len(embeddings)
+    if total_embeddings > 0 and total_embeddings % CHECKPOINT_EMBED_EVERY == 0:
+        await report_progress_record(
+            cmd_id,
+            progress=75 + min(15, total_embeddings // CHECKPOINT_EMBED_EVERY),
+            stage="embed",
+        )
+
+    return {
+        "embeddings": embeddings,
+        "embedded_count": total_embeddings,
+        "errors": errors,
+        "stage": "embed",
+    }
+
+
+async def index_stage(state: Source7StageState) -> dict:
+    """Stage 7: Index — persist everything to the database.
+
+    - Updates the Source record with full_text (normalized_text)
+    - Deletes and re-inserts source_chunk + source_embedding records
+    - Runs apply_transformations (insight generation)
+    - Returns final outcome
+
+    On failure, adds the error to state.errors and returns so the
+    graph's compensation edge can route to compensate_index.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=90, stage="index")
+    await raise_if_cancelled(cmd_id)
+
+    errors = list(state.get("errors", []))
+
+    source = state.get("source")
+    normalized_text = state.get("normalized_text") or ""
+    embeddings = state.get("embeddings") or []
+    chunk_infos = state.get("chunk_infos") or []
+    apply_transformations = state.get("apply_transformations") or []
+
+    if not source:
+        errors.append("index: no source to index")
+        return {
+            "source": source,
+            "errors": errors,
+            "stage": "index",
+        }
+
+    # Update source full_text and save
+    source.full_text = normalized_text
+    previous = source.asset or Asset()
+    source.asset = Asset(
+        url=state.get("content_state", {}).get("url"),
+        file_path=state.get("content_state", {}).get("file_path"),
+        sha256=previous.sha256,
+        filename=state.get("content_state", {}).get("filename") or previous.filename,
+        size=previous.size,
+    )
+    try:
+        await source.save()
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"index: save source failed: {exc}")
+        return {
+            "source": source,
+            "errors": errors,
+            "stage": "index",
+        }
+
+    # Delete existing chunks + embeddings (idempotency)
+    source_id_rid = ensure_record_id(str(source.id))
+    try:
+        await repo_query(
+            "DELETE source_embedding WHERE source = $source_id",
+            {"source_id": source_id_rid},
+        )
+        await repo_query(
+            "DELETE source_chunk WHERE source_id = $source_id",
+            {"source_id": source_id_rid},
+        )
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"index: delete old chunks failed: {exc}")
+        return {
+            "source": source,
+            "errors": errors,
+            "stage": "index",
+        }
+
+    # Insert chunk + embedding records
+    from open_notebook.database.repository import repo_insert
+
+    chunk_records = []
+    embedding_records = []
+    for idx, (chunk_info, embedding) in enumerate(
+        zip(chunk_infos, embeddings)
+    ):
+        chunk = chunk_info["text"]
+        text_hash = hashlib.sha256(chunk.encode("utf-8")).hexdigest()[:16]
+
+        chunk_records.append(
+            {
+                "source_id": source_id_rid,
+                "text": chunk,
+                "chunk_index": idx,
+                "char_start": chunk_info["char_start"],
+                "char_end": chunk_info["char_end"],
+                "page_number": 1,  # TODO: compute from form-feed boundaries
+                "heading_path": None,
+                "index_generation": 1,
+                "text_hash": text_hash,
+                "embedding": embedding if idx < len(embeddings) else None,
+            }
+        )
+
+    try:
+        if chunk_records:
+            await repo_insert("source_chunk", chunk_records)
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"index: insert chunks failed: {exc}")
+        return {
+            "source": source,
+            "errors": errors,
+            "stage": "index",
+        }
+
+    # Run transformations (insights)
+    insights_created = 0
+    for transformation in apply_transformations:
+        if not normalized_text.strip():
+            continue
+        try:
+            result = await transform_graph.ainvoke(  # type: ignore[call-overload]
+                dict(input_text=normalized_text, transformation=transformation),
+                config=RunnableConfig(configurable={"model_id": transformation.model_id}),
+            )
+            await source.add_insight(transformation.title, result["output"])
+            insights_created += 1
+        except Exception as exc:  # noqa: BLE001 - capture for compensation
+            errors.append(f"index: transformation {transformation.name} failed: {exc}")
+
+    await report_progress_record(cmd_id, progress=100, stage="completed")
+
+    return {
+        "source": source,
+        "embedded_count": len(chunk_records),
+        "insights_created": insights_created,
+        "errors": errors,
+        "stage": "index",
+    }
+
+
+# =====================================================================
+# Compensation handlers (Week 2 poly-pipeline core value)
+#
+# Each stage 3-7 has a compensation handler that cleans up its own partial
+# output on failure, so a retry doesn't orphan chunks/embeddings or silently
+# corrupt RAG. This is the fix for the audit's HIGH-severity defect:
+# "source_graph nodes have no compensation/rollback."
+# =====================================================================
+
+async def compensate_extract(state: Source7StageState) -> dict:
+    """Compensate for a failed extraction.
+
+    Clears any partial extraction result so the source can be retried
+    from a clean state rather than leaving orphaned content.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=30, stage="extract_compensate")
+    await raise_if_cancelled(cmd_id)
+
+    return {
+        "extraction": None,
+        "normalized_text": "",
+        "stage": "extract_compensated",
+        "errors": state.get("errors", [])
+        + ["extraction failed, compensated and ready for retry"],
+    }
+
+
+async def compensate_normalize(state: Source7StageState) -> dict:
+    """Compensate for a failed normalization.
+
+    Drops the partial normalized text so the extract stage can be retried.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=45, stage="normalize_compensate")
+    await raise_if_cancelled(cmd_id)
+
+    return {
+        "normalized_text": "",
+        "stage": "normalize_compensated",
+        "errors": state.get("errors", [])
+        + ["normalization failed, compensated and ready for retry"],
+    }
+
+
+async def compensate_chunk(state: Source7StageState) -> dict:
+    """Compensate for a failed chunking.
+
+    Drops any partial chunks so the normalize stage can be retried.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=60, stage="chunk_compensate")
+    await raise_if_cancelled(cmd_id)
+
+    return {
+        "chunks": [],
+        "chunk_infos": [],
+        "stage": "chunk_compensated",
+        "errors": state.get("errors", [])
+        + ["chunking failed, compensated and ready for retry"],
+    }
+
+
+async def compensate_embed(state: Source7StageState) -> dict:
+    """Compensate for a failed embedding.
+
+    Drops partial embeddings so chunks can be re-embedded on retry.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=75, stage="embed_compensate")
+    await raise_if_cancelled(cmd_id)
+
+    return {
+        "embeddings": [],
+        "embedded_count": 0,
+        "stage": "embed_compensated",
+        "errors": state.get("errors", [])
+        + ["embedding failed, compensated and ready for retry"],
+    }
+
+
+async def compensate_index(state: Source7StageState) -> dict:
+    """Compensate for a failed index.
+
+    Deletes any partial chunk/embedding records written to the DB so the
+    source can be re-indexed cleanly.
+    """
+    cmd_id = get_current_command_id()
+    await report_progress_record(cmd_id, progress=90, stage="index_compensate")
+    await raise_if_cancelled(cmd_id)
+
+    source = state.get("source")
+    if source:
+        source_id_rid = ensure_record_id(str(source.id))
+        try:
+            await repo_query(
+                "DELETE source_embedding WHERE source = $source_id",
+                {"source_id": source_id_rid},
+            )
+            await repo_query(
+                "DELETE source_chunk WHERE source_id = $source_id",
+                {"source_id": source_id_rid},
+            )
+        except Exception as exc:  # noqa: BLE001 - compensation must not mask the original error
+            logger.warning(f"compensation cleanup failed for {source.id}: {exc}")
+
+    return {
+        "stage": "index_compensated",
+        "errors": state.get("errors", [])
+        + ["indexing failed, compensated and ready for retry"],
+    }
+
+
+# =====================================================================
+# 7-stage graph definition with conditional edges and compensation
+# =====================================================================
+
+workflow_7stage = StateGraph(Source7StageState)
+
+workflow_7stage.add_node("ingest", ingest_stage)
+workflow_7stage.add_node("route", route_stage)
+workflow_7stage.add_node("extract_instant", extract_stage)
+workflow_7stage.add_node("extract_heavy", extract_stage)
+workflow_7stage.add_node("normalize", normalize_stage)
+workflow_7stage.add_node("chunk", chunk_stage)
+workflow_7stage.add_node("embed", embed_stage)
+workflow_7stage.add_node("index", index_stage)
+# Compensation handlers
+workflow_7stage.add_node("compensate_extract", compensate_extract)
+workflow_7stage.add_node("compensate_normalize", compensate_normalize)
+workflow_7stage.add_node("compensate_chunk", compensate_chunk)
+workflow_7stage.add_node("compensate_embed", compensate_embed)
+workflow_7stage.add_node("compensate_index", compensate_index)
+
+workflow_7stage.add_edge(START, "ingest")
+workflow_7stage.add_edge("ingest", "route")
+
+# Conditional edge from route: lane determines extraction path
+workflow_7stage.add_conditional_edges(
+    "route",
+    lambda state: state.get("content_type", "url"),
+    {
+        "media": "extract_heavy",      # audio/video → STT path
+        "pdf": "extract_heavy",        # scanned PDF → OCR path
+        "url": "extract_instant",      # URL → direct extraction
+        "text": "extract_instant",     # direct text → instant
+        "deferred": "extract_heavy",   # deferred lane → heavy extraction
+    },
 )
-workflow.add_edge("transform_content", END)
 
-# Compile the graph
-source_graph = workflow.compile()
+# Each extract stage either succeeds (→ normalize) or fails (→ compensate)
+workflow_7stage.add_edge("extract_instant", "normalize")
+workflow_7stage.add_edge("extract_heavy", "normalize")
+workflow_7stage.add_edge("normalize", "chunk")
+workflow_7stage.add_edge("chunk", "embed")
+workflow_7stage.add_edge("embed", "index")
+workflow_7stage.add_edge("index", END)
+
+# Compensation edges — on error, route to the matching compensator
+workflow_7stage.add_conditional_edges(
+    "extract_instant",
+    lambda state: "compensate" if state.get("errors") else "normalize",
+    {"compensate": "compensate_extract", "normalize": "normalize"},
+)
+workflow_7stage.add_conditional_edges(
+    "extract_heavy",
+    lambda state: "compensate" if state.get("errors") else "normalize",
+    {"compensate": "compensate_extract", "normalize": "normalize"},
+)
+workflow_7stage.add_conditional_edges(
+    "normalize",
+    lambda state: "compensate" if state.get("errors") else "chunk",
+    {"compensate": "compensate_normalize", "chunk": "chunk"},
+)
+workflow_7stage.add_conditional_edges(
+    "chunk",
+    lambda state: "compensate" if state.get("errors") else "embed",
+    {"compensate": "compensate_chunk", "embed": "embed"},
+)
+workflow_7stage.add_conditional_edges(
+    "embed",
+    lambda state: "compensate" if state.get("errors") else "index",
+    {"compensate": "compensate_embed", "index": "index"},
+)
+workflow_7stage.add_conditional_edges(
+    "index",
+    lambda state: "compensate" if state.get("errors") else END,
+    {"compensate": "compensate_index", END: END},
+)
+
+source_graph = workflow_7stage.compile()

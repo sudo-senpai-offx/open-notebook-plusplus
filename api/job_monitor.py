@@ -1,30 +1,23 @@
+"""Job monitor — reduced to departure event emission only.
+
+Reaping logic (stale running jobs → failed) has been merged into the
+dispatcher loop (_reap_stale_jobs in dispatcher.py) with verbatim criteria:
+stale running jobs >300s, confirmed twice before marking failed, never touches
+held jobs. JobMonitor now only detects departed jobs (left new/running between
+passes) and emits completion/failed events.
+"""
+
 import asyncio
 import collections.abc
-import os
 from datetime import datetime, timezone
 from typing import Callable, Dict, Optional, Set
 
 from loguru import logger
 
 from open_notebook.database.repository import ensure_record_id, repo_query
-from open_notebook.utils.job_control import ACTIVE_STATUSES, is_stale
 from open_notebook.utils.notify import JobEvent, notify_job_event
 
-__all__ = ["ACTIVE_STATUSES", "is_stale", "JobMonitor"]
-
-
-def _get_stale_threshold() -> int:
-    try:
-        return int(os.getenv("OPEN_NOTEBOOK_STALE_JOB_SECONDS", "300"))
-    except Exception:
-        return 300
-
-
-def _get_monitor_interval() -> int:
-    try:
-        return int(os.getenv("OPEN_NOTEBOOK_JOB_MONITOR_SECONDS", "60"))
-    except Exception:
-        return 60
+__all__ = ["JobMonitor"]
 
 
 class JobMonitor:
@@ -34,15 +27,10 @@ class JobMonitor:
             [JobEvent, Dict], collections.abc.Awaitable[None]
         ] = notify_job_event,
         interval: Optional[float] = None,
-        stale_threshold: Optional[int] = None,
     ) -> None:
         self._notify = notify
-        self._interval = interval if interval is not None else _get_monitor_interval()
-        self._stale_threshold = (
-            stale_threshold if stale_threshold is not None else _get_stale_threshold()
-        )
+        self._interval = interval if interval is not None else 60
         self._tracked: Set[str] = set()
-        self._stale_candidates: Set[str] = set()
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
@@ -78,24 +66,6 @@ class JobMonitor:
         except Exception as e:
             logger.debug(f"job_monitor: emit failed: {e}")
 
-    async def _mark_stale(self, job_id: str) -> None:
-        try:
-            rid = job_id
-            if ":" not in rid:
-                rid = f"command:{rid}"
-            await repo_query(
-                "UPDATE $id MERGE $patch",
-                {
-                    "id": ensure_record_id(rid),
-                    "patch": {
-                        "status": "failed",
-                        "error_message": "stale: no heartbeat (worker restart, crash, or hang)",
-                    },
-                },
-            )
-        except Exception as e:
-            logger.debug(f"job_monitor: mark_stale failed for {job_id}: {e}")
-
     async def run_once(self, now: Optional[datetime] = None) -> None:
         if now is None:
             now = datetime.now(timezone.utc)
@@ -109,15 +79,6 @@ class JobMonitor:
                 await self._emit(row)
 
         self._tracked = active
-
-        stale_ids: Set[str] = set()
-        for r in rows:
-            if r.get("status") == "running" and is_stale(r, self._stale_threshold, now):
-                stale_ids.add(str(r["id"]))
-        confirm = stale_ids & self._stale_candidates
-        self._stale_candidates = stale_ids
-        for job_id in confirm:
-            await self._mark_stale(job_id)
 
     async def run(self) -> None:
         self._running = True

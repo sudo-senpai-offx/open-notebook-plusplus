@@ -7,7 +7,7 @@ Endpoints:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException
 from loguru import logger
@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from open_notebook.services.preprocessor_service import (
     FILE_GROUPS,
+    PreprocessSettings,
     preprocessor_service,
 )
 
@@ -23,8 +24,8 @@ router = APIRouter()
 
 class PreprocessRequest(BaseModel):
     paths: List[str] = Field(..., description="File paths to preprocess")
-    settings: Optional[Dict[str, bool]] = Field(
-        None, description="Per-group preprocessing toggles"
+    settings: Optional[PreprocessSettings] = Field(
+        None, description="Per-group preprocessing toggles (default: all off)"
     )
     language: Optional[str] = Field(
         None, description="BCP-47 language tag (affects STT tier for audio/video)"
@@ -47,9 +48,10 @@ async def preprocess(request: PreprocessRequest):
     are force-enabled (B6).
     """
     try:
+        settings = request.settings or PreprocessSettings()
         results = await preprocessor_service.preprocess_batch(
             request.paths,
-            settings=request.settings or {},
+            settings=settings,
             language=request.language,
         )
         return PreprocessResponse(
@@ -77,4 +79,4 @@ async def preprocess_groups():
 
     Unsupported/misc types are force-enabled (greyed in UI).
     """
-    return GroupsResponse(groups={group: True for group in FILE_GROUPS})
+    return GroupsResponse(groups={group: False for group in FILE_GROUPS})

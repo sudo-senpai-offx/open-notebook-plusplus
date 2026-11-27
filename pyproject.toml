@@ -37,7 +37,7 @@ dependencies = [
     "tomli>=2.0.2",
     "python-dotenv>=1.2.2",
     "httpx[socks]>=0.27.0",
-    "content-core>=2.2.0,<3",
+    "content-core==2.2.0",
     "ai-prompter>=0.4,<1",
     "esperanto>=2.28.0,<3",
     "surrealdb>=1.0.4",
@@ -108,6 +108,9 @@ ignore = [
     "E402",  # module level import not at top of file (Streamlit requires this pattern)
     "F541",  # f-string without placeholders
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.uv]
 # Security floors for transitive runtime, notebook and development dependencies,
