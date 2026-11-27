@@ -57,6 +57,7 @@ from open_notebook.ai.models import JobCheckpoint
 from open_notebook.residency import (
     client as residency,
 )
+from open_notebook.scheduler.residency import HttpOllamaResidency, OllamaResidency
 from open_notebook.scheduler.footprint import (
     FootprintEstimate,
     JobFootprint,
@@ -106,6 +107,84 @@ TTL_SWEEP_INTERVAL_SECONDS = 300.0
 _LAST_OLLAMA_CHECK: float | None = None
 OLLAMA_CHECK_INTERVAL_SECONDS = 30.0
 _OLLAMA_CACHED_BLOCKED: bool | None = None
+
+# Chat activity tracking. A chat request updates _last_chat_activity_at via
+# record_chat_activity(); the dispatcher treats the device as "chat active"
+# while activity is within CHAT_IDLE_SECONDS. On 4 GB Android devices, heavy
+# and deferred jobs are held while chat is active and Ollama is loaded, so a
+# 2.5 GB Ollama model never shares RAM with a ~600 MB tesseract or ~400 MB
+# whisper-cli (the Low Memory Killer would terminate the worker).
+_last_chat_activity_at: Optional[datetime] = None
+CHAT_IDLE_SECONDS = 300  # 5 minutes idle before heavy/deferred jobs may run
+
+# The Ollama residency instance, created lazily on first use when batch mode
+# is on. Tests may replace this with MockResidency to drive the hold/admit/
+# reload lifecycle without a live Ollama binary.
+_ollama_residency: Optional[OllamaResidency] = None
+
+#: Whether this dispatcher instance unloaded Ollama (so it knows to reload
+#: once the heavy/deferred queue drains). Reset to False after reload.
+_ollama_unloaded_by_us: bool = False
+
+#: Whether a heavy/deferred job was promoted this pass. Reload must wait until
+#: a full pass with no heavy promotion, because a just-promoted job still needs
+#: to run (and will appear in `live_rows` at the start of the next pass).
+_heavy_promoted_this_pass: bool = False
+
+#: Manual override: when True, heavy/deferred jobs are admitted even while
+#: chat is active (bypasses the chat-idle gate). Set via env var or directly.
+_batch_force_now: bool = False
+
+
+def record_chat_activity() -> None:
+    """Mark that a chat request just arrived.
+
+    Called from the chat/ask API endpoints so the dispatcher knows the device
+    is "chat active" and should not unload Ollama out from under a live
+    conversation.
+    """
+    global _last_chat_activity_at
+    _last_chat_activity_at = datetime.now(timezone.utc)
+
+
+def is_chat_idle(idle_seconds: int = CHAT_IDLE_SECONDS) -> bool:
+    """Whether chat has been idle for at least ``idle_seconds``.
+
+    True when no chat activity has ever been recorded (device just booted),
+    or when the last activity is at least ``idle_seconds`` ago. Used by the
+    dispatcher to decide whether it is safe to unload Ollama for heavy jobs.
+    """
+    if _last_chat_activity_at is None:
+        return True
+    return (
+        datetime.now(timezone.utc) - _last_chat_activity_at
+    ).total_seconds() >= idle_seconds
+
+
+def _get_ollama_residency() -> Optional[OllamaResidency]:
+    """Return the Ollama residency instance, creating it lazily when batch
+    mode is on. Returns None when batch mode is off (no residency control)."""
+    global _ollama_residency
+    if _ollama_residency is not None:
+        return _ollama_residency
+    if os.getenv("OPEN_NOTEBOOK_BATCH_MODE", "false").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return None
+    _ollama_residency = HttpOllamaResidency()
+    return _ollama_residency
+
+
+def set_batch_force_now(value: bool) -> None:
+    """Manual override: admit heavy/deferred jobs even while chat is active.
+
+    Exposed for tests and for a future "Run Batch Now" UI action.
+    """
+    global _batch_force_now
+    _batch_force_now = value
 
 
 def _ollama_blocked() -> bool:
@@ -651,6 +730,8 @@ async def dispatch_once(
     silently got one - and a test asserting the hold path passed against the
     live model instead.
     """
+    global _ollama_unloaded_by_us, _heavy_promoted_this_pass
+    _heavy_promoted_this_pass = False
     from open_notebook.database.repository import ensure_record_id, repo_query
 
     target_window = read_window() if window is None else window
@@ -805,14 +886,38 @@ async def dispatch_once(
             await _record_hold(str(row.get("id")), reason)
             continue
 
-        # Batch mode: on Android 4 GB, heavy lane jobs run only when Ollama
-        # is unloaded. If Ollama is loaded, hold heavy jobs until it is
-        # unloaded. Instant/deferred lanes are unaffected.
-        if lane == "heavy" and _ollama_blocked():
-            reason = "ollama_loaded"
-            outcome.held_reasons[reason] = outcome.held_reasons.get(reason, 0) + 1
-            await _record_hold(str(row.get("id")), reason)
-            continue
+        # Batch mode: on Android 4 GB, heavy/deferred lane jobs run only when
+        # Ollama is unloaded. While chat is active (< 5 min idle) and Ollama
+        # is loaded, hold heavy/deferred jobs so the 2.5 GB model never shares
+        # RAM with a ~600 MB tesseract or ~400 MB whisper-cli (the Low Memory
+        # Killer would terminate the worker). When chat is idle, unload Ollama
+        # once, then admit heavy/deferred jobs sequentially.
+        if lane in ("heavy", "deferred"):
+            ollama = _get_ollama_residency()
+            if ollama is not None and await ollama.is_loaded():
+                if not is_chat_idle() and not _batch_force_now:
+                    reason = "ollama_loaded_chat_active"
+                    outcome.held_reasons[reason] = (
+                        outcome.held_reasons.get(reason, 0) + 1
+                    )
+                    await _record_hold(str(row.get("id")), reason)
+                    continue
+                # Chat idle (or force): unload Ollama once, then admit.
+                if not _ollama_unloaded_by_us:
+                    try:
+                        unloaded = await ollama.unload()
+                    except Exception as exc:  # noqa: BLE001 - unload is advisory
+                        logger.warning(f"Ollama unload raised: {exc}")
+                        unloaded = False
+                    if not unloaded:
+                        reason = "ollama_unload_failed"
+                        outcome.held_reasons[reason] = (
+                            outcome.held_reasons.get(reason, 0) + 1
+                        )
+                        await _record_hold(str(row.get("id")), reason)
+                        continue
+                    _ollama_unloaded_by_us = True
+                # Ollama is now unloaded -> fall through to promote.
 
         try:
             await repo_query(
@@ -826,6 +931,8 @@ async def dispatch_once(
 
         outcome.promoted.append(str(row.get("id")))
         in_flight += 1
+        if lane in ("heavy", "deferred"):
+            _heavy_promoted_this_pass = True
         # Class counts move with the queue, or a second job of the same class
         # would be admitted in the same pass past a limit just reached.
         for role in roles:
@@ -839,6 +946,36 @@ async def dispatch_once(
         committed = committed.merge(
             FootprintEstimate(models=dict(_footprint_of(row, generation_bytes).models))
         )
+
+    # Post-drain: if this dispatcher unloaded Ollama and the heavy/deferred
+    # queue is drained (nothing held, nothing running), warm-reload Ollama so
+    # chat is snappy again. A new chat request arriving while nothing heavy is
+    # running skips the reload wait and lets Ollama warm on its next request.
+    if _ollama_unloaded_by_us:
+        promoted_ids = set(outcome.promoted)
+        remaining_heavy_held = [
+            row
+            for row in held_rows
+            if str(row.get("id")) not in promoted_ids
+            and str(row.get("lane") or "instant") in ("heavy", "deferred")
+        ]
+        heavy_running = [
+            row
+            for row in live_rows
+            if str(row.get("lane") or "instant") in ("heavy", "deferred")
+        ]
+        if (
+            not remaining_heavy_held
+            and not heavy_running
+            and not _heavy_promoted_this_pass
+        ):
+            ollama = _get_ollama_residency()
+            if ollama is not None:
+                try:
+                    await ollama.reload()
+                except Exception as exc:  # noqa: BLE001 - reload is advisory
+                    logger.warning(f"Ollama post-drain reload failed: {exc}")
+            _ollama_unloaded_by_us = False
 
     outcome.in_flight_after = in_flight
     outcome.projected_bytes = committed.total

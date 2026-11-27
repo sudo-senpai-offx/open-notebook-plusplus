@@ -27,11 +27,13 @@ from api.routers._chat_shared import (
 from open_notebook.ai.models import ProcessingFlags
 from open_notebook.ai.provider_registry import get_provider_registry
 from open_notebook.ai.providers import PROVIDER_DEEPSEEK_WEB
+from open_notebook.ai.providers import PROVIDER_DUCK_AI
+from open_notebook.ai.providers import PROVIDER_GOOGLE_AI_MODE
+from open_notebook.ai.providers import PROVIDER_OLLAMA
 from open_notebook.services.deepseek_direct_service import (
     deepseek_direct_service,
 )
 from open_notebook.database.repository import ensure_record_id, repo_query
-from open_notebook.domain.attachment import Attachment
 from open_notebook.domain.notebook import (
     ChatSession,
     Notebook,
@@ -45,6 +47,14 @@ from open_notebook.exceptions import (
 from open_notebook.graphs.chat import graph as chat_graph
 from open_notebook.services.prompter_service import prompter_service
 from open_notebook.services.quota_tracker import quota_tracker
+from open_notebook.services.context_compaction_service import (
+    context_compaction_service,
+)
+from open_notebook.services.context_counter_service import (
+    context_counter_service,
+)
+from open_notebook.services.ollama_provider import ollama_provider
+from open_notebook.scheduler.dispatcher import record_chat_activity
 from open_notebook.utils import token_count
 from open_notebook.utils.context_builder import (
     _ensure_prefix,
@@ -60,6 +70,17 @@ _PROBE_TARGETS = [
     ("duck-ai", "https://duck.ai", 5.0),
 ]
 
+# Shared httpx client for internet probes (avoids creating a new client per call)
+_internet_probe_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_probe_client() -> httpx.AsyncClient:
+    """Get or create a shared httpx client for internet probes."""
+    global _internet_probe_client
+    if _internet_probe_client is None:
+        _internet_probe_client = httpx.AsyncClient()
+    return _internet_probe_client
+
 
 async def _probe_internet() -> bool:
     """Return True when >= 2 of 3 cloud endpoints are reachable.
@@ -74,14 +95,14 @@ async def _probe_internet() -> bool:
         return _internet_probe_cache["result"]
 
     ok_count = 0
-    async with httpx.AsyncClient() as client:
-        for _name, url, timeout in _PROBE_TARGETS:
-            try:
-                resp = await client.head(url, timeout=timeout, follow_redirects=True)
-                if resp.status_code < 500:
-                    ok_count += 1
-            except Exception:  # noqa: BLE001
-                continue
+    client = _get_probe_client()
+    for _name, url, timeout in _PROBE_TARGETS:
+        try:
+            resp = await client.head(url, timeout=timeout, follow_redirects=True)
+            if resp.status_code < 500:
+                ok_count += 1
+        except Exception:  # noqa: BLE001
+            continue
 
     result = ok_count >= 2
     _internet_probe_cache["result"] = result
@@ -130,6 +151,7 @@ async def _send_via_provider(
     thinking_enabled: bool = False,
     ref_file_ids: Optional[List[str]] = None,
     timeout: float = 120.0,
+    pc_fallback: bool = False,
 ) -> Any:
     """Send a message through the specified provider using the ProviderRegistry.
 
@@ -165,6 +187,7 @@ async def _send_via_provider(
         ref_file_ids=ref_file_ids,
         timeout=timeout,
         model=model_name,
+        pc_fallback=pc_fallback,
     )
 
 
@@ -249,6 +272,9 @@ class ExecuteChatRequest(BaseModel):
         None,
         description="List of local file paths to attach to the message",
     )
+    pc_fallback: Optional[bool] = Field(
+        False, description="Enable PC browser-use fallback when PoW solving fails"
+    )
 
 
 class HistorySelectionReport(BaseModel):
@@ -280,6 +306,31 @@ class ExecuteChatResponse(BaseModel):
         default=False,
         description="UI hint: cloud is available while using local model, "
         "offer user a switch",
+    )
+    # Provider and model info for frontend display
+    provider_id: Optional[str] = Field(
+        default=None, description="Provider used for this response"
+    )
+    model_name: Optional[str] = Field(
+        default=None, description="Model used for this response"
+    )
+    # Reasoning message - separate from response for collapsible UI
+    reasoning: Optional[str] = Field(
+        default=None,
+        description="Reasoning/thinking content (collapsible in UI)",
+    )
+    # Fallback notification for cloud/local switching
+    local_fallback_used: bool = Field(
+        default=False,
+        description="Whether local Ollama fallback was used for this response",
+    )
+    cloud_exhausted: bool = Field(
+        default=False,
+        description="Whether all cloud providers were exhausted before local fallback",
+    )
+    fallback_notification: Optional[dict] = Field(
+        default=None,
+        description="Fallback notification with message and suggested user actions",
     )
 
 
@@ -580,217 +631,64 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=500, detail=f"Error deleting session: {str(e)}")
 
 
-class ChatAttachmentUploadResponse(BaseModel):
-    file_path: str = Field(..., description="Local path of the uploaded file")
-    filename: str = Field(..., description="Original filename")
+@router.post("/chat/attachments")
+async def upload_chat_attachment_deprecated():
+    """Attachment upload deprecated — use Sources instead.
 
-
-@router.post("/chat/attachments", response_model=ChatAttachmentUploadResponse)
-async def upload_chat_attachment(
-    file: UploadFile = File(...),
-    upload_session_id: Optional[str] = Form(
-        None,
-        description="ON++ session id that uploaded this attachment (source traceability)",
-    ),
-) -> ChatAttachmentUploadResponse:
-    """Upload a file for use as a chat attachment.
-
-    The file is saved to the local attachments directory so the backend can
-    reference it when sending messages to models that support file uploads
-    (e.g. deepseek-web). Returns the local path to use in the
-    ``attachments`` field of ``POST /chat/execute``.
+    Returns HTTP 410 GONE as the attachment→source migration is complete.
     """
-    try:
-        upload_dir = Path(
-            os.getenv("OPEN_NOTEBOOK_ATTACHMENTS_DIR", "./data/attachments")
-        )
-        upload_dir.mkdir(parents=True, exist_ok=True)
-
-        # Sanitize filename and make it unique
-        orig_name = file.filename or "file"
-        safe_name = "".join(c for c in orig_name if c.isalnum() or c in "._-") or "file"
-        dest = upload_dir / f"{uuid4().hex[:8]}_{safe_name}"
-
-        contents = await file.read()
-        dest.write_bytes(bytes(contents))
-
-        # Create an Attachment record so it can be listed/read/renamed/deleted
-        # independently of any notebook (separate table from notebooks).
-        try:
-            mime_type = file.content_type or "application/octet-stream"
-            attachment = Attachment(
-                file_path=str(dest),
-                filename=file.filename or safe_name,
-                mime_type=mime_type,
-                file_size=len(contents),
-                upload_session_id=upload_session_id,
-                is_orphaned=False,
-            )
-            await attachment.save()
-            logger.info(
-                f"Attachment record created: {attachment.id} -> {dest} "
-                f"(session={upload_session_id})"
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"File saved but Attachment record creation failed: {exc}")
-
-        return ChatAttachmentUploadResponse(
-            file_path=str(dest),
-            filename=file.filename or safe_name,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Chat attachment upload failed: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Attachment upload failed: {str(e)}"
-        )
-
-
-class AttachmentListResponse(BaseModel):
-    attachments: list[dict] = Field(
-        ...,
-        description="List of attachment records (id, filename, mime_type, file_size, upload_session_id, is_orphaned, created)",
+    raise HTTPException(
+        status_code=410,
+        detail="Attachment upload endpoint is deprecated. Use /sources instead.",
     )
 
 
-class AttachmentContentResponse(BaseModel):
-    file_path: str = Field(..., description="Local path of the attachment file")
-    filename: str = Field(..., description="Original filename")
-    mime_type: str = Field(..., description="MIME type")
-    content: str = Field(
-        ..., description="Text content of the attachment (for text files)"
+@router.get("/chat/attachments")
+async def list_chat_attachments_deprecated():
+    """Attachment listing deprecated — use Sources instead.
+
+    Returns HTTP 410 GONE as the attachment→source migration is complete.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail="Attachment list endpoint is deprecated. Use /sources instead.",
     )
 
 
-@router.get("/chat/attachments", response_model=AttachmentListResponse)
-async def list_chat_attachments() -> AttachmentListResponse:
-    """List all attachment records (separate from notebooks).
+@router.get("/chat/attachments/{attachment_id}/content")
+async def get_attachment_content_deprecated(attachment_id: str):
+    """Attachment content deprecated — use Sources instead.
 
-    Returns metadata for every uploaded attachment so the frontend can
-    display them in a reader overlay and offer delete.
+    Returns HTTP 410 GONE as the attachment→source migration is complete.
     """
-    try:
-        attachments = await Attachment.list_all()
-        return AttachmentListResponse(
-            attachments=[
-                {
-                    "id": a.id,
-                    "file_path": a.file_path,
-                    "filename": a.filename,
-                    "mime_type": a.mime_type,
-                    "file_size": a.file_size,
-                    "upload_session_id": a.upload_session_id,
-                    "is_orphaned": a.is_orphaned,
-                    "created": a.created.isoformat() if a.created else None,
-                }
-                for a in attachments
-            ]
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error listing attachments: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Failed to list attachments: {str(e)}"
-        )
-
-
-@router.get(
-    "/chat/attachments/{attachment_id}/content",
-    response_model=AttachmentContentResponse,
-)
-async def get_attachment_content(attachment_id: str) -> AttachmentContentResponse:
-    """Read the text content of an attachment for the reader overlay.
-
-    Only text-based files are supported. Binary files return an empty
-    content string with a note in the frontend.
-    """
-    try:
-        attachment = await Attachment.get_by_id(attachment_id)
-        if attachment is None:
-            raise HTTPException(status_code=404, detail="Attachment not found")
-
-        content = ""
-        path = Path(attachment.file_path)
-        if path.exists() and path.is_file():
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-                replacement_ratio = text.count("\ufffd") / max(len(text), 1)
-                if replacement_ratio > 0.30:
-                    # Binary file — skip text prepend, content stays empty
-                    logger.warning(
-                        f"Attachment appears binary, content not readable: {attachment.filename}"
-                    )
-                else:
-                    content = text
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"Could not read attachment {attachment_id}: {exc}")
-
-        return AttachmentContentResponse(
-            file_path=str(path),
-            filename=attachment.filename,
-            mime_type=attachment.mime_type,
-            content=content,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error reading attachment content: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Failed to read attachment: {str(e)}"
-        )
+    raise HTTPException(
+        status_code=410,
+        detail="Attachment content endpoint is deprecated. Use /sources instead.",
+    )
 
 
 @router.delete("/chat/attachments/{attachment_id}")
-async def delete_chat_attachment(attachment_id: str) -> dict:
-    """Delete an attachment record and attempt to unlink the underlying file."""
-    try:
-        attachment = await Attachment.get_by_id(attachment_id)
-        if attachment is None:
-            raise HTTPException(status_code=404, detail="Attachment not found")
+async def delete_chat_attachment_deprecated(attachment_id: str):
+    """Attachment deletion deprecated — use Sources instead.
 
-        await attachment.delete()
-        return {"ok": True, "message": f"Attachment '{attachment.filename}' deleted"}
-    except HTTPException:
-        raise
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error deleting attachment: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Failed to delete attachment: {str(e)}"
-        )
-
-
-class AttachmentRenameRequest(BaseModel):
-    new_filename: str = Field(
-        ..., description="New display filename for the attachment"
+    Returns HTTP 410 GONE as the attachment→source migration is complete.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail="Attachment delete endpoint is deprecated. Use /sources instead.",
     )
 
 
 @router.patch("/chat/attachments/{attachment_id}/rename")
-async def rename_chat_attachment(
-    attachment_id: str,
-    request: AttachmentRenameRequest,
-) -> dict:
-    """Rename an attachment's display filename.
+async def rename_chat_attachment_deprecated(attachment_id: str):
+    """Attachment rename deprecated — use Sources instead.
 
-    The underlying file on disk is NOT renamed — only the record's
-    display name changes.
+    Returns HTTP 410 GONE as the attachment→source migration is complete.
     """
-    try:
-        attachment = await Attachment.get_by_id(attachment_id)
-        if attachment is None:
-            raise HTTPException(status_code=404, detail="Attachment not found")
-
-        await attachment.rename(request.new_filename)
-        return {
-            "ok": True,
-            "message": f"Attachment renamed to '{request.new_filename}'",
-            "filename": attachment.filename,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error renaming attachment: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Failed to rename attachment: {str(e)}"
-        )
+    raise HTTPException(
+        status_code=410,
+        detail="Attachment rename endpoint is deprecated. Use /sources instead.",
+    )
 
 
 def _context_tokens() -> int:
@@ -812,6 +710,9 @@ def _context_tokens() -> int:
 @router.post("/chat/execute", response_model=ExecuteChatResponse)
 async def execute_chat(request: ExecuteChatRequest):
     """Execute a chat request and get AI response."""
+    # Mark chat activity so the dispatcher knows the device is chat-active
+    # and defers unloading Ollama for heavy/deferred jobs (4 GB LMK guard).
+    record_chat_activity()
     try:
         # Verify session exists (normalizes the ID and 404s if missing)
         full_session_id, session = await get_session_or_404(request.session_id)
@@ -966,164 +867,340 @@ async def execute_chat(request: ExecuteChatRequest):
         user_message = HumanMessage(content=message_content, id=str(uuid4()))
         state_values["messages"].append(user_message)
 
-        # --- Provider-based routing (DeepSeek-web, Google AI Mode, Duck.ai) ---
-        # All three cloud providers are equal priority; default is deepseek-web.
+        # --- Provider-based routing with cloud-first, local-fallback chain ---
         # model_override can be "provider_id" or "provider_id:model_name".
-        provider_id, model_name = _resolve_provider_and_model(model_override)
-        if not provider_id:
-            provider_id = _get_default_provider()
+        # Cloud providers tried first (deepseek-web -> duck-ai -> google-ai-mode),
+        # Ollama used only as local fallback when ALL cloud providers fail.
+        requested_provider_id, model_name = _resolve_provider_and_model(model_override)
 
-        # Determine the provider config for attachment limits.
-        from open_notebook.ai.providers import get_provider_config, ProviderSendResult
-
-        provider_cfg = get_provider_config(provider_id)
-
-        # Validate attachment limits for the selected provider.
-        if request.attachments and provider_cfg:
-            if len(request.attachments) > provider_cfg.max_files:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Too many attachments for {provider_cfg.display_name}: "
-                        f"max {provider_cfg.max_files} files per chat session."
-                    ),
-                )
-            for file_path in request.attachments:
-                path = Path(file_path)
-                if path.exists() and path.is_file():
-                    size_mb = path.stat().st_size / (1024 * 1024)
-                    if size_mb > provider_cfg.max_size_mb:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=(
-                                f"Attachment {path.name} ({size_mb:.1f} MB) exceeds "
-                                f"{provider_cfg.display_name} max size "
-                                f"({provider_cfg.max_size_mb} MB)."
-                            ),
-                        )
-
-        # Upload attachments via the provider (if supported).
-        provider_ref_file_ids: List[str] = []
-        if request.attachments and provider_cfg and provider_cfg.supports_attachments:
-            for file_path in request.attachments:
-                try:
-                    path = Path(file_path)
-                    if path.exists() and path.is_file():
-                        # Upload to the provider so the model can reference
-                        # the file directly (covers binary files too).
-                        file_id = await provider.upload_attachment(file_path)
-                        if file_id:
-                            provider_ref_file_ids.append(file_id)
-                            logger.info(
-                                f"Attachment {path.name} uploaded to "
-                                f"{provider_id} as {file_id}"
-                            )
-                        else:
-                            failed_attachments.append(path.name)
-                            logger.warning(
-                                f"Attachment {path.name}: {provider_id} "
-                                f"file upload returned no file ID"
-                            )
-                    else:
-                        failed_attachments.append(Path(file_path).name)
-                        logger.warning(f"Attachment not found: {file_path}")
-                except Exception as exc:  # noqa: BLE001
-                    failed_attachments.append(Path(file_path).name)
-                    logger.warning(
-                        f"Could not process attachment {file_path}: {exc}"
-                    )
-
-        # If attachments were provided but none were successfully uploaded
-        # AND none could be read locally, fail loudly.
-        if (
-            request.attachments
-            and failed_attachments
-            and not attachment_parts
-            and not provider_ref_file_ids
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Failed to upload or read the following attachment(s): "
-                    f"{', '.join(failed_attachments)}. "
-                    f"Ensure {provider_cfg.display_name} credentials are "
-                    f"configured in Settings."
-                ),
-            )
+        # Get processing flags for local processing gate
+        flags = await ProcessingFlags.get_instance()
+        allow_local = flags.allow_local_processing
 
         # Build the message content with attachment text prepended.
+        # Defined before the cloud loop so Ollama fallback can use it.
         if attachment_parts:
-            message_content = (
+            provider_message_content = (
                 request.message + "\n\n" + "".join(attachment_parts) + "\n\n---\n"
             )
         else:
-            message_content = request.message
-
-        # Explicit id so a failed turn can remove it from the checkpoint.
-        user_message = HumanMessage(content=message_content, id=str(uuid4()))
-        state_values["messages"].append(user_message)
+            provider_message_content = request.message
 
         # Transform message through prompter (session-aware).
+        # Defined before the cloud loop so Ollama fallback can use it.
         transformed_prompt = await prompter_service.transform(
-            raw_message=message_content,
+            raw_message=provider_message_content,
             session_id=request.session_id,
             notebook_id=notebook.id if notebook else None,
             message_type="chat",
         )
 
-        # Internet-aware send with retry: when offline, retry up to 10
-        # times with exponential backoff (5s doubling, cap 60s) before
-        # asking the user to fall back to a local model.
-        send_result = None
-        last_error: Optional[str] = None
-        backoff = 5.0
-        for attempt in range(1, 11):
-            if not internet_available:
-                last_error = (
-                    f"No internet connectivity (attempt {attempt}/10). "
-                    f"Retrying in {min(backoff, 60.0)}s..."
-                )
-                logger.warning(last_error)
-                await asyncio.sleep(min(backoff, 60.0))
-                backoff = min(backoff * 2, 60.0)
-                internet_available = await _probe_internet()
-                continue
-            try:
-                send_result = await _send_via_provider(
-                    provider_id=provider_id,
-                    model_name=model_name,
-                    message=transformed_prompt,
-                    session_id=request.session_id,
-                    thinking_enabled=True,
-                    ref_file_ids=provider_ref_file_ids or None,
-                    timeout=120.0,
-                )
-                break
-            except Exception as exc:  # noqa: BLE001
-                msg = str(exc)
-                last_error = msg
-                logger.warning(
-                    f"Provider '{provider_id}' send failed (attempt {attempt}/10): {msg}"
-                )
-                await asyncio.sleep(min(backoff, 60.0))
-                backoff = min(backoff * 2, 60.0)
+        # Build cloud provider chain (requested first, then others)
+        cloud_providers: List[str] = []
+        if requested_provider_id and requested_provider_id != PROVIDER_OLLAMA:
+            cloud_providers.append(requested_provider_id)
+        for p in [PROVIDER_DEEPSEEK_WEB, PROVIDER_DUCK_AI, PROVIDER_GOOGLE_AI_MODE]:
+            if p not in cloud_providers:
+                cloud_providers.append(p)
 
+        # Track results across all providers
+        last_error: Optional[str] = None
+        last_send_result: Optional[Any] = None
+        send_result: Optional[Any] = None  # Initialize to prevent UnboundLocalError
+        used_provider_id: Optional[str] = None
+        used_model_name: Optional[str] = None
+        provider_ref_file_ids: List[str] = []
+
+        from open_notebook.ai.providers import get_provider_config, ProviderSendResult
+
+        # ====================================================================
+        # PHASE 1: Try all cloud providers first
+        # ====================================================================
+        cloud_success = False
+        cloud_exhausted = False
+        local_fallback_used = False
+        fallback_notification: Optional[dict] = None
+        switch_to_cloud_suggested = False
+        for attempt_provider_id in cloud_providers:
+            # Resolve model for this provider
+            attempt_model = model_name
+            if attempt_provider_id != requested_provider_id:
+                # Use the default model for fallback providers
+                attempt_cfg = get_provider_config(attempt_provider_id)
+                attempt_model = attempt_cfg.default_model if attempt_cfg else None
+
+            provider_cfg = get_provider_config(attempt_provider_id)
+
+            # Validate attachment limits for the selected provider.
+            if request.attachments and provider_cfg:
+                if len(request.attachments) > provider_cfg.max_files:
+                    last_error = (
+                        f"Too many attachments for {provider_cfg.display_name}: "
+                        f"max {provider_cfg.max_files} files per chat session."
+                    )
+                    continue  # Try next provider
+                for file_path in request.attachments:
+                    path = Path(file_path)
+                    if path.exists() and path.is_file():
+                        size_mb = path.stat().st_size / (1024 * 1024)
+                        if size_mb > provider_cfg.max_size_mb:
+                            last_error = (
+                                f"Attachment {path.name} ({size_mb:.1f} MB) exceeds "
+                                f"{provider_cfg.display_name} max size "
+                                f"({provider_cfg.max_size_mb} MB)."
+                            )
+                            continue  # Try next provider
+
+            # Upload attachments via the provider (if supported).
+            attempt_ref_file_ids: List[str] = []
+            if request.attachments and provider_cfg and provider_cfg.supports_attachments:
+                attach_provider = get_provider_registry().get(attempt_provider_id)
+                if attach_provider:
+                    for file_path in request.attachments:
+                        try:
+                            path = Path(file_path)
+                            if path.exists() and path.is_file():
+                                file_id = await attach_provider.upload_attachment(file_path)
+                                if file_id:
+                                    attempt_ref_file_ids.append(file_id)
+                                    logger.info(
+                                        f"Attachment {path.name} uploaded to "
+                                        f"{attempt_provider_id} as {file_id}"
+                                    )
+                                else:
+                                    failed_attachments.append(path.name)
+                                    logger.warning(
+                                        f"Attachment {path.name}: {attempt_provider_id} "
+                                        f"file upload returned no file ID"
+                                    )
+                            else:
+                                failed_attachments.append(Path(file_path).name)
+                                logger.warning(f"Attachment not found: {file_path}")
+                        except Exception as exc:  # noqa: BLE001
+                            failed_attachments.append(Path(file_path).name)
+                            logger.warning(
+                                f"Could not process attachment {file_path}: {exc}"
+                            )
+
+            # If attachments were provided but none were successfully uploaded
+            # AND none could be read locally, skip this provider.
+            if (
+                request.attachments
+                and failed_attachments
+                and not attachment_parts
+                and not attempt_ref_file_ids
+            ):
+                last_error = (
+                    f"Failed to upload or read attachment(s) via {attempt_provider_id}: "
+                    f"{', '.join(failed_attachments)}."
+                )
+                continue  # Try next provider
+
+            # Internet-aware send with retry for this provider.
+            provider_send_result = None
+            provider_last_error: Optional[str] = None
+            provider_backoff = 5.0
+            skip_to_next = False
+
+            for attempt in range(1, 11):
+                if not internet_available:
+                    # No internet - all cloud providers will fail.
+                    # Break immediately; local fallback (Ollama) will be tried next.
+                    provider_last_error = "No internet connectivity"
+                    logger.warning(provider_last_error)
+                    skip_to_next = True
+                    break
+                try:
+                    provider_send_result = await _send_via_provider(
+                        provider_id=attempt_provider_id,
+                        model_name=attempt_model,
+                        message=transformed_prompt,
+                        session_id=request.session_id,
+                        thinking_enabled=True,
+                        ref_file_ids=attempt_ref_file_ids or None,
+                        timeout=120.0,
+                        pc_fallback=request.pc_fallback or False,
+                    )
+                    if provider_send_result.ok:
+                        cloud_success = True
+                        break
+                    provider_last_error = (
+                        provider_send_result.error or "provider returned error"
+                    )
+
+                    # Proactive 429: skip to next cloud provider immediately
+                    if provider_send_result.rate_limited:
+                        logger.warning(
+                            f"Provider '{attempt_provider_id}' rate limited. "
+                            f"Skipping to next cloud provider."
+                        )
+                        skip_to_next = True
+                        break
+
+                    # Manual login required: skip to next cloud provider
+                    if provider_send_result.manual_login_required:
+                        logger.warning(
+                            f"Provider '{attempt_provider_id}' requires manual login. "
+                            f"Skipping to next cloud provider."
+                        )
+                        skip_to_next = True
+                        break
+
+                    # Transient error - retry with backoff
+                    logger.warning(
+                        f"Provider '{attempt_provider_id}' send failed "
+                        f"(attempt {attempt}/10): {provider_last_error}"
+                    )
+                    await asyncio.sleep(min(provider_backoff, 60.0))
+                    provider_backoff = min(provider_backoff * 2, 60.0)
+
+                except Exception as exc:  # noqa: BLE001
+                    provider_last_error = str(exc)
+                    logger.warning(
+                        f"Provider '{attempt_provider_id}' send failed "
+                        f"(attempt {attempt}/10): {provider_last_error}"
+                    )
+                    await asyncio.sleep(min(provider_backoff, 60.0))
+                    provider_backoff = min(provider_backoff * 2, 60.0)
+
+            if cloud_success:
+                send_result = provider_send_result
+                used_provider_id = attempt_provider_id
+                used_model_name = attempt_model
+                provider_ref_file_ids = attempt_ref_file_ids
+                break  # Success! Exit the cloud provider chain.
+
+            # This cloud provider failed. Record the error and try the next one.
+            last_error = provider_last_error or f"Provider '{attempt_provider_id}' failed"
+            last_send_result = provider_send_result
+
+            if skip_to_next and internet_available:
+                # Rate-limited or login required - try next cloud provider immediately
+                continue
+
+        # ====================================================================
+        # PHASE 2: Local fallback (Ollama) - only if all cloud providers failed
+        # ====================================================================
+        if not cloud_success:
+            cloud_exhausted = True
+            if allow_local:
+                local_fallback_used = True
+                logger.info(
+                    "All cloud providers exhausted. Falling back to Ollama (local)."
+                )
+
+                # --- Context compaction with local LLM pause ---
+                # Check if context usage exceeds hard limit before sending to Ollama.
+                counter_status = await context_counter_service.get_status(
+                    request.session_id, PROVIDER_OLLAMA
+                )
+                if counter_status:
+                    provider_cfg = get_provider_config(PROVIDER_OLLAMA)
+                    context_window = (
+                        provider_cfg.context_window_tokens if provider_cfg else 8192
+                    )
+                    usage_ratio = (
+                        counter_status["token_count"] / context_window
+                        if context_window > 0
+                        else 0
+                    )
+                    hard_limit = 0.95
+                    if usage_ratio >= hard_limit:
+                        # Pause local LLM chat - trigger compaction first
+                        logger.info(
+                            f"Context usage {usage_ratio:.1%} >= hard limit "
+                            f"{hard_limit:.1%} for session {request.session_id}. "
+                            f"Pausing local LLM chat for compaction."
+                        )
+                        compaction_result = await context_compaction_service.compact_session_context(
+                            session_id=request.session_id,
+                            provider_id=PROVIDER_OLLAMA,
+                            compacted_context=transformed_prompt,
+                            compacted_token_count=counter_status["token_count"],
+                            reasoning_tokens=counter_status.get("reasoning_tokens", 0),
+                        )
+                        # Use compacted context as the message
+                        provider_message_content = (
+                            f"[Context compacted at {usage_ratio:.1%} usage. "
+                            f"Prior conversation summarized below.]\n\n"
+                            f"{compaction_result['compacted_context']}\n\n"
+                            f"[End of compacted context]\n\n"
+                            f"User: {provider_message_content}"
+                        )
+
+                # Ensure Ollama model is loaded (pulls if missing) before sending
+                ollama_model = model_name or "llama3.2:3b"
+                load_result = await ollama_provider.ensure_model_loaded(
+                    ollama_model, auto_pull=True
+                )
+
+                if load_result["status"] in ("loaded", "already_pulled"):
+                    # Note: ollama_provider.send_message already handles
+                    # ensure_model_loaded + unload_model (keep_alive=0s) internally
+                    provider_send_result = await _send_via_provider(
+                        provider_id=PROVIDER_OLLAMA,
+                        model_name=ollama_model,
+                        message=provider_message_content,
+                        session_id=request.session_id,
+                        thinking_enabled=True,
+                        ref_file_ids=None,  # Ollama doesn't support attachments
+                        timeout=120.0,
+                        pc_fallback=False,
+                    )
+                    if provider_send_result.ok:
+                        send_result = provider_send_result
+                        used_provider_id = PROVIDER_OLLAMA
+                        used_model_name = ollama_model
+                        provider_ref_file_ids = []
+                        cloud_success = True  # Mark as success to skip error path
+                        fallback_notification = {
+                            "type": "local_fallback",
+                            "message": "All cloud providers unavailable. Using local Ollama model.",
+                            "actions": ["continue_local", "reconnect_cloud", "open_settings"],
+                        }
+                        if internet_available:
+                            switch_to_cloud_suggested = True
+                    else:
+                        last_error = (
+                            provider_send_result.error or "Ollama returned error"
+                        )
+                        last_send_result = provider_send_result
+                else:
+                    last_error = (
+                        f"Ollama model not available: "
+                        f"{load_result.get('error', 'unknown')}"
+                    )
+            else:
+                last_error = (
+                    "Local processing is disabled. "
+                    "Enable 'Allow local processing' in Settings to use "
+                    "local models offline."
+                )
+                fallback_notification = {
+                    "type": "all_providers_unavailable",
+                    "message": "All cloud providers unavailable and local processing is disabled.",
+                    "actions": ["enable_local", "open_settings", "reconnect_cloud"],
+                }
+
+        # ====================================================================
+        # After trying all providers, check if we got a successful result.
+        # ====================================================================
         if send_result is None or not send_result.ok:
             # Determine the appropriate error response.
-            if send_result and send_result.manual_login_required:
+            if last_send_result and last_send_result.manual_login_required:
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        f"{provider_cfg.display_name if provider_cfg else provider_id} "
+                        f"{used_provider_id or requested_provider_id or 'provider'} "
                         f"session expired or invalid credentials. "
                         f"Re-log in and update credentials in Settings."
                     ),
                 )
-            if send_result and send_result.rate_limited:
+            if last_send_result and last_send_result.rate_limited:
                 raise HTTPException(
                     status_code=429,
                     detail=(
-                        f"{provider_cfg.display_name if provider_cfg else provider_id} "
+                        f"{used_provider_id or requested_provider_id or 'provider'} "
                         f"rate limited. Wait for quota reset or enable 'Allow local "
                         f"processing' in Settings to use local models."
                     ),
@@ -1131,8 +1208,7 @@ async def execute_chat(request: ExecuteChatRequest):
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    f"{provider_cfg.display_name if provider_cfg else provider_id} "
-                    f"unavailable after 10 retries: {last_error or 'unknown error'}. "
+                    f"All providers unavailable: {last_error or 'unknown error'}. "
                     f"Enable 'Allow local processing' in Settings to use "
                     f"local models offline, or check your internet connection."
                 ),
@@ -1143,11 +1219,11 @@ async def execute_chat(request: ExecuteChatRequest):
         if not response_text and not thinking_text:
             raise HTTPException(
                 status_code=502,
-                detail=f"Empty response from {provider_cfg.display_name if provider_cfg else provider_id}.",
+                detail=f"Empty response from {used_provider_id}.",
             )
 
         # Increment quota for this provider.
-        quota_provider = provider_id if provider_id != "ollama" else "local"
+        quota_provider = used_provider_id if used_provider_id != "ollama" else "local"
         await quota_tracker.increment(quota_provider, 1)
 
         # Link the ON++ chat session to its provider session series.
@@ -1172,9 +1248,9 @@ async def execute_chat(request: ExecuteChatRequest):
             id=str(uuid4()),
             additional_kwargs={"thinking": thinking_text} if thinking_text else {},
             additional_kwargs2={
-                "provider": provider_id,
+                "provider": used_provider_id,
                 "model": model_name or (provider_cfg.default_model if provider_cfg else None),
-            } if (provider_id or model_name) else {},
+            } if (used_provider_id or model_name) else {},
         )
         state_values["messages"].append(assistant_message)
 
@@ -1202,96 +1278,16 @@ async def execute_chat(request: ExecuteChatRequest):
                 kept_exchanges=1,
                 dropped_exchanges=0,
                 total_exchanges=1,
-                reason=f"{provider_id} response",
+                reason=f"{used_provider_id} response",
             ),
             cloud_available=internet_available,
-            switch_to_cloud_suggested=False,
-        )
-
-        # Execute chat graph in a thread so the synchronous LangGraph invoke
-        # (SqliteSaver checkpoints are sync) doesn't block the event loop and
-        # freeze the rest of the API while the LLM responds. Mirrors the
-        # get_state() calls above.
-        # invoke_chat_turn also drops the question from the checkpoint when the
-        # turn fails, so a retry doesn't add it twice.
-        #
-        # Quota check for non-deepseek-web cloud providers.
-        # model_override may now be "provider_id" or "provider_id:model_name".
-        provider_id_for_quota, _ = _resolve_provider_and_model(model_override)
-        if not provider_id_for_quota:
-            provider_id_for_quota = _get_default_provider()
-        is_cloud_model = provider_id_for_quota != "ollama"
-        if is_cloud_model:
-            if not await quota_tracker.can_request(provider_id_for_quota):
-                flags = await ProcessingFlags.get_instance()
-                if flags.allow_local_processing:
-                    model_override = "ollama"
-                    provider_id_for_quota = "ollama"
-                    logger.info(
-                        f"Quota exceeded for {provider_id_for_quota}; switching to local llama"
-                    )
-                else:
-                    raise HTTPException(
-                        status_code=429,
-                        detail=(
-                            f"Cloud quota exceeded for {provider_id_for_quota}. "
-                            f"Enable 'Allow local processing' in Settings to use "
-                            f"local models, or wait for quota reset."
-                        ),
-                    )
-
-        # Suggest switching to cloud when on a local model and internet is back.
-        is_local_model = provider_id_for_quota == "ollama"
-        switch_to_cloud = internet_available and is_local_model
-
-        result = await asyncio.to_thread(
-            invoke_chat_turn,
-            chat_graph,
-            state_values,
-            RunnableConfig(
-                configurable={
-                    "thread_id": full_session_id,
-                    "model_id": model_override,
-                }
-            ),
-            user_message,
-        )
-
-        # Update session timestamp
-        await session.save()
-
-        # Make the transcript durable. The checkpoint keeps working as a
-        # resume cache; this is the copy that can be merged, and so the
-        # copy that can cross to the other device. Idempotent, so a
-        # conversation that predates this table backfills on first use.
-        turn_messages = result.get("messages", [])
-        try:
-            added = await persist_chat_messages(full_session_id, turn_messages)
-            if added:
-                logger.info(f"Persisted {added} chat message(s) for {full_session_id}")
-        except Exception as exc:  # noqa: BLE001 - the turn already succeeded
-            # Never fail a completed turn over bookkeeping. The checkpoint
-            # still holds the conversation, so the worst case is that it
-            # does not sync until the migration has run.
-            logger.warning(
-                f"Could not persist chat messages for {full_session_id}: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
-        # Convert messages to response format
-        messages = extract_chat_messages(turn_messages)
-
-        return ExecuteChatResponse(
-            session_id=request.session_id,
-            messages=messages,
-            history_selection=HistorySelectionReport(
-                kept_exchanges=history.kept_exchanges,
-                dropped_exchanges=history.dropped_exchanges,
-                total_exchanges=history.kept_exchanges + history.dropped_exchanges,
-                reason=history.reason,
-            ),
-            cloud_available=internet_available,
-            switch_to_cloud_suggested=switch_to_cloud,
+            switch_to_cloud_suggested=switch_to_cloud_suggested,
+            provider_id=used_provider_id,
+            model_name=used_model_name,
+            reasoning=thinking_text,
+            local_fallback_used=local_fallback_used,
+            cloud_exhausted=cloud_exhausted,
+            fallback_notification=fallback_notification,
         )
     except NotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1586,9 +1582,9 @@ async def edit_chat_message(
             id=str(uuid4()),
             additional_kwargs={"thinking": thinking_text} if thinking_text else {},
             additional_kwargs2={
-                "provider": provider_id,
+                "provider": used_provider_id,
                 "model": model_name or (provider_cfg.default_model if provider_cfg else None),
-            } if (provider_id or model_name) else {},
+            } if (used_provider_id or model_name) else {},
         )
 
         # Persist the turn (edited human message already updated above)
