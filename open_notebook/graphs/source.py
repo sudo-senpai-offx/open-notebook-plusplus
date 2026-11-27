@@ -33,6 +33,8 @@ from open_notebook.utils.runtime_capabilities import (
     engine_runtime_missing,
 )
 from open_notebook.preprocess.tools.pdf import extract_pdf
+from open_notebook.preprocess.tools.pandoc import convert_document
+from open_notebook.preprocess.tools.trafilatura import extract_html
 
 # content-core >= 2.1 disables its own Loguru logging for library consumers.
 # Both the API and the worker import this module before extracting anything,
@@ -1126,6 +1128,15 @@ async def extract_stage(state: Source7StageState) -> dict:
     if content_type == "pdf" and file_path:
         return await _extract_pdf_stage(state, cmd_id, errors, file_path, content_state)
 
+    # HTML extraction via trafilatura wrapper (HTML/URL content).
+    # Must come BEFORE pandoc so HTML files don't get swallowed by pandoc.
+    if content_type in ("url", "html") and (file_path or url):
+        return await _extract_trafilatura_stage(state, cmd_id, errors, file_path, content_state, url)
+
+    # Document conversion via pandoc wrapper (docx, odt, epub, rtf).
+    if content_type == "document" and file_path:
+        return await _extract_pandoc_stage(state, cmd_id, errors, file_path, content_state)
+
     # Fall back to content-core for URLs, text, media, and unknown types.
     return await _extract_content_core_stage(state, cmd_id, errors, content_state, url)
 
@@ -1173,8 +1184,161 @@ async def _extract_pdf_stage(
         title=content_state.get("title", ""),
     )
 
+    # Record timed-out pages as warnings so the user knows content was missed.
+    timed_out = result.get("timed_out_pages", [])
+    if timed_out:
+        errors.append(
+            f"extract: pages {sorted(timed_out)} timed out during extraction"
+        )
+
     if not extraction.content.strip():
         errors.append("extract: pdf returned no text content")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    return {
+        "extraction": extraction,
+        "errors": errors,
+        "stage": "extract",
+    }
+
+
+async def _extract_trafilatura_stage(
+    state: Source7StageState,
+    cmd_id: Optional[str],
+    errors: List[str],
+    file_path: Optional[str],
+    content_state: Dict[str, Any],
+    url: str,
+) -> dict:
+    """HTML extraction via trafilatura wrapper (HTML/URL content).
+
+    Routes to trafilatura for HTML/web content. trafilatura strips boilerplate
+    automatically and detects JavaScript-required (SPA) pages. On empty/blocked
+    HTML it raises ValueError which routes to compensate_extract.
+    """
+    from open_notebook.preprocess.tools.trafilatura import extract_html
+
+    try:
+        result = await extract_html(
+            command_id=cmd_id or "",
+            file_path=file_path,
+            html_content=content_state.get("content"),
+            url=url or content_state.get("url") or "",
+        )
+    except asyncio.TimeoutError:
+        errors.append(f"extract: trafilatura timeout after {STAGE_TIMEOUT_EXTRACT}s")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+    except ValueError as exc:  # html_extraction_empty → compensation
+        errors.append(f"extract: trafilatura empty/blocked HTML: {exc}")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"extract: trafilatura wrapper error: {exc}")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    # Build ExtractionOutput-compatible result
+    extraction = _ExtractionOutput(
+        content=result.get("text", ""),
+        title=content_state.get("title", ""),
+    )
+
+    # Record JavaScript-required as a warning (extracting_partial, not failed)
+    if result.get("javascript_required"):
+        errors.append(
+            "extract: trafilatura javascript_required — page may need JavaScript to render"
+        )
+
+    # Record timed-out pages
+    timed_out = result.get("timed_out_pages", [])
+    if timed_out:
+        errors.append(
+            f"extract: pages {sorted(timed_out)} timed out during HTML extraction"
+        )
+
+    if not extraction.content.strip():
+        errors.append("extract: trafilatura returned no text content")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    return {
+        "extraction": extraction,
+        "errors": errors,
+        "stage": "extract",
+    }
+
+
+async def _extract_pandoc_stage(
+    state: Source7StageState,
+    cmd_id: Optional[str],
+    errors: List[str],
+    file_path: str,
+    content_state: Dict[str, Any],
+) -> dict:
+    """Document conversion via pandoc wrapper (docx, odt, epub, rtf, html)."""
+    from open_notebook.preprocess.tools.pandoc import convert_document
+
+    try:
+        result = await convert_document(
+            command_id=cmd_id or "",
+            file_path=file_path,
+            source_format=content_state.get("source_format", "auto"),
+            language=content_state.get("language", ""),
+        )
+    except asyncio.TimeoutError:
+        errors.append(f"extract: pandoc timeout after {STAGE_TIMEOUT_EXTRACT}s")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+    except FileNotFoundError:
+        errors.append("extract: pandoc binary not installed")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"extract: pandoc wrapper error: {exc}")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    extraction = _ExtractionOutput(
+        content=result.get("text", ""),
+        title=content_state.get("title", ""),
+    )
+
+    if not extraction.content.strip():
+        errors.append("extract: pandoc returned no text content")
         return {
             "extraction": None,
             "normalized_text": "",
@@ -1513,6 +1677,11 @@ async def index_stage(state: Source7StageState) -> dict:
         filename=state.get("content_state", {}).get("filename") or previous.filename,
         size=previous.size,
     )
+    # Set source status based on extraction errors: partial if any pages timed out.
+    if any("timed out" in e for e in errors):
+        source.status = "extracting_partial"
+    else:
+        source.status = "ready"
     try:
         await source.save()
     except Exception as exc:  # noqa: BLE001 - capture for compensation
