@@ -35,6 +35,13 @@ from open_notebook.utils.runtime_capabilities import (
 from open_notebook.preprocess.tools.pdf import extract_pdf
 from open_notebook.preprocess.tools.pandoc import convert_document
 from open_notebook.preprocess.tools.trafilatura import extract_html
+from open_notebook.preprocess.tools.ssconvert import (
+    convert_spreadsheet,
+    is_csv,
+    is_spreadsheet,
+    read_csv_native,
+)
+from open_notebook.preprocess.tools.tesseract import extract_ocr
 
 # content-core >= 2.1 disables its own Loguru logging for library consumers.
 # Both the API and the worker import this module before extracting anything,
@@ -72,6 +79,9 @@ STAGE_TIMEOUT_EXTRACT = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_EXTRACT", "
 STAGE_TIMEOUT_CHUNK = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_CHUNK", "30"))
 STAGE_TIMEOUT_EMBED = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_EMBED", "120"))
 STAGE_TIMEOUT_INDEX = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_INDEX", "60"))
+# Heavy / deferred lane (OCR, STT): 30 min backstop so 75+ page scanned PDFs
+# do not abort mid-OCR. Instant text extraction stays at 300s.
+STAGE_TIMEOUT_HEAVY = float(os.getenv("OPEN_NOTEBOOK_STAGE_TIMEOUT_HEAVY", "1800"))
 
 
 class _ExtractionOutput:
@@ -127,7 +137,8 @@ class Source7StageState(TypedDict, total=False):
 
     # ── Stage outputs (written by each stage, read by later ones) ──
     source: Source                        # loaded / updated Source record
-    content_type: str                     # "media" | "text" | "pdf" | "url"
+    content_type: str                     # "media" | "text" | "pdf" | "url" | "spreadsheet" | "csv" | "image" | "html"
+    lane: str                             # "instant" | "heavy" — determines stage timeout
     route_reason: str                     # why this route was chosen
     extraction: ExtractionOutput          # content-core result (stage 3: extract)
     normalized_text: str                  # cleaned text (stage 4: normalize)
@@ -660,6 +671,39 @@ def _is_pdf(file_path: str | None) -> bool:
     return str(file_path).lower().endswith(".pdf") or head == b"%PDF-"
 
 
+def _is_image(file_path: str | None) -> bool:
+    """Whether the file at *file_path* is an image, by content, not by name.
+
+    The blob store stores files as ``{sha}.bin``, so gating OCR on
+    ``endswith((".png", ".jpg"))`` silently skips synced blobs. Magic bytes
+    detect the format regardless of what anyone named the file.
+
+    Covers JPEG, PNG, GIF, WebP, TIFF, BMP.
+    """
+    if not file_path:
+        return False
+    try:
+        with open(file_path, "rb") as handle:
+            head = handle.read(16)
+    except OSError:
+        return False
+    if not head:
+        return False
+    if head[:3] == b"\xff\xd8\xff":
+        return True  # JPEG
+    if head[:4] == b"\x89PNG":
+        return True  # PNG
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return True  # GIF
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return True  # WebP
+    if head[:4] in (b"II*\x00", b"MM\x00*"):
+        return True  # TIFF (little/big endian)
+    if head[:2] == b"BM":
+        return True  # BMP
+    return False
+
+
 def _pdf_engine_uses_ocr(document_engine: str) -> bool:
     """Whether PDFs will be routed through Docling (and therefore OCR'd).
 
@@ -1026,12 +1070,17 @@ async def route_stage(state: Source7StageState) -> dict:
     """Stage 2: Route — classify content and choose the pipeline path.
 
     Inspects content_state to decide:
-      - media (audio/video) → speech-to-text path
-      - pdf → OCR-capable extraction path
-      - url → web extraction path
-      - text / other → direct text path
+      - media (audio/video) → speech-to-text path (heavy lane)
+      - pdf → OCR-capable extraction path (heavy lane)
+      - url → web extraction path (instant lane)
+      - text / other → direct text path (instant lane)
+      - spreadsheet (.xlsx/.xls/.ods) → ssconvert path (instant lane)
+      - csv → native UTF-8 text read (instant lane)
+      - image → tesseract OCR path (heavy lane)
 
-    Sets content_type and route_reason for downstream stages.
+    Sets content_type, lane, and route_reason for downstream stages.
+    ``lane`` determines the extract stage timeout: "instant" = 300s,
+    "heavy" = 1800s (OCR/STT backstop).
     """
     cmd_id = get_current_command_id()
     await report_progress_record(cmd_id, progress=15, stage="route")
@@ -1067,7 +1116,35 @@ async def route_stage(state: Source7StageState) -> dict:
 
         return {
             "content_type": "media",
+            "lane": "heavy",
             "route_reason": route_reason,
+            "stage": "route",
+        }
+
+    # Image files (by magic bytes) → tesseract OCR path (heavy lane)
+    if file_path and _is_image(file_path):
+        return {
+            "content_type": "image",
+            "lane": "heavy",
+            "route_reason": "image file detected by magic bytes",
+            "stage": "route",
+        }
+
+    # Spreadsheet files → ssconvert path (instant lane — fast conversion)
+    if file_path and is_spreadsheet(file_path):
+        return {
+            "content_type": "spreadsheet",
+            "lane": "instant",
+            "route_reason": "spreadsheet file detected by extension",
+            "stage": "route",
+        }
+
+    # CSV files → native UTF-8 text read (instant lane — no binary needed)
+    if file_path and is_csv(file_path):
+        return {
+            "content_type": "csv",
+            "lane": "instant",
+            "route_reason": "CSV file detected by extension",
             "stage": "route",
         }
 
@@ -1075,6 +1152,7 @@ async def route_stage(state: Source7StageState) -> dict:
     if url and not file_path and not content:
         return {
             "content_type": "url",
+            "lane": "instant",
             "route_reason": "url input, no local file",
             "stage": "route",
         }
@@ -1083,6 +1161,7 @@ async def route_stage(state: Source7StageState) -> dict:
     if file_path and _is_pdf(file_path):
         return {
             "content_type": "pdf",
+            "lane": "heavy",
             "route_reason": "PDF file detected by magic bytes",
             "stage": "route",
         }
@@ -1091,6 +1170,7 @@ async def route_stage(state: Source7StageState) -> dict:
     if content and content.strip():
         return {
             "content_type": "text",
+            "lane": "instant",
             "route_reason": "direct text content provided",
             "stage": "route",
         }
@@ -1098,6 +1178,7 @@ async def route_stage(state: Source7StageState) -> dict:
     # Fallback: treat as url (content-core will attempt extraction)
     return {
         "content_type": "url",
+        "lane": "instant",
         "route_reason": "no classifier matched, falling back to url extraction",
         "stage": "route",
     }
@@ -1106,10 +1187,17 @@ async def route_stage(state: Source7StageState) -> dict:
 async def extract_stage(state: Source7StageState) -> dict:
     """Stage 3: Extract — run content-core extraction or native wrapper.
 
-    Routes to native binary wrappers when available (pdftotext for PDFs),
-    falling back to content-core for unsupported formats. Stores the
-    ExtractionOutput-compatible result in state.extraction for the
-    normalize stage.
+    Routes to native binary wrappers when available:
+      - pdf → pdftotext (Day 1), falling back to tesseract OCR when the PDF
+        is scanned (pdftotext yields < 50 chars/page).
+      - spreadsheet (.xlsx/.xls/.ods) → ssconvert (Day 4).
+      - csv → native UTF-8 text read (Day 4, no binary needed).
+      - image → tesseract OCR (Day 4, heavy lane).
+      - html/url → trafilatura (Day 3).
+      - document (docx/odt/epub/rtf) → pandoc (Day 2).
+
+    Conditional stage timeout: "heavy" lane (OCR/STT) gets 1800s so 75+ page
+    scanned PDFs do not abort mid-OCR; "instant" lane stays at 300s.
 
     On failure, adds the error to state.errors and returns so the
     graph's compensation edge can route to compensate_extract.
@@ -1121,14 +1209,99 @@ async def extract_stage(state: Source7StageState) -> dict:
     errors = list(state.get("errors", []))
     content_state = state.get("content_state") or {}
     content_type = state.get("content_type", "url")
+    lane = state.get("lane", "instant")
     file_path = content_state.get("file_path")
     url = content_state.get("url") or ""
 
-    # PDF extraction via pdftotext wrapper (Failure #3 completion).
-    if content_type == "pdf" and file_path:
-        return await _extract_pdf_stage(state, cmd_id, errors, file_path, content_state)
+    # Conditional stage timeout: heavy lane (OCR/STT) → 1800s, instant → 300s.
+    effective_timeout = STAGE_TIMEOUT_HEAVY if lane == "heavy" else STAGE_TIMEOUT_EXTRACT
 
-    # HTML extraction via trafilatura wrapper (HTML/URL content).
+    try:
+        result = await asyncio.wait_for(
+            _dispatch_extract(
+                state, cmd_id, errors, content_type, lane, file_path, content_state, url
+            ),
+            timeout=effective_timeout,
+        )
+    except asyncio.TimeoutError:
+        errors.append(f"extract: timeout after {effective_timeout}s ({lane} lane)")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"extract: wrapper error: {exc}")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    return result
+
+
+async def _dispatch_extract(
+    state: Source7StageState,
+    cmd_id: Optional[str],
+    errors: List[str],
+    content_type: str,
+    lane: str,
+    file_path: Optional[str],
+    content_state: Dict[str, Any],
+    url: str,
+) -> dict:
+    """Dispatch to the correct native wrapper based on content_type.
+
+    Order matters: HTML/URL → trafilatura must come before pandoc so HTML
+    files are not swallowed by pandoc. Spreadsheet and CSV are handled
+    before the document route.
+    """
+    # PDF extraction via pdftotext wrapper (Day 1). Scanned PDFs (pdftotext
+    # yields < 50 chars/page) fall back to tesseract OCR.
+    if content_type == "pdf" and file_path:
+        result = await _extract_pdf_stage(state, cmd_id, errors, file_path, content_state)
+        extraction = result.get("extraction")
+        if extraction and extraction.content and len(extraction.content.strip()) >= 50:
+            return result
+        # pdftotext returned little/no text → scanned PDF, use tesseract OCR.
+        page_count = content_state.get("page_count") or 1
+        language = content_state.get("language") or ""
+        ocr_result = await extract_ocr(
+            command_id=cmd_id or "",
+            file_path=file_path,
+            page_count=int(page_count),
+            language=language,
+        )
+        return _ocr_result_to_extract_dict(
+            state, cmd_id, errors, ocr_result, content_state, "pdf"
+        )
+
+    # Spreadsheet conversion via ssconvert (Day 4).
+    if content_type == "spreadsheet" and file_path:
+        return await _extract_ssconvert_stage(state, cmd_id, errors, file_path, content_state)
+
+    # CSV native text read (Day 4 — no binary, bypasses ssconvert).
+    if content_type == "csv" and file_path:
+        return await _extract_csv_stage(state, cmd_id, errors, file_path, content_state)
+
+    # Image OCR via tesseract (Day 4, heavy lane).
+    if content_type == "image" and file_path:
+        page_count = 1
+        language = content_state.get("language") or ""
+        ocr_result = await extract_ocr(
+            command_id=cmd_id or "",
+            file_path=file_path,
+            page_count=page_count,
+            language=language,
+        )
+        return _ocr_result_to_extract_dict(
+            state, cmd_id, errors, ocr_result, content_state, "image"
+        )
+
+    # HTML extraction via trafilatura wrapper (Day 3).
     # Must come BEFORE pandoc so HTML files don't get swallowed by pandoc.
     if content_type in ("url", "html") and (file_path or url):
         return await _extract_trafilatura_stage(state, cmd_id, errors, file_path, content_state, url)
@@ -1139,6 +1312,56 @@ async def extract_stage(state: Source7StageState) -> dict:
 
     # Fall back to content-core for URLs, text, media, and unknown types.
     return await _extract_content_core_stage(state, cmd_id, errors, content_state, url)
+
+
+def _ocr_result_to_extract_dict(
+    state: Source7StageState,
+    cmd_id: Optional[str],
+    errors: List[str],
+    ocr_result: Dict[str, Any],
+    content_state: Dict[str, Any],
+    source_kind: str,
+) -> dict:
+    """Convert an OCR ExtractResult dict into an extract_stage result dict.
+
+    Low confidence (< 60% mean) sets extracting_partial via a warning but
+    does not fail — partial OCR text is still useful content.
+    """
+    extraction = _ExtractionOutput(
+        content=ocr_result.get("text", ""),
+        title=content_state.get("title", ""),
+    )
+
+    # Propagate OCR warnings (low confidence, timed-out pages).
+    for warning in ocr_result.get("warnings", []):
+        errors.append(f"extract: {warning}")
+
+    timed_out = ocr_result.get("timed_out_pages", [])
+    if timed_out:
+        errors.append(
+            f"extract: pages {sorted(timed_out)} timed out during {source_kind} OCR"
+        )
+
+    if ocr_result.get("low_confidence"):
+        errors.append(
+            "extract: low_ocr_confidence — text may be inaccurate "
+            "(extracting_partial)"
+        )
+
+    if not extraction.content.strip():
+        errors.append(f"extract: {source_kind} OCR returned no text content")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    return {
+        "extraction": extraction,
+        "errors": errors,
+        "stage": "extract",
+    }
 
 
 async def _extract_pdf_stage(
@@ -1193,6 +1416,118 @@ async def _extract_pdf_stage(
 
     if not extraction.content.strip():
         errors.append("extract: pdf returned no text content")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    return {
+        "extraction": extraction,
+        "errors": errors,
+        "stage": "extract",
+    }
+
+
+async def _extract_ssconvert_stage(
+    state: Source7StageState,
+    cmd_id: Optional[str],
+    errors: List[str],
+    file_path: str,
+    content_state: Dict[str, Any],
+) -> dict:
+    """Spreadsheet conversion via ssconvert wrapper (xlsx, xls, ods).
+
+    Converts to CSV then formats as a Markdown table. Missing binary or
+    non-zero exit raises ValueError which routes to compensation.
+    """
+    try:
+        result = await convert_spreadsheet(
+            command_id=cmd_id or "",
+            file_path=file_path,
+        )
+    except ValueError as exc:  # ssconvert_failed → compensation
+        errors.append(f"extract: {exc}")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+    except asyncio.TimeoutError:
+        errors.append(f"extract: ssconvert timeout after {STAGE_TIMEOUT_EXTRACT}s")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"extract: ssconvert wrapper error: {exc}")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    if result.get("truncated"):
+        errors.append(
+            f"extract: spreadsheet truncated at {MAX_TABLE_ROWS} rows "
+            "(use a smaller sheet or split into multiple files)"
+        )
+
+    extraction = _ExtractionOutput(
+        content=result.get("text", ""),
+        title=content_state.get("title", ""),
+    )
+
+    if not extraction.content.strip():
+        errors.append("extract: ssconvert returned no table content")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    return {
+        "extraction": extraction,
+        "errors": errors,
+        "stage": "extract",
+    }
+
+
+async def _extract_csv_stage(
+    state: Source7StageState,
+    cmd_id: Optional[str],
+    errors: List[str],
+    file_path: str,
+    content_state: Dict[str, Any],
+) -> dict:
+    """CSV native text read (bypasses ssconvert — no binary needed)."""
+    try:
+        result = await read_csv_native(
+            command_id=cmd_id or "",
+            file_path=file_path,
+        )
+    except Exception as exc:  # noqa: BLE001 - capture for compensation
+        errors.append(f"extract: csv read error: {exc}")
+        return {
+            "extraction": None,
+            "normalized_text": "",
+            "errors": errors,
+            "stage": "extract",
+        }
+
+    extraction = _ExtractionOutput(
+        content=result.get("text", ""),
+        title=content_state.get("title", ""),
+    )
+
+    if not extraction.content.strip():
+        errors.append("extract: csv returned no text content")
         return {
             "extraction": None,
             "normalized_text": "",
@@ -1924,8 +2259,12 @@ workflow_7stage.add_conditional_edges(
     {
         "media": "extract_heavy",      # audio/video → STT path
         "pdf": "extract_heavy",        # scanned PDF → OCR path
+        "image": "extract_heavy",      # image → tesseract OCR path
         "url": "extract_instant",      # URL → direct extraction
+        "html": "extract_instant",     # HTML → trafilatura (instant lane)
         "text": "extract_instant",     # direct text → instant
+        "spreadsheet": "extract_instant",  # xlsx/xls/ods → ssconvert (fast)
+        "csv": "extract_instant",      # CSV → native text read (fast)
         "deferred": "extract_heavy",   # deferred lane → heavy extraction
     },
 )
