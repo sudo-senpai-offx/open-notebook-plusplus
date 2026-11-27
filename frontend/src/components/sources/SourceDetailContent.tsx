@@ -359,10 +359,10 @@ function SourceDetailContentInner({
   }
 
   const getSourceType = () => {
-    if (!source) return 'unknown'
-    if (source.asset?.url) return 'link'
-    if (source.asset?.file_path) return 'file'
-    return 'text'
+    if (!source) return t('common.unknown')
+    if (source.asset?.url) return t('sources.type.link')
+    if (source.asset?.file_path) return t('sources.type.file')
+    return t('sources.type.text')
   }
 
   const externalHref = useMemo(() => safeExternalHref(source?.asset?.url), [source?.asset?.url])
