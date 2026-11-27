@@ -1,0 +1,23 @@
+-- Migration 81: Dispatcher heartbeat + TTL enforcement (Batch 9 week 1, Day 1)
+--
+-- Creates the dispatcher heartbeat singleton table used by /health/ready to
+-- detect a hung or dead dispatcher. Adds ttl_expires_at to the command table
+-- so held jobs can expire instead of accumulating forever.
+--
+-- The command table was created in migration 7 with no explicit fields
+-- (SCHEMAFULL). Adding ttl_expires_at here is safe: existing rows keep their
+-- current values (NULL means no TTL), and new rows written by submit_held will
+-- carry an expiration.
+
+-- 1. Dispatcher heartbeat singleton table
+DEFINE TABLE IF NOT EXISTS dispatcher_heartbeat SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS last_updated_at ON dispatcher_heartbeat TYPE datetime;
+
+-- 2. Initialize the singleton row (id = "dispatcher")
+UPSERT dispatcher_heartbeat:dispatcher SET last_updated_at = time::now();
+
+-- 3. TTL field on command table (the dispatcher reads/writes command, not job_log)
+DEFINE FIELD IF NOT EXISTS ttl_expires_at ON command TYPE option<datetime>;
+
+-- 4. Index for TTL sweep queries (expired job cleanup every ~5 min)
+DEFINE INDEX IF NOT EXISTS idx_command_ttl_expires ON command FIELDS ttl_expires_at;

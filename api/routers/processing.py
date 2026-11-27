@@ -35,6 +35,7 @@ visible instead.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -52,6 +53,7 @@ from open_notebook.scheduler.dispatcher import (
 )
 from open_notebook.scheduler.gate import default_reserve
 from open_notebook.scheduler.memory import current_memory
+from open_notebook.scheduler.submit import _LANE_CAPS, _LANE_AVG_DURATION_SEC
 
 #: This device's hard ceiling on the window. The phone launcher lowers it; an
 #: 8 GB device with two model servers beside the worker will OOM past 2.
@@ -110,6 +112,45 @@ class ThrottleResponse(BaseModel):
     applied_within_seconds: int = Field(
         default=0, description="Upper bound on when the new window takes effect"
     )
+
+
+class LaneDepth(BaseModel):
+    lane: str = Field(..., description="Queue lane: instant, heavy, or deferred")
+    held: int = Field(..., description="Jobs currently held in this lane")
+    cap: int = Field(..., description="Hard cap (dispatcher never promotes past this)")
+    soft_cap: int = Field(..., description="Submit-time soft cap (cap × 1.1)")
+    at_cap: bool = Field(..., description="True when held >= hard cap")
+    over_soft: bool = Field(..., description="True when held >= soft cap (submit rejects)")
+
+
+class QueueDepthResponse(BaseModel):
+    lanes: List[LaneDepth] = Field(..., description="Per-lane depth and cap status")
+    total_held: int = Field(..., description="Total held jobs across all lanes")
+
+
+class TtlJobInfo(BaseModel):
+    id: str = Field(..., description="Command id")
+    name: str = Field(..., description="Command name")
+    lane: str = Field(..., description="Queue lane")
+    created: str = Field(..., description="ISO-8601 submission time")
+    ttl_expires_at: Optional[str] = Field(
+        default=None, description="ISO-8601 TTL expiration, or None if unset"
+    )
+    expired: bool = Field(..., description="True when ttl_expires_at is in the past")
+    seconds_until_expiry: Optional[float] = Field(
+        default=None, description="Seconds until expiry (null if expired or unset)"
+    )
+
+
+class TtlInfoResponse(BaseModel):
+    expired_count: int = Field(..., description="Held jobs whose TTL has passed")
+    expiring_soon_count: int = Field(
+        ..., description="Held jobs expiring within the next hour"
+    )
+    total_ttl_held: int = Field(
+        ..., description="Held jobs that have a TTL set"
+    )
+    jobs: List[TtlJobInfo] = Field(..., description="Per-job TTL detail")
 
 
 @router.post("/processing/throttle", response_model=ThrottleResponse)
@@ -270,6 +311,121 @@ async def processing_status() -> Dict[str, Any]:
             "available": residency_state is not None,
         },
     }
+
+
+@router.get("/processing/queue-depth", response_model=QueueDepthResponse)
+async def queue_depth() -> QueueDepthResponse:
+    """Per-lane queue depth with caps.
+
+    Tells the UI whether each lane is at or near its cap so it can show
+    backlog and throttle submit buttons before the dispatcher hard-walls
+    promotion. Counts are held-only: `new`/`running` jobs are in flight,
+    not waiting.
+
+    Soft cap = cap × 1.1 (submit-time rejection threshold).
+    Hard cap = cap (dispatcher never promotes past this).
+    """
+    lanes: List[LaneDepth] = []
+    total_held = 0
+
+    for lane_name in ("instant", "heavy", "deferred"):
+        cap = _LANE_CAPS[lane_name]
+        soft_cap = int(cap * 1.1)
+
+        rows = (
+            await repo_query(
+                "SELECT count() AS c FROM command "
+                "WHERE status = 'held' AND lane = $lane",
+                {"lane": lane_name},
+            )
+            or []
+        )
+        held = 0
+        if rows and rows[0].get("c") is not None:
+            try:
+                held = int(rows[0]["c"])
+            except (TypeError, ValueError):
+                held = 0
+
+        total_held += held
+        lanes.append(
+            LaneDepth(
+                lane=lane_name,
+                held=held,
+                cap=cap,
+                soft_cap=soft_cap,
+                at_cap=held >= cap,
+                over_soft=held >= soft_cap,
+            )
+        )
+
+    return QueueDepthResponse(lanes=lanes, total_held=total_held)
+
+
+@router.get("/processing/ttl-info", response_model=TtlInfoResponse)
+async def ttl_info() -> TtlInfoResponse:
+    """TTL information for held jobs.
+
+    Reports which held jobs carry a TTL, which have already expired, and
+    which expire within the next hour. Expired jobs are swept by the
+    dispatcher every 5 min; this endpoint makes the backlog visible to the
+    UI before the sweep runs.
+    """
+    now = datetime.now(timezone.utc)
+    soon_cutoff = now + timedelta(hours=1)
+
+    rows = (
+        await repo_query(
+            "SELECT id, name, lane, created, ttl_expires_at FROM command "
+            "WHERE status = 'held' AND ttl_expires_at IS NOT NONE "
+            "ORDER BY ttl_expires_at ASC"
+        )
+        or []
+    )
+
+    jobs: List[TtlJobInfo] = []
+    expired_count = 0
+    expiring_soon_count = 0
+
+    for r in rows:
+        raw_ttl = r.get("ttl_expires_at")
+        expired_flag = False
+        seconds_until: Optional[float] = None
+
+        if raw_ttl is not None:
+            try:
+                ttl_str = str(raw_ttl)
+                ttl_dt = datetime.fromisoformat(ttl_str.replace("Z", "+00:00"))
+                if ttl_dt.tzinfo is None:
+                    ttl_dt = ttl_dt.replace(tzinfo=timezone.utc)
+                delta = (ttl_dt - now).total_seconds()
+                seconds_until = delta
+                if delta <= 0:
+                    expired_flag = True
+                    expired_count += 1
+                elif delta <= 3600:
+                    expiring_soon_count += 1
+            except (ValueError, TypeError):
+                pass
+
+        jobs.append(
+            TtlJobInfo(
+                id=str(r.get("id") or ""),
+                name=str(r.get("name") or ""),
+                lane=str(r.get("lane") or "instant"),
+                created=str(r.get("created") or ""),
+                ttl_expires_at=str(raw_ttl) if raw_ttl is not None else None,
+                expired=expired_flag,
+                seconds_until_expiry=seconds_until,
+            )
+        )
+
+    return TtlInfoResponse(
+        expired_count=expired_count,
+        expiring_soon_count=expiring_soon_count,
+        total_ttl_held=len(jobs),
+        jobs=jobs,
+    )
 
 
 @router.post("/processing/ensure-insights", response_model=EnsureInsightsResponse)

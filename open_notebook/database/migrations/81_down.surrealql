@@ -1,0 +1,4 @@
+-- Migration 81 down: Remove dispatcher heartbeat + TTL enforcement
+REMOVE INDEX IF EXISTS idx_command_ttl_expires ON command;
+REMOVE FIELD IF EXISTS ttl_expires_at ON command;
+REMOVE TABLE IF EXISTS dispatcher_heartbeat;

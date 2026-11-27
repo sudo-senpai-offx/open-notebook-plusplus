@@ -37,6 +37,50 @@ from loguru import logger
 
 APP = "open_notebook"
 
+# Per-lane queue caps (Batch 9 week 1, Day 2).
+# Hard cap: dispatcher never promotes past this count (enforced in dispatcher.py).
+# Soft cap: submit-time rejection threshold = cap × 1.1 (enforced here).
+_LANE_CAPS: Dict[str, int] = {"instant": 100, "heavy": 20, "deferred": 10}
+# Average job duration per lane (seconds), used to compute retry_after.
+# These are stored constants, refreshed from actual durations every 24h.
+_LANE_AVG_DURATION_SEC: Dict[str, int] = {
+    "instant": 10,   # chat, quick lookups
+    "heavy": 300,    # source processing, embeddings (5 min/job)
+    "deferred": 600, # audio/OCR batch (10 min/job)
+}
+
+
+def _detect_lane(command: str) -> str:
+    """Determine which lane a command belongs to, by name prefix.
+
+    audio_ / ocr_  → deferred (batch processing, runs when Ollama unloaded)
+    process_ / crawl_ / embed_ → heavy (CPU/GPU intensive)
+    everything else → instant (chat, quick lookups)
+    """
+    if command.startswith(("audio_", "ocr_")):
+        return "deferred"
+    if command.startswith(("process_", "crawl_", "embed_")):
+        return "heavy"
+    return "instant"
+
+
+class QueueFull(Exception):
+    """Raised when a lane's queue is at its soft submit-time cap.
+
+    Attributes are surfaced to the caller so the API layer can return a
+    structured 429 with `retry_after`, `queue_depth`, and `queue_cap`.
+    """
+
+    def __init__(self, lane: str, queue_depth: int, queue_cap: int, retry_after: int):
+        self.lane = lane
+        self.queue_depth = queue_depth
+        self.queue_cap = queue_cap
+        self.retry_after = retry_after
+        super().__init__(
+            f"{lane} lane is at capacity ({queue_depth}/{queue_cap}). "
+            f"Estimated wait: {retry_after} seconds."
+        )
+
 
 def _validate(app: str, command: str, args: Dict[str, Any]) -> Dict[str, Any]:
     """Registry lookup and schema validation, matching the vendor helper.
@@ -77,9 +121,43 @@ def submit_held(
 
     validated = _validate(app, command, args)
 
+    lane = _detect_lane(command)
+    cap = _LANE_CAPS[lane]
+    soft_cap = int(cap * 1.1)
+
     with Surreal(command_service.db_url) as db:
         db.signin(command_service.db_auth)
         db.use(command_service.db_namespace, command_service.db_database)
+
+        # Soft submit-time queue cap: reject immediately if the lane is full.
+        # No transaction — the dispatcher re-verifies with the hard cap before
+        # promotion, so this is a best-effort fast path for the user.
+        try:
+            count_results = db.query(
+                "SELECT count() as c FROM command WHERE status = 'held' AND lane = $lane",
+                {"lane": lane},
+            )
+            queue_depth = 0
+            if count_results:
+                first = count_results[0]
+                rows = (
+                    first.result
+                    if hasattr(first, "result")
+                    else (first.get("result", []) if isinstance(first, dict) else first)
+                )
+                if isinstance(rows, list) and rows:
+                    first_row = rows[0]
+                    queue_depth = int(
+                        first_row.get("c", 0) if isinstance(first_row, dict) else 0
+                    )
+        except Exception as exc:  # noqa: BLE001 - count failure must not block submit
+            logger.debug(f"queue cap count failed for lane {lane}: {exc}")
+            queue_depth = 0
+
+        if queue_depth >= soft_cap:
+            retry_after = queue_depth * _LANE_AVG_DURATION_SEC[lane]
+            raise QueueFull(lane, queue_depth, cap, retry_after)
+
         result = db.create(
             "command",
             {
@@ -88,6 +166,7 @@ def submit_held(
                 "args": validated,
                 "context": context or {},
                 "status": "held",
+                "lane": lane,
                 # ISO-8601, matching what the rest of this codebase stores and
                 # what `ORDER BY` compares correctly on. `time` is SurrealDB's
                 # own record of creation; `created` is what the worker and the

@@ -20,13 +20,20 @@ except Exception:
 
 import asyncio
 import os
+import time
 from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
+from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from open_notebook.sync.scheduler import start_scheduler, stop_scheduler
+
+import httpx
 
 from api.auth import PasswordAuthMiddleware, enforce_require_auth
 from api.middleware import MaxBodySizeMiddleware, get_max_upload_size_bytes
@@ -37,6 +44,7 @@ from api.routers import (
     capabilities,
     chat,
     config,
+    course,
     credentials,
     deepseek_sessions,
     deepseek_web,
@@ -51,6 +59,10 @@ from api.routers import (
     metrics,
     models,
     notebooks,
+    notebooks,
+    notebook_templates,
+    notebook_versions,
+    notebook_merge,
     notes,
     podcasts,
     preprocessor,
@@ -59,15 +71,24 @@ from api.routers import (
     providers,
     review,
     search,
+    search_history,
+    sessions,
     services,
     settings,
     sites,
+    social,
     source_chat,
+    storytelling,
+    study,
     sources,
     speaker_profiles,
+    source_links,
     sync,
     transformations,
+    notebook_graph,
     tts_stt,
+    webhooks,
+    export,
 )
 from api.routers import commands as commands_router
 from open_notebook.database.async_migrate import AsyncMigrationManager
@@ -291,6 +312,8 @@ async def lifespan(app: FastAPI):
     _governor = Governor()
     _governor.start()
     app.state.governor = _governor
+    # Start background sync scheduler (every 6 hours)
+    await start_scheduler()
     # Resume-on-reopen: reconcile jobs interrupted by device restart.
     # Any command still in `running` was killed mid-execution; re-queue it
     # as `held` if attempts remain, or mark `failed` with a clear reason
@@ -345,14 +368,64 @@ async def lifespan(app: FastAPI):
                 )
     except Exception as exc:  # noqa: BLE001 - resume must never block boot
         logger.debug(f"resume-on-reopen skipped: {exc}")
+    # Reconcile `new` jobs: promoted by the dispatcher but never claimed by
+    # the worker before the device restarted. Move back to `held` so the
+    # dispatcher can re-admit them on the next pass.
+    try:
+        from open_notebook.ai.models import JobCheckpoint
+
+        promoted_orphans = await repo_query(
+            "SELECT id, name, args FROM command WHERE status = 'new'"
+        )
+        for row in promoted_orphans or []:
+            cmd_id = str(row["id"])
+            checkpoint = await JobCheckpoint.get_for_command(cmd_id)
+            attempts = checkpoint.attempt_count if checkpoint else 0
+            if checkpoint is None:
+                can = True
+            else:
+                can = await checkpoint.can_retry()
+            if can:
+                await repo_query(
+                    "UPDATE $id SET status = $status, error_message = $error",
+                    {
+                        "id": ensure_record_id(cmd_id),
+                        "status": "held",
+                        "error": "resumed after device restart - promoted but never claimed",
+                    },
+                )
+                await JobCheckpoint.upsert_for_command(
+                    cmd_id,
+                    increment_attempt=True,
+                    checkpoint=checkpoint.checkpoint if checkpoint else {},
+                )
+                logger.info(f"resume: re-queued new→held {cmd_id} (attempt {attempts + 1}/3)")
+            else:
+                await JobCheckpoint.upsert_for_command(
+                    cmd_id,
+                    increment_attempt=True,
+                    checkpoint=checkpoint.checkpoint if checkpoint else {},
+                )
+                await repo_query(
+                    "UPDATE $id SET status = $status, error_message = $error",
+                    {
+                        "id": ensure_record_id(cmd_id),
+                        "status": "failed",
+                        "error": "exhausted all 3 resume attempts after repeated interruption",
+                    },
+                )
+                logger.warning(f"resume: exhausted new→held {cmd_id} after {attempts + 1} attempts")
+    except Exception as exc:  # noqa: BLE001 - new-job reconcile must never block boot
+        logger.debug(f"new-job reconciliation skipped: {exc}")
     # Yield control to the application
     yield
-    # Shutdown: stop monitor
     await _job_monitor.stop()
     # The dispatcher stops before the monitor: it writes no terminal state, so
     # stopping it second leaves nothing half-promoted at exit.
     _dispatcher.stop()
     await _governor.stop()
+    # Stop background sync scheduler
+    await stop_scheduler()
     logger.info("API shutdown complete")
 
 
@@ -415,6 +488,67 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Request/Response logging middleware ────────────────────────────────────
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    import time as _time
+
+    start = _time.monotonic()
+    response = await call_next(request)
+    duration_ms = int((_time.monotonic() - start) * 1000)
+    logger.info(
+        f"{request.method} {request.url.path} -> {response.status_code} ({duration_ms}ms)"
+    )
+    return response
+
+
+# ── Rate limiting middleware (token bucket per client IP) ──────────────────
+class _RateLimiter:
+    """Simple in-memory token bucket rate limiter per client IP."""
+
+    def __init__(self, requests_per_minute: int = 120):
+        self.capacity = requests_per_minute
+        self.refill_rate = requests_per_minute / 60.0
+        self._buckets: dict[str, tuple[float, float]] = {}
+        self._lock = asyncio.Lock()
+
+    async def is_allowed(self, client_ip: str) -> bool:
+        async with self._lock:
+            now = time.monotonic()
+            tokens, last_refill = self._buckets.get(
+                client_ip, (self.capacity, now)
+            )
+            elapsed = now - last_refill
+            tokens = min(self.capacity, tokens + elapsed * self.refill_rate)
+            if tokens >= 1.0:
+                tokens -= 1.0
+                self._buckets[client_ip] = (tokens, now)
+                return True
+            self._buckets[client_ip] = (tokens, now)
+            return False
+
+
+_rate_limiter = _RateLimiter(
+    requests_per_minute=int(
+        os.environ.get("OPEN_NOTEBOOK_API_RATE_LIMIT", "120")
+    )
+)
+
+
+@app.middleware("http")
+async def rate_limit_requests(request: Request, call_next):
+    if request.url.path in ("/health", "/api/auth/status"):
+        return await call_next(request)
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not await _rate_limiter.is_allowed(client_ip):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Please slow down."},
+            headers=_cors_headers(request),
+        )
+    return await call_next(request)
 
 
 # Custom exception handler to ensure CORS headers are included in error responses
@@ -524,7 +658,11 @@ app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(browser_ai.router, prefix="/api", tags=["browser-ai"])
 app.include_router(config.router, prefix="/api", tags=["config"])
 app.include_router(notebooks.router, prefix="/api", tags=["notebooks"])
+app.include_router(notebook_templates.router, prefix="/api", tags=["notebook-templates"])
+app.include_router(notebook_versions.router, prefix="/api", tags=["notebook-versions"])
+app.include_router(notebook_merge.router, prefix="/api", tags=["notebook-merge"])
 app.include_router(search.router, prefix="/api", tags=["search"])
+app.include_router(search_history.router, prefix="/api", tags=["search-history"])
 app.include_router(services.router, prefix="/api", tags=["services"])
 app.include_router(deepseek_web.router, prefix="/api", tags=["deepseek-web"])
 app.include_router(deepseek_sessions.router, prefix="/api", tags=["deepseek-sessions"])
@@ -547,6 +685,9 @@ app.include_router(settings.router, prefix="/api", tags=["settings"])
 app.include_router(assessments.router, prefix="/api", tags=["assessments"])
 app.include_router(sources.router, prefix="/api", tags=["sources"])
 app.include_router(sites.router, prefix="/api", tags=["sites"])
+app.include_router(social.router, prefix="/api", tags=["social"])
+app.include_router(storytelling.router, prefix="/api", tags=["storytelling"])
+app.include_router(study.router, prefix="/api", tags=["study"])
 app.include_router(insights.router, prefix="/api", tags=["insights"])
 app.include_router(commands_router.router, prefix="/api", tags=["commands"])
 app.include_router(podcasts.router, prefix="/api", tags=["podcasts"])
@@ -554,12 +695,18 @@ app.include_router(preprocessor.router, prefix="/api", tags=["preprocessor"])
 app.include_router(prompt_library.router, prefix="/api", tags=["prompt-library"])
 app.include_router(episode_profiles.router, prefix="/api", tags=["episode-profiles"])
 app.include_router(speaker_profiles.router, prefix="/api", tags=["speaker-profiles"])
+app.include_router(source_links.router, prefix="/api", tags=["source-links"])
+app.include_router(notebook_graph.router, prefix="/api", tags=["notebook-graph"])
 app.include_router(chat.router, prefix="/api", tags=["chat"])
 app.include_router(source_chat.router, prefix="/api", tags=["source-chat"])
+app.include_router(course.router, prefix="/api", tags=["course"])
 app.include_router(credentials.router, prefix="/api", tags=["credentials"])
 app.include_router(providers.router, prefix="/api", tags=["providers"])
+app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(capabilities.router, prefix="/api", tags=["capabilities"])
 app.include_router(languages.router, prefix="/api", tags=["languages"])
+app.include_router(webhooks.router, prefix="/api", tags=["webhooks"])
+app.include_router(export.router, prefix="/api", tags=["export"])
 
 
 @app.get("/")
@@ -569,18 +716,291 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check. Verifies the API process is alive and SurrealDB is reachable."""
+    """Health check. Verifies the API process is alive and SurrealDB is reachable.
+
+    Also reports vector/FTS index sizes and table counts for restore
+    verification (Batch E: restore-verifiable guarantee).
+    """
     from open_notebook.database.async_migrate import AsyncMigrationManager
 
     db_ok = False
+    index_info = {}
+    table_counts = {}
     try:
         mm = AsyncMigrationManager()
         await mm.ping()
         db_ok = True
+
+        # Report index sizes for restore verification
+        from open_notebook.database.repository import repo_query
+
+        try:
+            vec_size = await repo_query(
+                "SELECT sum(array::len(embedding)) * 8 as vec_bytes FROM source_chunk WHERE embedding != NONE GROUP ALL"
+            )
+            if vec_size and vec_size[0].get("vec_bytes"):
+                index_info["vector_index_bytes"] = int(vec_size[0]["vec_bytes"])
+        except Exception:
+            pass
+
+        try:
+            fts_count = await repo_query(
+                "SELECT count() as c FROM source_chunk GROUP ALL"
+            )
+            if fts_count:
+                index_info["fts_chunk_count"] = int(fts_count[0]["c"])
+        except Exception:
+            pass
+
+        # Table counts for restore verification
+        for table in [
+            "source",
+            "source_chunk",
+            "flashcard",
+            "review_history",
+            "notebook",
+            "note",
+            "social_post",
+            "transformation_run",
+        ]:
+            try:
+                cnt = await repo_query(f"SELECT count() as c FROM {table} GROUP ALL")
+                if cnt:
+                    table_counts[table] = int(cnt[0]["c"])
+            except Exception:
+                pass
     except Exception:
         db_ok = False
 
     return {
         "status": "healthy" if db_ok else "degraded",
         "database": "reachable" if db_ok else "unreachable",
+        "vector_index_mb": round(index_info.get("vec_bytes", 0) / (1024 * 1024), 2),
+        "fts_chunk_count": index_info.get("fts_chunk_count", 0),
+        "table_counts": table_counts,
     }
+
+
+@app.get("/health/ready")
+async def readiness():
+    """Readiness probe: dispatcher heartbeat + SurrealDB reachability.
+
+    The dispatcher is critical because chat jobs submitted via POST /api/chat
+    must be promoted from `held` to `new` before they can execute. If the
+    dispatcher is stale (>90s since last heartbeat), chat appears broken.
+    Returns 503 so load balancers and sidecars stop routing traffic.
+
+    Non-critical deps (Ollama) degrade to 200 + degraded body, not 503.
+    """
+    from datetime import datetime, timezone
+
+    from open_notebook.database.repository import repo_query
+
+    # 1. SurrealDB must be reachable
+    try:
+        mm = AsyncMigrationManager()
+        await mm.ping()
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "db_unavailable"},
+        )
+
+    # 2. Dispatcher heartbeat must be recent (< 90s)
+    try:
+        rows = await repo_query(
+            "SELECT last_updated_at FROM dispatcher_heartbeat LIMIT 1",
+        )
+    except Exception:
+        # Table may not exist yet (migration 81 not applied) — treat as stale
+        return JSONResponse(
+            status_code=503,
+            content={"status": "starting"},
+        )
+
+    if not rows:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "starting"},
+        )
+
+    last_updated = rows[0].get("last_updated_at")
+    if last_updated is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "starting"},
+        )
+
+    # SurrealDB returns datetime objects directly; handle both str and datetime
+    if isinstance(last_updated, str):
+        last_dt = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
+    else:
+        last_dt = last_updated
+
+    age_s = (datetime.now(timezone.utc) - last_dt).total_seconds()
+    if age_s > 90:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "dispatcher_stale",
+                "last_heartbeat_at": rows[0].get("last_updated_at"),
+                "age_seconds": round(age_s, 1),
+            },
+        )
+
+    return {"status": "ok"}
+
+
+@app.get("/api/ollama/models")
+async def list_ollama_models():
+    """List available Ollama models from the local server."""
+    try:
+        from open_notebook.services.ollama_provider import ollama_provider
+        models = await ollama_provider.list_models()
+        return {"models": models}
+    except Exception as e:
+        logger.error(f"Error listing Ollama models: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error listing Ollama models: {str(e)}"
+        )
+
+
+@app.get("/api/test-ollama")
+async def test_ollama_route():
+    """Test route to verify ollama endpoint registration."""
+    return {"status": "ok", "message": "ollama route is working"}
+
+
+# ============================================================================
+# Ollama on-demand model management endpoints
+# ============================================================================
+
+class _OllamaPullRequest(BaseModel):
+    model: str
+
+
+class _OllamaUnloadRequest(BaseModel):
+    model: Optional[str] = None
+
+
+class _OllamaKeepAliveRequest(BaseModel):
+    model: Optional[str] = None
+    duration: str = "0s"
+
+
+class _OllamaEnsureLoadedRequest(BaseModel):
+    model: Optional[str] = None
+    auto_pull: bool = True
+
+
+class _OllamaEmbedRequest(BaseModel):
+    model: str
+    input: str
+
+
+@app.post("/api/ollama/pull")
+async def ollama_pull_model(req: _OllamaPullRequest):
+    """Pull (download) an Ollama model on-demand."""
+    try:
+        from open_notebook.services.ollama_provider import ollama_provider
+        result = await ollama_provider.pull_model(req.model)
+        if result["status"] == "error":
+            raise HTTPException(status_code=500, detail=result.get("error", "pull failed"))
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error pulling Ollama model {req.model}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ollama/unload")
+async def ollama_unload_model(req: _OllamaUnloadRequest):
+    """Unload an Ollama model from memory to free RAM."""
+    try:
+        from open_notebook.services.ollama_provider import ollama_provider
+        success = await ollama_provider.unload_model(req.model)
+        return {"status": "unloaded" if success == True else "failed", "model": req.model}
+    except Exception as e:
+        logger.error(f"Error unloading Ollama model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ollama/unload-all")
+async def ollama_unload_all_models():
+    """Unload all Ollama models from memory."""
+    try:
+        from open_notebook.services.ollama_provider import ollama_provider
+        success = await ollama_provider.unload_all_models()
+        return {"status": "unloaded_all" if success else "failed"}
+    except Exception as e:
+        logger.error(f"Error unloading all Ollama models: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ollama/keep-alive")
+async def ollama_set_keep_alive(req: _OllamaKeepAliveRequest):
+    """Set keep_alive duration for an Ollama model."""
+    try:
+        from open_notebook.services.ollama_provider import ollama_provider
+        success = await ollama_provider.set_keep_alive(req.model, req.duration)
+        return {"status": "ok" if success else "failed", "model": req.model, "duration": req.duration}
+    except Exception as e:
+        logger.error(f"Error setting keep_alive: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/ollama/loaded")
+async def ollama_list_loaded_models():
+    """List models currently loaded in Ollama memory."""
+    try:
+        from open_notebook.services.ollama_provider import ollama_provider
+        base_url = await ollama_provider._get_base_url()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{base_url}/api/ps")
+            if resp.status_code == 200:
+                return resp.json()
+            return {"models": []}
+    except Exception as e:
+        logger.error(f"Error listing loaded Ollama models: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ollama/ensure-loaded")
+async def ollama_ensure_loaded(req: _OllamaEnsureLoadedRequest):
+    """Ensure an Ollama model is loaded in memory (pulls if missing)."""
+    try:
+        from open_notebook.services.ollama_provider import ollama_provider
+        result = await ollama_provider.ensure_model_loaded(req.model, auto_pull=req.auto_pull)
+        if result["status"] == "error":
+            raise HTTPException(status_code=500, detail=result.get("error", "ensure failed"))
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error ensuring Ollama model loaded: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ollama/embed")
+async def ollama_embed(req: _OllamaEmbedRequest):
+    """Generate embeddings using a local Ollama embedding model."""
+    try:
+        from open_notebook.services.ollama_provider import ollama_provider
+        base_url = await ollama_provider._get_base_url()
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{base_url}/api/embed",
+                json={"model": req.model, "input": req.input},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail=f"Ollama embed failed: {resp.text[:200]}",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating Ollama embeddings: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

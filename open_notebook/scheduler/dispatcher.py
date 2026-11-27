@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -63,6 +64,8 @@ from open_notebook.scheduler.footprint import (
 )
 from open_notebook.scheduler.gate import evaluate
 from open_notebook.scheduler.memory import MemoryReading, current_memory
+from open_notebook.utils.job_control import is_stale
+from open_notebook.utils.notify import JobEvent, notify_job_event
 
 HELD = "held"
 NEW = "new"
@@ -73,6 +76,29 @@ DEFAULT_WINDOW = 3
 MIN_WINDOW = 0
 MAX_WINDOW = 8
 DEFAULT_INTERVAL_SECONDS = 5.0
+
+# Hard dispatcher-time per-lane caps. submit.py enforces a soft cap (cap × 1.1)
+# at submit time; this is the hard wall at cap, checked before each promotion.
+_LANE_CAPS: Dict[str, int] = {"instant": 100, "heavy": 20, "deferred": 10}
+
+# Heartbeat: written to dispatcher_heartbeat:dispatcher every 30s so that
+# /health/ready can detect a hung dispatcher. Stored in DB (not memory) so it
+# survives API restarts and is queryable by external health checks.
+_last_heartbeat_write: float | None = None
+HEARTBEAT_INTERVAL_SECONDS = 30.0
+
+# Unified reaper state (verbatim JobMonitor criteria, merged into dispatcher).
+# _tracked: active job ids seen on the previous pass (for departed detection).
+# _stale_candidates: running job ids that were stale on the previous pass
+#   (confirm-twice before marking failed).
+_tracked: set[str] = set()
+_stale_candidates: set[str] = set()
+STALE_THRESHOLD_SECONDS = 300
+
+# TTL sweep state. Sweep every 5 min (300s), delete held jobs whose
+# ttl_expires_at has passed.
+_last_ttl_sweep: float | None = None
+TTL_SWEEP_INTERVAL_SECONDS = 300.0
 
 
 def device_cap() -> int:
@@ -226,14 +252,14 @@ async def _fetch_jobs() -> Dict[str, List[Dict[str, Any]]]:
 
     held = (
         await repo_query(
-            "SELECT id, name, args, created FROM command "
+            "SELECT id, name, args, created, lane FROM command "
             f"WHERE status = '{HELD}' ORDER BY created ASC"
         )
         or []
     )
     live = (
         await repo_query(
-            "SELECT name, args FROM command WHERE status IN $live",
+            "SELECT name, args, lane FROM command WHERE status IN $live",
             {"live": list(IN_FLIGHT)},
         )
         or []
@@ -382,9 +408,9 @@ def _order_held(
     # Command-name prefixes for prioritization within the resumed tier.
     # User-specified order: embedding > sources > notes > other.
     _RESUMED_PRIORITY = {
-        "embed": 0,   # embed_source, embed_note, embed_insight, rebuild_embeddings
-        "process": 1, # process_source, crawl_site
-        "note": 2,    # any note-related command
+        "embed": 0,  # embed_source, embed_note, embed_insight, rebuild_embeddings
+        "process": 1,  # process_source, crawl_site
+        "note": 2,  # any note-related command
     }
 
     def _resumed_priority(name: str) -> int:
@@ -418,6 +444,145 @@ def _order_held(
         return (tier, resumed_prio, min(known) if known else 0, created)
 
     return sorted(held, key=sort_key)
+
+
+async def _maybe_write_heartbeat() -> None:
+    """Write the dispatcher heartbeat to the DB once per HEARTBEAT_INTERVAL.
+
+    Throttled so we don't write on every pass (the loop runs every ~1s).
+    Survives API restarts because the row lives in SurrealDB.
+    """
+    global _last_heartbeat_write
+
+    import time
+
+    now = time.monotonic()
+    if _last_heartbeat_write is not None and (now - _last_heartbeat_write) < HEARTBEAT_INTERVAL_SECONDS:
+        return
+
+    try:
+        from open_notebook.database.repository import repo_query
+        await repo_query(
+            "UPSERT dispatcher_heartbeat:dispatcher SET last_updated_at = time::now()",
+        )
+        _last_heartbeat_write = now
+    except Exception:  # noqa: BLE001 - heartbeat failure must not kill the pass
+        pass
+
+
+async def _reap_stale_jobs(now: Optional[datetime] = None) -> None:
+    """Unified reaper: verbatim JobMonitor criteria merged into dispatcher.
+
+    Never reaps `held` jobs. Only `running` jobs whose heartbeat is older than
+    STALE_THRESHOLD_SECONDS are candidates, and they must be stale in two
+    consecutive passes before being marked `failed`. Departing jobs (left
+    `new`/`running` between passes) emit job events.
+
+    Criteria match JobMonitor exactly:
+      - Fetch `new` + `running` jobs
+      - Departed = previously tracked but no longer active → emit event
+      - Stale = status == "running" AND heartbeat older than 300s
+      - Confirm = stale in this pass AND previous pass → mark `failed`
+    """
+    global _tracked, _stale_candidates
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    from open_notebook.database.repository import ensure_record_id, repo_query
+
+    try:
+        rows = await repo_query(
+            "SELECT id, app, name, status, heartbeat_at, error_message, args "
+            "FROM command WHERE status = 'new' OR status = 'running' LIMIT 2000",
+        )
+    except Exception as exc:  # noqa: BLE001 - a bad reaper pass must not kill the loop
+        logger.debug(f"reaper: fetch_active failed: {exc}")
+        return
+
+    active = {str(r["id"]) for r in rows}
+
+    # Departed jobs: were active on the previous pass, are not now.
+    departed = _tracked - active
+    for job_id in sorted(departed):
+        rid = job_id
+        if ":" not in rid:
+            rid = f"command:{rid}"
+        try:
+            fetched = await repo_query(
+                "SELECT * FROM $id", {"id": ensure_record_id(rid)}
+            )
+        except Exception:
+            fetched = []
+        if fetched:
+            row = fetched[0]
+            status = row.get("status")
+            event: JobEvent = "completed" if status == "completed" else "failed"
+            subset = {
+                k: row.get(k)
+                for k in ("id", "app", "name", "status", "error_message", "args")
+            }
+            try:
+                await notify_job_event(event, subset)
+            except Exception:  # noqa: BLE001 - event failure must not block reap
+                pass
+
+    _tracked = active
+
+    # Stale detection: running jobs with heartbeat older than threshold.
+    stale_ids: set[str] = set()
+    for r in rows:
+        if r.get("status") == "running" and is_stale(r, STALE_THRESHOLD_SECONDS, now):
+            stale_ids.add(str(r["id"]))
+
+    # Confirm-twice: only mark failed if stale on this pass AND the previous.
+    confirm = stale_ids & _stale_candidates
+    _stale_candidates = stale_ids
+    for job_id in confirm:
+        rid = job_id
+        if ":" not in rid:
+            rid = f"command:{rid}"
+        try:
+            await repo_query(
+                "UPDATE $id MERGE $patch",
+                {
+                    "id": ensure_record_id(rid),
+                    "patch": {
+                        "status": "failed",
+                        "error_message": "stale: no heartbeat (worker restart, crash, or hang)",
+                    },
+                },
+            )
+            logger.info(
+                f"reaper: marked {job_id} failed (stale > {STALE_THRESHOLD_SECONDS}s, confirmed twice)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"reaper: mark_stale failed for {job_id}: {exc}")
+
+
+async def _maybe_ttl_sweep() -> None:
+    """Delete held jobs whose ttl_expires_at has passed.
+
+    Runs once per TTL_SWEEP_INTERVAL (5 min) rather than every pass, to avoid
+    a write on every dispatcher pass on storage-constrained devices.
+    """
+    global _last_ttl_sweep
+
+    import time
+
+    now = time.monotonic()
+    if _last_ttl_sweep is not None and (now - _last_ttl_sweep) < TTL_SWEEP_INTERVAL_SECONDS:
+        return
+
+    from open_notebook.database.repository import repo_query
+
+    try:
+        await repo_query(
+            "DELETE FROM command WHERE status = 'held' AND ttl_expires_at < time::now()",
+        )
+        _last_ttl_sweep = now
+    except Exception:  # noqa: BLE001 - TTL sweep failure must not kill the pass
+        pass
 
 
 async def dispatch_once(
@@ -502,6 +667,15 @@ async def dispatch_once(
     threads = role_threads(policy) if policy else {}
     committed_cpu = _cpu_committed(live_rows, threads)
 
+    # Hard dispatcher-time per-lane caps: never promote past the hard cap for
+    # the job's lane. Counted from live_rows (new + running) and incremented
+    # as jobs are promoted this pass. The submit-time soft cap (cap × 1.1) is
+    # enforced in submit.py; this is the hard wall at cap.
+    _in_flight_by_lane: Dict[str, int] = {}
+    for row in live_rows:
+        lane = str(row.get("lane") or "instant")
+        _in_flight_by_lane[lane] = _in_flight_by_lane.get(lane, 0) + 1
+
     for row in held_rows:
         roles = _roles_of(row, generation_bytes)
 
@@ -571,6 +745,17 @@ async def dispatch_once(
             # first, so nothing behind it has a better claim.
             continue
 
+        # Hard dispatcher-time per-lane cap: never promote past the hard cap
+        # for the job's lane. submit.py enforces a soft cap (cap × 1.1) at
+        # submit time; this is the hard wall at cap.
+        lane = str(row.get("lane") or "instant")
+        lane_cap = _LANE_CAPS.get(lane, _LANE_CAPS["instant"])
+        if _in_flight_by_lane.get(lane, 0) >= lane_cap:
+            reason = f"lane-cap:{lane}"
+            outcome.held_reasons[reason] = outcome.held_reasons.get(reason, 0) + 1
+            await _record_hold(str(row.get("id")), reason)
+            continue
+
         try:
             await repo_query(
                 "UPDATE $id SET status = $status, held_reason = NONE",
@@ -588,6 +773,9 @@ async def dispatch_once(
         for role in roles:
             counts[role] = counts.get(role, 0) + 1
         committed_cpu += sum(threads.get(r, 0) for r in roles)
+        # Lane cap moves with the queue: a promoted job occupies a slot in
+        # its lane for the rest of this pass.
+        _in_flight_by_lane[lane] = _in_flight_by_lane.get(lane, 0) + 1
         # Recompute after every promotion. Reusing a snapshot taken once per
         # pass is how a pass admits three jobs that only fit one at a time.
         committed = committed.merge(
@@ -602,4 +790,8 @@ async def dispatch_once(
             f"in flight {outcome.in_flight_before}->{in_flight}; "
             f"resident {committed.total / (1024 * 1024):.0f} MB"
         )
+
+    await _reap_stale_jobs()
+    await _maybe_ttl_sweep()
+    await _maybe_write_heartbeat()
     return outcome
