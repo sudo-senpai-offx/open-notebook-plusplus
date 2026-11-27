@@ -11,6 +11,8 @@ from surrealdb import RecordID
 
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.base import ObjectModel
+from open_notebook.domain.search_parser import parse_query, to_surreal_fts, to_search_hint
+from open_notebook.utils.query_cache import get_cached_search_results, set_cached_search_results
 from open_notebook.exceptions import (
     DatabaseOperationError,
     InvalidInputError,
@@ -454,6 +456,19 @@ class Source(ObjectModel):
     table_name: ClassVar[str] = "source"
     asset: Optional[Asset] = None
     title: Optional[str] = None
+    content_hash: Optional[str] = Field(
+        None, description="SHA256 content hash for dedup and content-addressed storage"
+    )
+    size_bytes: Optional[int] = Field(
+        None, description="Source size in bytes for hard-cap enforcement"
+    )
+    mime_type: Optional[str] = Field(
+        None, description="MIME type of the source content"
+    )
+    #: Ownership notebook (exactly one owner; cross-notebook links via source_link table)
+    notebook_id: Optional[Union[str, RecordID]] = Field(
+        default=None, description="Owning notebook (single owner; cross-notebook links via source_link)"
+    )
     #: The language of the content, as a two-letter code ("en", "zh", "ja",
     #: "ta"). Set for media, where the model cannot be trusted to detect it:
     #: whisper guesses, and on a short Tamil or Malay clip it guesses wrong
@@ -469,6 +484,62 @@ class Source(ObjectModel):
     )
     site_id: Optional[Union[str, RecordID]] = Field(
         default=None, description="Link to the site this source was crawled from"
+    )
+    # Social media import fields (read-only integration)
+    social_platform: Optional[str] = Field(
+        None, description="Social platform: gmail, pinterest, instagram, tiktok"
+    )
+    social_post_id: Optional[str] = Field(
+        None, description="Platform-assigned post ID"
+    )
+    social_permalink: Optional[str] = Field(
+        None, description="Platform permalink URL"
+    )
+    social_media_url: Optional[str] = Field(
+        None, description="Primary media URL"
+    )
+    social_media_type: Optional[str] = Field(
+        None, description="Media type: image, video, text, story"
+    )
+    social_engagement_metrics: Optional[Dict[str, Any]] = Field(
+        None, description="Likes, comments, shares, etc."
+    )
+    imported_from_social: bool = Field(
+        False, description="Whether this source was imported from social media"
+    )
+    #: Whether this source is included in search results. Set to false to
+    #: exclude noisy sources (e.g., raw CSV dumps, unpromoted social posts)
+    #: from BM25/vector search while keeping them in the notebook.
+    searchable: bool = Field(
+        True, description="Whether this source is included in search results"
+    )
+    #: Audit trail: original attachment id if this source was created by the
+    #: attachment→source data migration (D11). Null for natively created sources.
+    migrated_from_attachment: Optional[str] = Field(
+        None, description="Original attachment id if migrated from attachments table"
+    )
+    #: Extraction observability — populated by index_stage (Week 5 Day 5).
+    #: "ready" = full extraction succeeded; "extracting_partial" = some pages
+    #: timed out but content was extracted; "extracting_failed" = extraction
+    #: failed and compensation ran; "embedding_pending" = chunks exist but
+    #: embeddings failed. Set to None for sources that have not been processed.
+    status: Optional[str] = Field(
+        None,
+        description="Processing status: ready | extracting_partial | extracting_failed | embedding_pending",
+    )
+    #: Human-readable warnings from extraction (e.g. timed-out pages, low OCR
+    #: confidence, partial STT). Populated by index_stage so the UI can render
+    #: partial-extraction warnings without parsing error strings.
+    warnings: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Extraction warnings (partial timeouts, low confidence, etc.)",
+    )
+    #: Page/segment indices that timed out during extraction. Populated by
+    #: index_stage from extract_stage results so the UI can show which pages
+    #: were missed and offer a retry button.
+    timed_out_pages: Optional[List[int]] = Field(
+        default_factory=list,
+        description="Page/segment indices that timed out during extraction",
     )
 
     @field_validator("command", mode="before")
@@ -921,11 +992,21 @@ class ChatSession(ObjectModel):
         "model_override",
         "deepseek_session_series_id",
         "provider_session_id",
+        "stack_id",
     }
     title: Optional[str] = None
     model_override: Optional[str] = None
     deepseek_session_series_id: Optional[str] = None
     provider_session_id: Optional[str] = None
+    # Session management fields
+    session_type: str = "notebook"
+    stack_id: Optional[str] = None
+    stack_position: int = 0
+    is_high_priority: bool = False
+    priority_timeout_days: int = 30
+    context_tokens: int = 0
+    context_compacted: bool = False
+    context_compacted_at: Optional[datetime] = None
 
     async def relate_to_notebook(self, notebook_id: str) -> Any:
         if not notebook_id:
@@ -1034,11 +1115,14 @@ async def text_search(
                 return await vector_search(
                     keyword, results, source, note, notebook_ids=notebook_ids
                 )
+            except ValueError as ve:
+                # No embedding model configured — cannot fall back to vector search.
+                # Return empty results gracefully instead of 500.
+                logger.warning(
+                    f"Vector search fallback failed (no embedding model): {str(ve)}"
+                )
+                return []
             except Exception as ve:
-                # Both search paths failed (e.g. no embedding model configured).
-                # Surface the failure instead of returning [] — an empty list would
-                # be indistinguishable from a legitimate "no matches" and mask a
-                # total search outage from callers.
                 logger.error(f"Vector search fallback also failed: {str(ve)}")
                 logger.exception(ve)
                 raise DatabaseOperationError(ve)
@@ -1117,6 +1201,402 @@ async def vector_search(
         logger.error(f"Error performing vector search: {str(e)}")
         logger.exception(e)
         raise DatabaseOperationError(e)
+
+
+# ── Batch A: Hybrid search with RRF over source_chunk ──────────────────
+
+# Default RRF weights: slightly favor semantic recall, BM25 ensures exact
+# terminology/acronyms/formulas never buried.
+RRF_K = 60
+DEFAULT_W_BM25 = 0.45
+DEFAULT_W_VEC = 0.55
+DEFAULT_SIMILARITY_THRESHOLD = 0.62
+MAX_CHUNKS_HARD_CAP = 50
+
+# Query length invariants (non-configurable per spec)
+MIN_QUERY_LENGTH = 2          # 1 for CJK
+MAX_QUERY_LENGTH = 512
+
+# Diversity cap: max chunks from a single source to prevent result dominance
+MAX_CHUNKS_PER_SOURCE = 3
+
+
+def _rrf_score(rank: int, weight: float, k: int = RRF_K) -> float:
+    """Reciprocal Rank Fusion contribution for a single result."""
+    return weight * (1.0 / (k + rank))
+
+
+def _validate_query_length(keyword: str) -> str:
+    """Validate query length per spec invariants.
+
+    Returns the stripped keyword. Raises InvalidInputError if too short
+    or too long.
+    """
+    if not keyword or not keyword.strip():
+        raise InvalidInputError("Query cannot be empty")
+    stripped = keyword.strip()
+    if len(stripped) < MIN_QUERY_LENGTH:
+        raise InvalidInputError(
+            f"Query too short: minimum {MIN_QUERY_LENGTH} character(s)"
+        )
+    if len(stripped) > MAX_QUERY_LENGTH:
+        raise InvalidInputError(
+            f"Query too long: maximum {MAX_QUERY_LENGTH} characters"
+        )
+    return stripped
+
+
+def _apply_diversity_cap(
+    results: List[Dict[str, Any]], max_per_source: int = MAX_CHUNKS_PER_SOURCE
+) -> List[Dict[str, Any]]:
+    """Limit the number of results per source to prevent dominance.
+
+    Preserves RRF rank order while ensuring no single source monopolizes
+    the result set.
+    """
+    source_counts: Dict[str, int] = {}
+    diverse: List[Dict[str, Any]] = []
+    for item in results:
+        sid = item.get("source_id") or ""
+        count = source_counts.get(sid, 0)
+        if count < max_per_source:
+            source_counts[sid] = count + 1
+            diverse.append(item)
+    return diverse
+
+
+async def _accessible_source_ids(
+    notebook_ids: Optional[List[str]],
+) -> Optional[List[RecordID]]:
+    """Resolve accessible source IDs including source_link traversal.
+
+    A source is accessible if:
+      - It belongs to one of the requested notebooks (notebook_id matches)
+      - OR it is linked into one of the requested notebooks via source_link
+        (linked sources are first-class citizens in the target notebook)
+
+    Returns None for global search (no notebook scope), otherwise a list of
+    record<source> RecordIDs.
+    """
+    scope_ids = _scope_record_ids(notebook_ids)
+    if scope_ids is None:
+        return None  # global search
+
+    try:
+        rows = await repo_query(
+            """
+            SELECT DISTINCT src.id as source_id
+            FROM source src
+            WHERE src.notebook_id IN $scope_ids
+               OR EXISTS (
+                   SELECT 1 FROM source_link sl
+                   WHERE sl.out IN $scope_ids
+                     AND sl.in = src.id
+               )
+               AND src.searchable = true
+            """,
+            {"scope_ids": scope_ids},
+        )
+        if not rows:
+            return []
+        return [
+            ensure_record_id(str(r["source_id"]))
+            for r in rows
+            if r.get("source_id")
+        ]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to resolve accessible sources: {e}")
+        return None
+
+
+async def hybrid_search(
+    keyword: str,
+    results: int = 20,
+    notebook_ids: Optional[List[str]] = None,
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    w_bm25: float = DEFAULT_W_BM25,
+    w_vec: float = DEFAULT_W_VEC,
+    mode: str = "hybrid",
+) -> Dict[str, Any]:
+    """
+    Hybrid search over source_chunk using Reciprocal Rank Fusion (RRF).
+
+    Runs BM25 (full-text) and vector search in parallel, merges results
+    with RRF, and returns deduplicated, re-ranked results.
+
+    Supports phrase search ("..."), boolean operators (AND/OR), and
+    wildcards (*) via the search_parser module.
+
+    Args:
+        keyword: Search query string
+        results: Max number of results to return (hard cap: MAX_CHUNKS_HARD_CAP)
+        notebook_ids: Optional list of notebook IDs to scope the search
+        similarity_threshold: Minimum cosine similarity for vector leg
+        w_bm25: Weight for BM25 leg in RRF (default 0.45)
+        w_vec: Weight for vector leg in RRF (default 0.55)
+        mode: "hybrid" (BM25+vector), "bm25" (BM25 only), or "vector" (vector only)
+
+    Returns:
+        Dict with keys: query, search_mode, total, results (list of chunk dicts)
+    """
+    # Validate query length
+    keyword = _validate_query_length(keyword)
+    results = min(results, MAX_CHUNKS_HARD_CAP)
+
+    # Parse query for phrase/boolean/wildcard support
+    parsed = parse_query(keyword)
+    fts_clause = to_surreal_fts(parsed, field="text")
+    logger.debug(f"Parsed search query: {to_search_hint(parsed)} -> {fts_clause}")
+
+    # ── Cache check ──
+    cache_key_data = {
+        "keyword": keyword,
+        "results": results,
+        "notebook_ids": notebook_ids,
+        "similarity_threshold": similarity_threshold,
+        "w_bm25": w_bm25,
+        "w_vec": w_vec,
+        "mode": mode,
+    }
+    cached = get_cached_search_results(
+        query=keyword,
+        notebook_ids=notebook_ids,
+        mode=mode,
+        results=results,
+    )
+    if cached is not None:
+        logger.debug(f"Search cache hit for query={keyword[:40]}...")
+        cached["_cache_hit"] = True
+        return cached
+
+    # Resolve accessible source IDs (includes source_link traversal)
+    accessible_source_ids = await _accessible_source_ids(notebook_ids)
+
+    bm25_results: List[Dict[str, Any]] = []
+    vector_results: List[Dict[str, Any]] = []
+    search_mode = mode
+
+    # ── BM25 leg (always runs; SurrealDB FTS on source_chunk.text) ──
+    if mode in ("hybrid", "bm25"):
+        try:
+            bm25_rows = await repo_query(
+                """
+                SELECT
+                    id, source_id, text, chunk_index, char_start, char_end,
+                    page_number, heading_path, embedding_model, index_generation,
+                    score::float as bm25_score
+                FROM source_chunk
+                WHERE """ + fts_clause + """
+                  AND index_generation = (SELECT VALUE active_generation FROM source WHERE id = source_chunk.source_id)
+                  AND ($accessible_source_ids = NONE OR source_id IN $accessible_source_ids)
+                  AND (SELECT VALUE searchable FROM source WHERE id = source_chunk.source_id) = true
+                ORDER BY score::float DESC
+                LIMIT $limit
+                """,
+                {
+                    "limit": results * 4,  # Fetch more for RRF merging
+                    "accessible_source_ids": accessible_source_ids,
+                },
+            ) or []
+            bm25_results = [dict(r) for r in bm25_rows]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"BM25 leg failed: {e}")
+            bm25_results = []
+
+    # ── Vector leg (HNSW on source_chunk.embedding) ──
+    if mode in ("hybrid", "vector"):
+        try:
+            from open_notebook.ai.models import model_manager
+
+            emb_model = await model_manager.get_embedding_model()
+            if emb_model is None:
+                # No embedding model configured — degrade to BM25-only
+                search_mode = "bm25" if mode == "hybrid" else "bm25_only"
+                vector_results = []
+            else:
+                from open_notebook.utils.embedding import generate_embedding
+                from open_notebook.utils.embedding_prefix import EmbeddingRole
+
+                embed = await generate_embedding(keyword, role=EmbeddingRole.QUERY)
+
+                vec_rows = await repo_query(
+                    """
+                    SELECT
+                        id, source_id, text, chunk_index, char_start, char_end,
+                        page_number, heading_path, embedding_model, index_generation,
+                        vector_similarity(embedding, $embed) as cosine_score
+                    FROM source_chunk
+                    WHERE embedding != NONE
+                      AND index_generation = (SELECT VALUE active_generation FROM source WHERE id = source_chunk.source_id)
+                      AND vector_similarity(embedding, $embed) >= $threshold
+                      AND ($accessible_source_ids = NONE OR source_id IN $accessible_source_ids)
+                      AND (SELECT VALUE searchable FROM source WHERE id = source_chunk.source_id) = true
+                    ORDER BY cosine_score DESC
+                    LIMIT $limit
+                    """,
+                    {
+                        "embed": embed,
+                        "threshold": similarity_threshold,
+                        "limit": results * 4,
+                        "accessible_source_ids": accessible_source_ids,
+                    },
+                ) or []
+                vector_results = [dict(r) for r in vec_rows]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Vector leg failed: {e}")
+            search_mode = "bm25" if mode == "hybrid" else "bm25_only"
+            vector_results = []
+
+    # ── RRF merge ──
+    if mode == "hybrid" and bm25_results and vector_results:
+        merged = _rrf_merge(bm25_results, vector_results, w_bm25, w_vec, results)
+        search_mode = "hybrid"
+    elif bm25_results:
+        merged = bm25_results[:results]
+        search_mode = "bm25" if mode == "hybrid" else mode
+    elif vector_results:
+        merged = vector_results[:results]
+        search_mode = "vector"
+    else:
+        merged = []
+        search_mode = "bm25" if mode == "hybrid" else mode
+
+    # Apply diversity cap to prevent single-source dominance
+    merged = _apply_diversity_cap(merged, MAX_CHUNKS_PER_SOURCE)
+
+    # Normalize result shape
+    normalized = []
+    for item in merged:
+        normalized.append(
+            {
+                "chunk_id": str(item.get("id")),
+                "source_id": str(item.get("source_id")) if item.get("source_id") else None,
+                "text": item.get("text", ""),
+                "chunk_index": item.get("chunk_index", 0),
+                "char_start": item.get("char_start", 0),
+                "char_end": item.get("char_end", 0),
+                "page_number": item.get("page_number"),
+                "heading_path": item.get("heading_path"),
+                "embedding_model": item.get("embedding_model"),
+                "searchable": True,
+                "search_mode": search_mode,
+            }
+        )
+
+    return {
+        "query": keyword,
+        "parsed_query": to_search_hint(parsed),
+        "search_mode": search_mode,
+        "total": len(normalized),
+        "results": normalized,
+    }
+
+    # ── Cache write ── (unreachable — kept for reference; cache written below)
+    # set_cached_search_results(...)
+
+# ── Cached hybrid_search wrapper ─────────────────────────────────────────
+
+
+async def hybrid_search_cached(
+    keyword: str,
+    results: int = 20,
+    notebook_ids: Optional[List[str]] = None,
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    w_bm25: float = DEFAULT_W_BM25,
+    w_vec: float = DEFAULT_W_VEC,
+    mode: str = "hybrid",
+) -> Dict[str, Any]:
+    """
+    Hybrid search with query-cache layer (5-minute TTL, 256 entries).
+
+    Delegates to hybrid_search and caches the result. On cache hit,
+    returns the stored result with _cache_hit=True.
+    """
+    # Check cache first
+    cached = get_cached_search_results(
+        query=keyword,
+        notebook_ids=notebook_ids,
+        mode=mode,
+        results=results,
+    )
+    if cached is not None:
+        cached["_cache_hit"] = True
+        return cached
+
+    # Compute and cache
+    result = await hybrid_search(
+        keyword=keyword,
+        results=results,
+        notebook_ids=notebook_ids,
+        similarity_threshold=similarity_threshold,
+        w_bm25=w_bm25,
+        w_vec=w_vec,
+        mode=mode,
+    )
+    set_cached_search_results(
+        query=keyword,
+        notebook_ids=notebook_ids,
+        mode=mode,
+        results=results,
+        data=result,
+    )
+    return result
+
+
+def _rrf_merge(
+    bm25_results: List[Dict[str, Any]],
+    vector_results: List[Dict[str, Any]],
+    w_bm25: float,
+    w_vec: float,
+    max_results: int,
+) -> List[Dict[str, Any]]:
+    """
+    Merge BM25 and vector results using Reciprocal Rank Fusion.
+
+    RRF(d) = w_bm25 * (1/(k + rank_bm25(d))) + w_vec * (1/(k + rank_vec(d)))
+
+    Results are deduplicated by chunk id; if a chunk appears in both legs,
+    its RRF score combines both contributions.
+    """
+    k = RRF_K
+    scores: Dict[str, Dict[str, Any]] = {}
+
+    for rank, item in enumerate(bm25_results, start=1):
+        cid = str(item.get("id"))
+        if cid not in scores:
+            scores[cid] = dict(item)
+            scores[cid]["_rrf"] = 0.0
+            scores[cid]["_rank_bm25"] = rank
+        scores[cid]["_rrf"] += _rrf_score(rank, w_bm25, k)
+
+    for rank, item in enumerate(vector_results, start=1):
+        cid = str(item.get("id"))
+        if cid not in scores:
+            scores[cid] = dict(item)
+            scores[cid]["_rrf"] = 0.0
+            scores[cid]["_rank_vec"] = rank
+        scores[cid]["_rrf"] += _rrf_score(rank, w_vec, k)
+
+    # Sort by RRF score descending
+    merged = sorted(scores.values(), key=lambda x: -x["_rrf"])
+    return merged[:max_results]
+
+
+async def bm25_only_search(
+    keyword: str,
+    results: int = 20,
+    notebook_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    BM25-only search over source_chunk. Used as fallback when Ollama/vector
+    search is unavailable.
+    """
+    return await hybrid_search(
+        keyword=keyword,
+        results=results,
+        notebook_ids=notebook_ids,
+        mode="bm25",
+    )
 
 
 class ChatMessage(ObjectModel):

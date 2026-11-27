@@ -28,6 +28,7 @@ from open_notebook.utils.job_control import (
     raise_if_cancelled,
     report_progress_record,
 )
+from open_notebook.database.repository import ensure_record_id, repo_insert, repo_query
 from open_notebook.scheduler.dispatcher import _ollama_blocked
 from open_notebook.utils.runtime_capabilities import (
     docling_available,
@@ -50,6 +51,7 @@ from open_notebook.preprocess.capabilities import (
     has_capability,
     require_capability,
 )
+from open_notebook.utils.chunking import chunk_text_with_coords, detect_content_type
 
 # content-core >= 2.1 disables its own Loguru logging for library consumers.
 # Both the API and the worker import this module before extracting anything,
@@ -158,8 +160,10 @@ class Source7StageState(TypedDict, total=False):
 
     # ── Control / observability ────────────────────────────────────
     stage: str                            # last completed stage name
-    errors: List[str]                     # non-fatal errors accumulated across stages
+    errors: Annotated[list[str], operator.add]  # non-fatal errors accumulated across stages
     skipped: List[str]                    # stages skipped (e.g. embed when embed=False)
+    warnings: List[str]                   # extraction warnings carried to index_stage for persistence
+    timed_out_pages: List[int]            # page/segment indices that timed out, carried to index_stage
 
 
 def _usable_engine(engine: str, kind: str) -> str:
@@ -1323,6 +1327,8 @@ async def extract_stage(state: Source7StageState) -> dict:
     await raise_if_cancelled(cmd_id)
 
     errors = list(state.get("errors", []))
+    warnings = list(state.get("warnings", []))
+    timed_out_pages = list(state.get("timed_out_pages", []))
     content_state = state.get("content_state") or {}
     content_type = state.get("content_type", "url")
     lane = state.get("lane", "instant")
@@ -1335,7 +1341,16 @@ async def extract_stage(state: Source7StageState) -> dict:
     try:
         result = await asyncio.wait_for(
             _dispatch_extract(
-                state, cmd_id, errors, content_type, lane, file_path, content_state, url
+                state,
+                cmd_id,
+                errors,
+                warnings,
+                timed_out_pages,
+                content_type,
+                lane,
+                file_path,
+                content_state,
+                url,
             ),
             timeout=effective_timeout,
         )
@@ -1345,6 +1360,8 @@ async def extract_stage(state: Source7StageState) -> dict:
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
@@ -1353,6 +1370,8 @@ async def extract_stage(state: Source7StageState) -> dict:
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
@@ -1363,6 +1382,8 @@ async def _dispatch_extract(
     state: Source7StageState,
     cmd_id: Optional[str],
     errors: List[str],
+    warnings: List[str],
+    timed_out_pages: List[int],
     content_type: str,
     lane: str,
     file_path: Optional[str],
@@ -1379,19 +1400,24 @@ async def _dispatch_extract(
     loudly (actionable install message) or falls back to content-core
     extraction when available, instead of spawning doomed subprocesses or
     silently returning empty content.
+
+    ``warnings`` and ``timed_out_pages`` are accumulated across helpers and
+    returned so index_stage can persist them on the Source record.
     """
     # ── PDF → pdftotext (Day 1); scanned PDF → tesseract OCR (Day 4) ──
     if content_type == "pdf" and file_path:
         if not has_capability("pdftotext"):
             if has_capability("content_core"):
                 return await _extract_content_core_stage(
-                    state, cmd_id, errors, content_state, url
+                    state, cmd_id, errors, warnings, timed_out_pages, content_state, url
                 )
             raise ValueError(
                 "pdftotext is not installed. Install poppler (pdftotext) to "
                 "extract text from PDFs, or upload a text-based source."
             )
-        result = await _extract_pdf_stage(state, cmd_id, errors, file_path, content_state)
+        result = await _extract_pdf_stage(
+            state, cmd_id, errors, warnings, timed_out_pages, file_path, content_state
+        )
         extraction = result.get("extraction")
         if extraction and extraction.content and len(extraction.content.strip()) >= 50:
             return result
@@ -1411,7 +1437,14 @@ async def _dispatch_extract(
             language=language,
         )
         return _ocr_result_to_extract_dict(
-            state, cmd_id, errors, ocr_result, content_state, "pdf"
+            state,
+            cmd_id,
+            errors,
+            warnings,
+            timed_out_pages,
+            ocr_result,
+            content_state,
+            "pdf",
         )
 
     # ── Spreadsheet → ssconvert (Day 4) ──
@@ -1419,17 +1452,21 @@ async def _dispatch_extract(
         if not has_capability("ssconvert"):
             if has_capability("content_core"):
                 return await _extract_content_core_stage(
-                    state, cmd_id, errors, content_state, url
+                    state, cmd_id, errors, warnings, timed_out_pages, content_state, url
                 )
             raise ValueError(
                 "ssconvert is not installed. Install Gnumeric (ssconvert) to "
                 "convert spreadsheets, or export as CSV and upload that instead."
             )
-        return await _extract_ssconvert_stage(state, cmd_id, errors, file_path, content_state)
+        return await _extract_ssconvert_stage(
+            state, cmd_id, errors, warnings, timed_out_pages, file_path, content_state
+        )
 
     # ── CSV → native UTF-8 text read (Day 4, no binary needed) ──
     if content_type == "csv" and file_path:
-        return await _extract_csv_stage(state, cmd_id, errors, file_path, content_state)
+        return await _extract_csv_stage(
+            state, cmd_id, errors, warnings, timed_out_pages, file_path, content_state
+        )
 
     # ── Image → tesseract OCR (Day 4, heavy lane) ──
     if content_type == "image" and file_path:
@@ -1447,7 +1484,14 @@ async def _dispatch_extract(
             language=language,
         )
         return _ocr_result_to_extract_dict(
-            state, cmd_id, errors, ocr_result, content_state, "image"
+            state,
+            cmd_id,
+            errors,
+            warnings,
+            timed_out_pages,
+            ocr_result,
+            content_state,
+            "image",
         )
 
     # ── Audio → whisper.cpp STT (Day 5, heavy/deferred lane) ──
@@ -1486,6 +1530,8 @@ async def _dispatch_extract(
                 "extraction": None,
                 "normalized_text": "",
                 "errors": errors,
+                "warnings": warnings,
+                "timed_out_pages": timed_out_pages,
                 "stage": "extract",
             }
 
@@ -1496,16 +1542,17 @@ async def _dispatch_extract(
 
         # Propagate STT warnings (partial timeout, etc.).
         for warning in stt_result.get("warnings", []):
-            errors.append(f"extract: {warning}")
+            warnings.append(warning)
 
         timed_out = stt_result.get("timed_out_segments", [])
         if timed_out:
-            errors.append(
-                f"extract: segments {sorted(timed_out)} timed out during STT"
+            timed_out_pages.extend(int(t) for t in timed_out)
+            warnings.append(
+                f"segments {sorted(timed_out)} timed out during STT"
             )
 
         if stt_result.get("source_status") == "extracting_partial":
-            errors.append("extract: stt_partial_timeout (extracting_partial)")
+            warnings.append("stt_partial_timeout (extracting_partial)")
 
         # Persist auto-detected language back to the source for re-processing.
         detected_language = stt_result.get("detected_language")
@@ -1528,41 +1575,53 @@ async def _dispatch_extract(
                 "extraction": None,
                 "normalized_text": "",
                 "errors": errors,
+                "warnings": warnings,
+                "timed_out_pages": timed_out_pages,
                 "stage": "extract",
             }
 
         return {
             "extraction": extraction,
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
     # ── HTML extraction via trafilatura wrapper (Day 3). ──
     # Must come BEFORE pandoc so HTML files don't get swallowed by pandoc.
     if content_type in ("url", "html") and (file_path or url):
-        return await _extract_trafilatura_stage(state, cmd_id, errors, file_path, content_state, url)
+        return await _extract_trafilatura_stage(
+            state, cmd_id, errors, warnings, timed_out_pages, file_path, content_state, url
+        )
 
     # ── Document conversion via pandoc wrapper (docx, odt, epub, rtf). ──
     if content_type == "document" and file_path:
         if not has_capability("pandoc"):
             if has_capability("content_core"):
                 return await _extract_content_core_stage(
-                    state, cmd_id, errors, content_state, url
+                    state, cmd_id, errors, warnings, timed_out_pages, content_state, url
                 )
             raise ValueError(
                 "pandoc is not installed. Install pandoc to convert rich "
                 "documents (docx/odt/epub/rtf), or upload plain text instead."
             )
-        return await _extract_pandoc_stage(state, cmd_id, errors, file_path, content_state)
+        return await _extract_pandoc_stage(
+            state, cmd_id, errors, warnings, timed_out_pages, file_path, content_state
+        )
 
     # Fall back to content-core for URLs, text, media, and unknown types.
-    return await _extract_content_core_stage(state, cmd_id, errors, content_state, url)
+    return await _extract_content_core_stage(
+        state, cmd_id, errors, warnings, timed_out_pages, content_state, url
+    )
 
 
 def _ocr_result_to_extract_dict(
     state: Source7StageState,
     cmd_id: Optional[str],
     errors: List[str],
+    warnings: List[str],
+    timed_out_pages: List[int],
     ocr_result: Dict[str, Any],
     content_state: Dict[str, Any],
     source_kind: str,
@@ -1571,6 +1630,9 @@ def _ocr_result_to_extract_dict(
 
     Low confidence (< 60% mean) sets extracting_partial via a warning but
     does not fail — partial OCR text is still useful content.
+
+    Warnings and timed-out pages are accumulated into the passed-in lists so
+    index_stage can persist them on the Source record.
     """
     extraction = _ExtractionOutput(
         content=ocr_result.get("text", ""),
@@ -1579,19 +1641,17 @@ def _ocr_result_to_extract_dict(
 
     # Propagate OCR warnings (low confidence, timed-out pages).
     for warning in ocr_result.get("warnings", []):
-        errors.append(f"extract: {warning}")
+        warnings.append(warning)
 
     timed_out = ocr_result.get("timed_out_pages", [])
     if timed_out:
-        errors.append(
-            f"extract: pages {sorted(timed_out)} timed out during {source_kind} OCR"
+        timed_out_pages.extend(int(t) for t in timed_out)
+        warnings.append(
+            f"pages {sorted(timed_out)} timed out during {source_kind} OCR"
         )
 
     if ocr_result.get("low_confidence"):
-        errors.append(
-            "extract: low_ocr_confidence — text may be inaccurate "
-            "(extracting_partial)"
-        )
+        warnings.append("low_ocr_confidence — text may be inaccurate (extracting_partial)")
 
     if not extraction.content.strip():
         errors.append(f"extract: {source_kind} OCR returned no text content")
@@ -1599,12 +1659,16 @@ def _ocr_result_to_extract_dict(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
     return {
         "extraction": extraction,
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "extract",
     }
 
@@ -1613,10 +1677,16 @@ async def _extract_pdf_stage(
     state: Source7StageState,
     cmd_id: Optional[str],
     errors: List[str],
+    warnings: List[str],
+    timed_out_pages: List[int],
     file_path: str,
     content_state: Dict[str, Any],
 ) -> dict:
-    """PDF extraction via pdftotext wrapper with per-range timeout + checkpoint."""
+    """PDF extraction via pdftotext wrapper with per-range timeout + checkpoint.
+
+    Warnings and timed-out pages are accumulated into the passed-in lists so
+    index_stage can persist them on the Source record.
+    """
     from open_notebook.preprocess.tools.pdf import extract_pdf
 
     # Get page count from content_state or estimate
@@ -1636,6 +1706,8 @@ async def _extract_pdf_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
@@ -1644,6 +1716,8 @@ async def _extract_pdf_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
@@ -1655,8 +1729,9 @@ async def _extract_pdf_stage(
     # Record timed-out pages as warnings so the user knows content was missed.
     timed_out = result.get("timed_out_pages", [])
     if timed_out:
-        errors.append(
-            f"extract: pages {sorted(timed_out)} timed out during extraction"
+        timed_out_pages.extend(int(t) for t in timed_out)
+        warnings.append(
+            f"pages {sorted(timed_out)} timed out during extraction"
         )
 
     if not extraction.content.strip():
@@ -1665,12 +1740,16 @@ async def _extract_pdf_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
     return {
         "extraction": extraction,
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "extract",
     }
 
@@ -1679,6 +1758,8 @@ async def _extract_ssconvert_stage(
     state: Source7StageState,
     cmd_id: Optional[str],
     errors: List[str],
+    warnings: List[str],
+    timed_out_pages: List[int],
     file_path: str,
     content_state: Dict[str, Any],
 ) -> dict:
@@ -1698,6 +1779,8 @@ async def _extract_ssconvert_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
     except asyncio.TimeoutError:
@@ -1706,6 +1789,8 @@ async def _extract_ssconvert_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
@@ -1714,12 +1799,14 @@ async def _extract_ssconvert_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
     if result.get("truncated"):
-        errors.append(
-            f"extract: spreadsheet truncated at {MAX_TABLE_ROWS} rows "
+        warnings.append(
+            f"spreadsheet truncated at {MAX_TABLE_ROWS} rows "
             "(use a smaller sheet or split into multiple files)"
         )
 
@@ -1734,12 +1821,16 @@ async def _extract_ssconvert_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
     return {
         "extraction": extraction,
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "extract",
     }
 
@@ -1748,6 +1839,8 @@ async def _extract_csv_stage(
     state: Source7StageState,
     cmd_id: Optional[str],
     errors: List[str],
+    warnings: List[str],
+    timed_out_pages: List[int],
     file_path: str,
     content_state: Dict[str, Any],
 ) -> dict:
@@ -1763,6 +1856,8 @@ async def _extract_csv_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
@@ -1777,12 +1872,16 @@ async def _extract_csv_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
     return {
         "extraction": extraction,
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "extract",
     }
 
@@ -1791,6 +1890,8 @@ async def _extract_trafilatura_stage(
     state: Source7StageState,
     cmd_id: Optional[str],
     errors: List[str],
+    warnings: List[str],
+    timed_out_pages: List[int],
     file_path: Optional[str],
     content_state: Dict[str, Any],
     url: str,
@@ -1816,6 +1917,8 @@ async def _extract_trafilatura_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
     except ValueError as exc:  # html_extraction_empty → compensation
@@ -1824,6 +1927,8 @@ async def _extract_trafilatura_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
@@ -1832,6 +1937,8 @@ async def _extract_trafilatura_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
@@ -1843,15 +1950,16 @@ async def _extract_trafilatura_stage(
 
     # Record JavaScript-required as a warning (extracting_partial, not failed)
     if result.get("javascript_required"):
-        errors.append(
-            "extract: trafilatura javascript_required — page may need JavaScript to render"
+        warnings.append(
+            "trafilatura javascript_required — page may need JavaScript to render"
         )
 
     # Record timed-out pages
     timed_out = result.get("timed_out_pages", [])
     if timed_out:
-        errors.append(
-            f"extract: pages {sorted(timed_out)} timed out during HTML extraction"
+        timed_out_pages.extend(int(t) for t in timed_out)
+        warnings.append(
+            f"pages {sorted(timed_out)} timed out during HTML extraction"
         )
 
     if not extraction.content.strip():
@@ -1860,12 +1968,16 @@ async def _extract_trafilatura_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
     return {
         "extraction": extraction,
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "extract",
     }
 
@@ -1874,6 +1986,8 @@ async def _extract_pandoc_stage(
     state: Source7StageState,
     cmd_id: Optional[str],
     errors: List[str],
+    warnings: List[str],
+    timed_out_pages: List[int],
     file_path: str,
     content_state: Dict[str, Any],
 ) -> dict:
@@ -1893,6 +2007,8 @@ async def _extract_pandoc_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
     except FileNotFoundError:
@@ -1901,6 +2017,8 @@ async def _extract_pandoc_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
@@ -1909,6 +2027,8 @@ async def _extract_pandoc_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
@@ -1923,12 +2043,16 @@ async def _extract_pandoc_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
     return {
         "extraction": extraction,
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "extract",
     }
 
@@ -1937,6 +2061,8 @@ async def _extract_content_core_stage(
     state: Source7StageState,
     cmd_id: Optional[str],
     errors: List[str],
+    warnings: List[str],
+    timed_out_pages: List[int],
     content_state: Dict[str, Any],
     url: str,
 ) -> dict:
@@ -1966,6 +2092,8 @@ async def _extract_content_core_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
@@ -1974,6 +2102,8 @@ async def _extract_content_core_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
@@ -1985,12 +2115,16 @@ async def _extract_content_core_stage(
             "extraction": None,
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 
     return {
         "extraction": extraction,
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "extract",
     }
 
@@ -2011,6 +2145,8 @@ async def normalize_stage(state: Source7StageState) -> dict:
     await raise_if_cancelled(cmd_id)
 
     errors = list(state.get("errors", []))
+    warnings = list(state.get("warnings", []))
+    timed_out_pages = list(state.get("timed_out_pages", []))
 
     extraction = state.get("extraction")
     content_state = state.get("content_state") or {}
@@ -2024,6 +2160,8 @@ async def normalize_stage(state: Source7StageState) -> dict:
             return {
                 "normalized_text": "",
                 "errors": errors,
+                "warnings": warnings,
+                "timed_out_pages": timed_out_pages,
                 "stage": "normalize",
             }
         if content_type == "media":
@@ -2032,6 +2170,8 @@ async def normalize_stage(state: Source7StageState) -> dict:
             return {
                 "normalized_text": "",
                 "errors": errors,
+                "warnings": warnings,
+                "timed_out_pages": timed_out_pages,
                 "stage": "normalize",
             }
         if file_path and _is_pdf(file_path):
@@ -2039,6 +2179,8 @@ async def normalize_stage(state: Source7StageState) -> dict:
             return {
                 "normalized_text": "",
                 "errors": errors,
+                "warnings": warnings,
+                "timed_out_pages": timed_out_pages,
                 "stage": "normalize",
             }
         errors.append(
@@ -2052,12 +2194,16 @@ async def normalize_stage(state: Source7StageState) -> dict:
         return {
             "normalized_text": "",
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "normalize",
         }
 
     return {
         "normalized_text": extraction.content.strip(),
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "normalize",
     }
 
@@ -2077,6 +2223,8 @@ async def chunk_stage(state: Source7StageState) -> dict:
     await raise_if_cancelled(cmd_id)
 
     errors = list(state.get("errors", []))
+    warnings = list(state.get("warnings", []))
+    timed_out_pages = list(state.get("timed_out_pages", []))
 
     normalized_text = state.get("normalized_text") or ""
     if not normalized_text.strip():
@@ -2084,6 +2232,8 @@ async def chunk_stage(state: Source7StageState) -> dict:
             "chunks": [],
             "chunk_infos": [],
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "chunk",
         }
 
@@ -2101,6 +2251,8 @@ async def chunk_stage(state: Source7StageState) -> dict:
             "chunks": [],
             "chunk_infos": [],
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "chunk",
         }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
@@ -2109,6 +2261,8 @@ async def chunk_stage(state: Source7StageState) -> dict:
             "chunks": [],
             "chunk_infos": [],
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "chunk",
         }
 
@@ -2127,6 +2281,8 @@ async def chunk_stage(state: Source7StageState) -> dict:
         "chunks": chunks,
         "chunk_infos": chunk_infos,
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "chunk",
     }
 
@@ -2145,6 +2301,8 @@ async def embed_stage(state: Source7StageState) -> dict:
     await raise_if_cancelled(cmd_id)
 
     errors = list(state.get("errors", []))
+    warnings = list(state.get("warnings", []))
+    timed_out_pages = list(state.get("timed_out_pages", []))
 
     if not state.get("embed", False):
         return {
@@ -2152,6 +2310,8 @@ async def embed_stage(state: Source7StageState) -> dict:
             "embedded_count": 0,
             "skipped": ["embed"],
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "embed",
         }
 
@@ -2161,6 +2321,8 @@ async def embed_stage(state: Source7StageState) -> dict:
             "embeddings": [],
             "embedded_count": 0,
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "embed",
         }
 
@@ -2188,6 +2350,8 @@ async def embed_stage(state: Source7StageState) -> dict:
             "embeddings": [],
             "embedded_count": 0,
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "embed",
         }
     except Exception as exc:  # noqa: BLE001 - capture for compensation
@@ -2196,6 +2360,8 @@ async def embed_stage(state: Source7StageState) -> dict:
             "embeddings": [],
             "embedded_count": 0,
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "embed",
         }
 
@@ -2212,6 +2378,8 @@ async def embed_stage(state: Source7StageState) -> dict:
         "embeddings": embeddings,
         "embedded_count": total_embeddings,
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "embed",
     }
 
@@ -2232,6 +2400,8 @@ async def index_stage(state: Source7StageState) -> dict:
     await raise_if_cancelled(cmd_id)
 
     errors = list(state.get("errors", []))
+    warnings = list(state.get("warnings", []))
+    timed_out_pages = list(state.get("timed_out_pages", []))
 
     source = state.get("source")
     normalized_text = state.get("normalized_text") or ""
@@ -2244,6 +2414,8 @@ async def index_stage(state: Source7StageState) -> dict:
         return {
             "source": source,
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "index",
         }
 
@@ -2257,8 +2429,14 @@ async def index_stage(state: Source7StageState) -> dict:
         filename=state.get("content_state", {}).get("filename") or previous.filename,
         size=previous.size,
     )
-    # Set source status based on extraction errors: partial if any pages timed out.
-    if any("timed out" in e for e in errors):
+    # Set source status and observability fields from extraction results.
+    # "extracting_partial" when any pages/segments timed out; "ready" otherwise.
+    # These are persisted on the SurrealDB source record so the Week 6 UI can
+    # render partial-extraction warnings and retry buttons without parsing
+    # error strings.
+    source.warnings = warnings
+    source.timed_out_pages = timed_out_pages
+    if timed_out_pages:
         source.status = "extracting_partial"
     else:
         source.status = "ready"
@@ -2269,6 +2447,8 @@ async def index_stage(state: Source7StageState) -> dict:
         return {
             "source": source,
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "index",
         }
 
@@ -2288,6 +2468,8 @@ async def index_stage(state: Source7StageState) -> dict:
         return {
             "source": source,
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "index",
         }
 
@@ -2325,6 +2507,8 @@ async def index_stage(state: Source7StageState) -> dict:
         return {
             "source": source,
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "index",
         }
 
@@ -2356,6 +2540,8 @@ async def index_stage(state: Source7StageState) -> dict:
         "embedded_count": len(chunk_records),
         "insights_created": insights_created,
         "errors": errors,
+        "warnings": warnings,
+        "timed_out_pages": timed_out_pages,
         "stage": "index",
     }
 
@@ -2373,16 +2559,26 @@ async def compensate_extract(state: Source7StageState) -> dict:
     """Compensate for a failed extraction.
 
     Clears any partial extraction result so the source can be retried
-    from a clean state rather than leaving orphaned content.
+    from a clean state rather than leaving orphaned content. Marks the
+    source as ``extracting_failed`` so the UI can show a retry button.
     """
     cmd_id = get_current_command_id()
     await report_progress_record(cmd_id, progress=30, stage="extract_compensate")
     await raise_if_cancelled(cmd_id)
 
+    source = state.get("source")
+    if source:
+        source.status = "extracting_failed"
+        try:
+            await source.save()
+        except Exception:  # noqa: BLE001 - compensation must not mask the original error
+            logger.warning(
+                f"failed to persist extracting_failed status for {source.id}"
+            )
+
     return {
         "extraction": None,
         "normalized_text": "",
-        "stage": "extract_compensated",
         "errors": state.get("errors", [])
         + ["extraction failed, compensated and ready for retry"],
     }
@@ -2399,7 +2595,6 @@ async def compensate_normalize(state: Source7StageState) -> dict:
 
     return {
         "normalized_text": "",
-        "stage": "normalize_compensated",
         "errors": state.get("errors", [])
         + ["normalization failed, compensated and ready for retry"],
     }
@@ -2417,7 +2612,6 @@ async def compensate_chunk(state: Source7StageState) -> dict:
     return {
         "chunks": [],
         "chunk_infos": [],
-        "stage": "chunk_compensated",
         "errors": state.get("errors", [])
         + ["chunking failed, compensated and ready for retry"],
     }
@@ -2426,16 +2620,27 @@ async def compensate_chunk(state: Source7StageState) -> dict:
 async def compensate_embed(state: Source7StageState) -> dict:
     """Compensate for a failed embedding.
 
-    Drops partial embeddings so chunks can be re-embedded on retry.
+    Drops partial embeddings so chunks can be re-embedded on retry. Marks
+    the source as ``embedding_pending`` so the UI can show a retry button.
+    Chunks are preserved in the state for re-embedding.
     """
     cmd_id = get_current_command_id()
     await report_progress_record(cmd_id, progress=75, stage="embed_compensate")
     await raise_if_cancelled(cmd_id)
 
+    source = state.get("source")
+    if source:
+        source.status = "embedding_pending"
+        try:
+            await source.save()
+        except Exception:  # noqa: BLE001 - compensation must not mask the original error
+            logger.warning(
+                f"failed to persist embedding_pending status for {source.id}"
+            )
+
     return {
         "embeddings": [],
         "embedded_count": 0,
-        "stage": "embed_compensated",
         "errors": state.get("errors", [])
         + ["embedding failed, compensated and ready for retry"],
     }
@@ -2467,7 +2672,6 @@ async def compensate_index(state: Source7StageState) -> dict:
             logger.warning(f"compensation cleanup failed for {source.id}: {exc}")
 
     return {
-        "stage": "index_compensated",
         "errors": state.get("errors", [])
         + ["indexing failed, compensated and ready for retry"],
     }
@@ -2515,38 +2719,47 @@ workflow_7stage.add_conditional_edges(
     },
 )
 
-# Each extract stage either succeeds (→ normalize) or fails (→ compensate)
-workflow_7stage.add_edge("extract_instant", "normalize")
-workflow_7stage.add_edge("extract_heavy", "normalize")
-workflow_7stage.add_edge("normalize", "chunk")
-workflow_7stage.add_edge("chunk", "embed")
-workflow_7stage.add_edge("embed", "index")
-workflow_7stage.add_edge("index", END)
+# Each stage routes via conditional edge (→ next stage on success,
+# → compensate on failure). Direct edges are intentionally NOT added here
+# because they would fire in parallel with the conditional edge, causing
+# concurrent writes to shared state keys (e.g. embedded_count, stage).
 
-# Compensation edges — on error, route to the matching compensator
+# Compensation edges — on error, route to the matching compensator.
+#
+# The condition checks whether the stage actually FAILED (no usable output),
+# not whether there are non-fatal warnings. Warnings (e.g. timed-out pages)
+# are carried in state.warnings and persisted by index_stage — they do NOT
+# trigger compensation. Only a genuinely failed stage (no extraction content,
+# no normalized text, no chunks, no embeddings) routes to compensation.
 workflow_7stage.add_conditional_edges(
     "extract_instant",
-    lambda state: "compensate" if state.get("errors") else "normalize",
+    lambda state: "compensate"
+    if (ext := state.get("extraction")) is None or not ext.content.strip()
+    else "normalize",
     {"compensate": "compensate_extract", "normalize": "normalize"},
 )
 workflow_7stage.add_conditional_edges(
     "extract_heavy",
-    lambda state: "compensate" if state.get("errors") else "normalize",
+    lambda state: "compensate"
+    if (ext := state.get("extraction")) is None or not ext.content.strip()
+    else "normalize",
     {"compensate": "compensate_extract", "normalize": "normalize"},
 )
 workflow_7stage.add_conditional_edges(
     "normalize",
-    lambda state: "compensate" if state.get("errors") else "chunk",
+    lambda state: "compensate"
+    if not (state.get("normalized_text") or "").strip()
+    else "chunk",
     {"compensate": "compensate_normalize", "chunk": "chunk"},
 )
 workflow_7stage.add_conditional_edges(
     "chunk",
-    lambda state: "compensate" if state.get("errors") else "embed",
+    lambda state: "compensate" if not state.get("chunks") else "embed",
     {"compensate": "compensate_chunk", "embed": "embed"},
 )
 workflow_7stage.add_conditional_edges(
     "embed",
-    lambda state: "compensate" if state.get("errors") else "index",
+    lambda state: "compensate" if not state.get("embeddings") else "index",
     {"compensate": "compensate_embed", "index": "index"},
 )
 workflow_7stage.add_conditional_edges(
