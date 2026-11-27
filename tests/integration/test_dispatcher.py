@@ -28,6 +28,7 @@ from open_notebook.scheduler.dispatcher import (
     _reap_stale_jobs,
 )
 from open_notebook.scheduler.submit import QueueFull, submit_held
+from open_notebook.database.repository import repo_query
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -389,3 +390,17 @@ async def test_checkpoint_resume_attempts_and_exhaustion(monkeypatch):
     )
     assert len(calls) == 1
     assert calls[0][1] is True  # increment_attempt was True
+
+
+@pytest.mark.asyncio
+async def test_command_table_has_ttl_field():
+    """Schema-compatibility test: migration 81 added ttl_expires_at to
+    the vendor's command table. If a surreal_commands upgrade wipes it,
+    this test fails before deploy, protecting the TTL sweep from
+    silently stopping."""
+    rows = await repo_query("INFO FOR TABLE command")
+    field_names = {str(f.get("name") or f.get("field")) for f in rows}
+    assert "ttl_expires_at" in field_names, (
+        "command table lost ttl_expires_at field — surreal_commands "
+        "upgrade may have wiped migration 81; TTL sweep will silently stop"
+    )

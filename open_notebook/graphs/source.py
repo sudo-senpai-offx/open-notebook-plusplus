@@ -42,6 +42,12 @@ from open_notebook.preprocess.tools.ssconvert import (
     read_csv_native,
 )
 from open_notebook.preprocess.tools.tesseract import extract_ocr
+from open_notebook.preprocess.capabilities import (
+    ALL_CAPABILITIES,
+    CapabilityStatus,
+    has_capability,
+    require_capability,
+)
 
 # content-core >= 2.1 disables its own Loguru logging for library consumers.
 # Both the API and the worker import this module before extracting anything,
@@ -421,6 +427,38 @@ def _is_media(file_path: str | None) -> bool:
         # never audio.
         return (head[1] & 0xE0) == 0xE0
     return any(head.startswith(sig) for sig in _MEDIA_SIGNATURES)
+
+
+def _is_video(file_path: str | None) -> bool:
+    """Whether the file at *file_path* is a video container, by content.
+
+    Distinct from `_is_media` (which also matches audio). Raw video files are
+    rejected at route_stage with guidance to link a YouTube URL instead, since
+    ON++ has no native video decode path. Checked by magic bytes (not suffix)
+    because the blob store hands files back as ``{sha}.bin``.
+    """
+    if not file_path:
+        return False
+    try:
+        with open(file_path, "rb") as handle:
+            head = handle.read(16)
+    except OSError:
+        return False
+    if not head:
+        return False
+    # AVI (RIFF container with AVI form tag)
+    if head[:4] == b"RIFF" and head[8:12] == b"AVI ":
+        return True
+    # ISO base media (mp4 / mov / 3gp) — primarily video containers
+    if head[4:8] == b"ftyp":
+        return True
+    # Matroska / WebM
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return True
+    # MPEG program stream / MPEG video
+    if head[:4] in (b"\x00\x00\x01\xba", b"\x00\x00\x01\xb3"):
+        return True
+    return False
 
 
 def _audio_duration_seconds(file_path: str) -> Optional[float]:
@@ -1091,6 +1129,15 @@ async def route_stage(state: Source7StageState) -> dict:
     url = content_state.get("url") or ""
     content = content_state.get("content")
 
+    # Raw video files are not supported — link the YouTube URL instead so
+    # ON++ can extract the transcript. Checked before _is_media so audio
+    # files still fall through to the STT path.
+    if file_path and _is_video(file_path):
+        raise ValueError(
+            "Video files are not supported. "
+            "Link the YouTube URL instead so ON++ can extract the transcript."
+        )
+
     # Media files (by magic bytes, not suffix — blob store uses {sha}.bin)
     if file_path and _is_media(file_path):
         source = state.get("source")
@@ -1258,15 +1305,34 @@ async def _dispatch_extract(
     Order matters: HTML/URL → trafilatura must come before pandoc so HTML
     files are not swallowed by pandoc. Spreadsheet and CSV are handled
     before the document route.
+
+    Capability gates run before each wrapper so a missing binary fails
+    loudly (actionable install message) or falls back to content-core
+    extraction when available, instead of spawning doomed subprocesses or
+    silently returning empty content.
     """
-    # PDF extraction via pdftotext wrapper (Day 1). Scanned PDFs (pdftotext
-    # yields < 50 chars/page) fall back to tesseract OCR.
+    # ── PDF → pdftotext (Day 1); scanned PDF → tesseract OCR (Day 4) ──
     if content_type == "pdf" and file_path:
+        if not has_capability("pdftotext"):
+            if has_capability("content_core"):
+                return await _extract_content_core_stage(
+                    state, cmd_id, errors, content_state, url
+                )
+            raise ValueError(
+                "pdftotext is not installed. Install poppler (pdftotext) to "
+                "extract text from PDFs, or upload a text-based source."
+            )
         result = await _extract_pdf_stage(state, cmd_id, errors, file_path, content_state)
         extraction = result.get("extraction")
         if extraction and extraction.content and len(extraction.content.strip()) >= 50:
             return result
         # pdftotext returned little/no text → scanned PDF, use tesseract OCR.
+        if not has_capability("tesseract") or not has_capability("pdftoppm"):
+            raise ValueError(
+                "OCR is not installed. Install tesseract (and poppler for "
+                "pdftoppm) to extract text from scanned PDFs, or upload a "
+                "text-layer PDF."
+            )
         page_count = content_state.get("page_count") or 1
         language = content_state.get("language") or ""
         ocr_result = await extract_ocr(
@@ -1279,16 +1345,30 @@ async def _dispatch_extract(
             state, cmd_id, errors, ocr_result, content_state, "pdf"
         )
 
-    # Spreadsheet conversion via ssconvert (Day 4).
+    # ── Spreadsheet → ssconvert (Day 4) ──
     if content_type == "spreadsheet" and file_path:
+        if not has_capability("ssconvert"):
+            if has_capability("content_core"):
+                return await _extract_content_core_stage(
+                    state, cmd_id, errors, content_state, url
+                )
+            raise ValueError(
+                "ssconvert is not installed. Install Gnumeric (ssconvert) to "
+                "convert spreadsheets, or export as CSV and upload that instead."
+            )
         return await _extract_ssconvert_stage(state, cmd_id, errors, file_path, content_state)
 
-    # CSV native text read (Day 4 — no binary, bypasses ssconvert).
+    # ── CSV → native UTF-8 text read (Day 4, no binary needed) ──
     if content_type == "csv" and file_path:
         return await _extract_csv_stage(state, cmd_id, errors, file_path, content_state)
 
-    # Image OCR via tesseract (Day 4, heavy lane).
+    # ── Image → tesseract OCR (Day 4, heavy lane) ──
     if content_type == "image" and file_path:
+        if not has_capability("tesseract"):
+            raise ValueError(
+                "OCR is not installed. Install tesseract to extract text from "
+                "images, or provide a text-based source."
+            )
         page_count = 1
         language = content_state.get("language") or ""
         ocr_result = await extract_ocr(
@@ -1301,13 +1381,22 @@ async def _dispatch_extract(
             state, cmd_id, errors, ocr_result, content_state, "image"
         )
 
-    # HTML extraction via trafilatura wrapper (Day 3).
+    # ── HTML extraction via trafilatura wrapper (Day 3). ──
     # Must come BEFORE pandoc so HTML files don't get swallowed by pandoc.
     if content_type in ("url", "html") and (file_path or url):
         return await _extract_trafilatura_stage(state, cmd_id, errors, file_path, content_state, url)
 
-    # Document conversion via pandoc wrapper (docx, odt, epub, rtf).
+    # ── Document conversion via pandoc wrapper (docx, odt, epub, rtf). ──
     if content_type == "document" and file_path:
+        if not has_capability("pandoc"):
+            if has_capability("content_core"):
+                return await _extract_content_core_stage(
+                    state, cmd_id, errors, content_state, url
+                )
+            raise ValueError(
+                "pandoc is not installed. Install pandoc to convert rich "
+                "documents (docx/odt/epub/rtf), or upload plain text instead."
+            )
         return await _extract_pandoc_stage(state, cmd_id, errors, file_path, content_state)
 
     # Fall back to content-core for URLs, text, media, and unknown types.
