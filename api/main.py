@@ -18,6 +18,8 @@ try:
 except Exception:
     pass
 
+from open_notebook.preprocess.capabilities import get_capability_status
+
 import asyncio
 import os
 import time
@@ -848,7 +850,10 @@ async def readiness():
             },
         )
 
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "capabilities": get_capability_status().to_dict(),
+    }
 
 
 @app.get("/api/ollama/models")

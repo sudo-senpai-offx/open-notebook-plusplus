@@ -43,6 +43,15 @@ NATIVE_BINARIES = (
     "ffmpeg",
 )
 
+# whisper.cpp ships as ``whisper-cli`` upstream and in Termux, but some
+# distros alias it as ``whisper``. Probe in fallback order and expose the
+# resolved name so stt.py can invoke whatever binary is actually installed.
+WHISPER_BINARY_CANDIDATES = ("whisper-cli", "whisper")
+
+# Resolved whisper binary name, populated on first probe. None if neither
+# candidate is on PATH.
+WHISPER_BINARY_RESOLVED: Optional[str] = None
+
 # Optional Python packages probed via importlib.util.find_spec.
 OPTIONAL_PACKAGES = (
     "content_core",
@@ -105,6 +114,37 @@ def _probe_binary(binary: str) -> bool:
     return True
 
 
+def resolve_whisper_binary() -> Optional[str]:
+    """Resolve the whisper.cpp binary name in fallback order.
+
+    Tries ``whisper-cli`` (upstream/Termux) then ``whisper`` (some distro
+    packages). Returns the first name found on PATH, or None if neither is
+    installed. The result is cached in :data:`WHISPER_BINARY_RESOLVED`.
+    """
+    global WHISPER_BINARY_RESOLVED
+
+    if WHISPER_BINARY_RESOLVED is not None:
+        return WHISPER_BINARY_RESOLVED
+
+    for candidate in WHISPER_BINARY_CANDIDATES:
+        if shutil.which(candidate) is not None:
+            WHISPER_BINARY_RESOLVED = candidate
+            return candidate
+
+    WHISPER_BINARY_RESOLVED = None
+    return None
+
+
+def get_whisper_binary_name() -> Optional[str]:
+    """Public accessor for the resolved whisper binary name.
+
+    Returns the resolved binary name (see :func:`resolve_whisper_binary`),
+    probing on first call. stt.py uses this to invoke whichever binary is
+    actually installed.
+    """
+    return resolve_whisper_binary()
+
+
 def _probe_package(package: str) -> bool:
     """Probe a single optional Python package via importlib.util.find_spec."""
     return importlib.util.find_spec(package) is not None
@@ -128,7 +168,13 @@ def probe_capabilities(refresh: bool = False) -> CapabilityStatus:
 
     status = CapabilityStatus()
     for binary in NATIVE_BINARIES:
-        setattr(status, _NAME_TO_FIELD[binary], _probe_binary(binary))
+        if binary == "whisper-cli":
+            # whisper.cpp may be packaged as ``whisper`` on some distros;
+            # resolve the fallback and expose the real binary name.
+            resolved = resolve_whisper_binary()
+            setattr(status, _NAME_TO_FIELD[binary], resolved is not None)
+        else:
+            setattr(status, _NAME_TO_FIELD[binary], _probe_binary(binary))
     for package in OPTIONAL_PACKAGES:
         setattr(status, _NAME_TO_FIELD[package], _probe_package(package))
 

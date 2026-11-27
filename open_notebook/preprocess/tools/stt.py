@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -65,6 +66,14 @@ SEGMENT_TIMEOUT_SECONDS = 180  # 3 minutes per whisper-cli invocation
 SAMPLE_RATE = 16000
 CHANNELS = 1
 
+# Whisper model resolution: explicit settings → env var → default on-disk path.
+WHISPER_MODEL_ENV = "OPEN_NOTEBOOK_WHISPER_MODEL"
+DEFAULT_MODEL_PATH = os.path.expanduser(
+    "~/.onpp/models/ggml-base-q5_1.bin"
+)
+# Quantized base model (q5_1) specified in Week 1 Q8 for both en and multilingual.
+DEFAULT_MODEL_NAME = "ggml-base-q5_1.bin"
+
 # Week 1 Q3 rule message.
 LANGUAGE_REQUIRED_FOR_SHORT_AUDIO = "LANGUAGE_REQUIRED_FOR_SHORT_AUDIO"
 
@@ -76,6 +85,47 @@ AUTO_LANGUAGE = "auto"
 _DETECTED_LANG_RE = re.compile(
     r"detected language[:\s]+([a-z]{2}(?:-[A-Z]{2})?)", re.IGNORECASE
 )
+
+
+def resolve_model_path(stt_model_setting: Optional[str] = None) -> str:
+    """Resolve the whisper.cpp model path.
+
+    Resolution order (first existing file wins):
+      1. ``stt_model_setting`` (persisted ContentSettings.stt_model)
+      2. ``OPEN_NOTEBOOK_WHISPER_MODEL`` environment variable
+      3. ``~/.onpp/models/ggml-base-q5_1.bin`` (default on-disk path)
+
+    Raises:
+        ValueError: if an explicitly-configured path does not exist, or if
+            no usable model is found anywhere in the resolution chain.
+    """
+    # 1. Explicitly-configured setting — must exist if set.
+    if stt_model_setting:
+        if os.path.isfile(stt_model_setting):
+            return stt_model_setting
+        raise ValueError(
+            f"Whisper model not found at {stt_model_setting}. "
+            f"Download {DEFAULT_MODEL_NAME} or set {WHISPER_MODEL_ENV}."
+        )
+
+    # 2. Environment variable — must exist if set.
+    env_path = os.getenv(WHISPER_MODEL_ENV)
+    if env_path:
+        if os.path.isfile(env_path):
+            return env_path
+        raise ValueError(
+            f"Whisper model not found at {env_path}. "
+            f"Download {DEFAULT_MODEL_NAME} or unset {WHISPER_MODEL_ENV}."
+        )
+
+    # 3. Default on-disk path.
+    if os.path.isfile(DEFAULT_MODEL_PATH):
+        return DEFAULT_MODEL_PATH
+
+    raise ValueError(
+        f"Whisper model not found at {DEFAULT_MODEL_PATH}. "
+        f"Download {DEFAULT_MODEL_NAME} or set {WHISPER_MODEL_ENV}."
+    )
 
 
 @dataclass
@@ -147,6 +197,22 @@ async def _read_checkpoint(command_id: str) -> Optional[Dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"checkpoint read failed for {command_id}: {exc}")
         return None
+
+
+def _whisper_binary() -> str:
+    """Resolve the whisper binary to invoke.
+
+    Honors the ``WHISPER_BINARY`` constant (monkeypatchable in tests) when it
+    is on PATH; otherwise falls back to the capabilities-probed name
+    (``whisper-cli`` → ``whisper``). Falls back to the constant as a last
+    resort so callers get a deterministic value even when nothing is installed.
+    """
+    if shutil.which(WHISPER_BINARY):
+        return WHISPER_BINARY
+    from open_notebook.preprocess.capabilities import get_whisper_binary_name
+
+    resolved = get_whisper_binary_name()
+    return resolved if resolved is not None else WHISPER_BINARY
 
 
 def _probe_duration(file_path: str) -> Optional[float]:
@@ -274,7 +340,7 @@ async def _transcribe_segment(
 
     Applies a 180s per-segment timeout.
     """
-    cmd: List[str] = [WHISPER_BINARY]
+    cmd: List[str] = [_whisper_binary()]
     if model_path:
         cmd.extend(["--model", model_path])
     cmd.extend(["--language", language or AUTO_LANGUAGE, "--output-txt", segment_path])
@@ -339,7 +405,8 @@ async def transcribe_audio(
 
     Raises:
         ValueError: if audio < 60s and no explicit language is set
-            ("LANGUAGE_REQUIRED_FOR_SHORT_AUDIO").
+            ("LANGUAGE_REQUIRED_FOR_SHORT_AUDIO"); or if no whisper model
+            can be resolved (see resolve_model_path).
         FileNotFoundError: if whisper-cli or ffmpeg is missing.
         asyncio.TimeoutError: if a segment exceeds the per-segment timeout
             (handled internally: recorded and continued).
@@ -364,6 +431,11 @@ async def transcribe_audio(
             f"{duration:.0f}s (< 60s) and no explicit language was set. "
             f"Set the source's language field before processing."
         )
+
+    # ── Step 1b: resolve + validate the whisper model path ─────────────
+    # Fail loudly before spawning whisper-cli if no usable model exists.
+    if model_path is None:
+        model_path = resolve_model_path()
 
     # ── Step 2: normalize to 16 kHz mono WAV ─────────────────────────
     with tempfile.TemporaryDirectory() as tmp_dir:

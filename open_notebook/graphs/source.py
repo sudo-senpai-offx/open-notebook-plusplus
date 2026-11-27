@@ -28,6 +28,7 @@ from open_notebook.utils.job_control import (
     raise_if_cancelled,
     report_progress_record,
 )
+from open_notebook.scheduler.dispatcher import _ollama_blocked
 from open_notebook.utils.runtime_capabilities import (
     docling_available,
     engine_runtime_missing,
@@ -42,6 +43,7 @@ from open_notebook.preprocess.tools.ssconvert import (
     read_csv_native,
 )
 from open_notebook.preprocess.tools.tesseract import extract_ocr
+from open_notebook.preprocess.tools.stt import resolve_model_path, transcribe_audio
 from open_notebook.preprocess.capabilities import (
     ALL_CAPABILITIES,
     CapabilityStatus,
@@ -742,6 +744,44 @@ def _is_image(file_path: str | None) -> bool:
     return False
 
 
+_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".aac", ".wma"}
+
+
+def _is_audio(file_path: str | None) -> bool:
+    """Whether the file at *file_path* is audio, by extension or magic bytes.
+
+    The blob store stores files as ``{sha}.bin``, so gating STT on
+    ``endswith(...)`` alone silently skips synced blobs without a suffix.
+    We check both the extension (covers the common .mp3/.wav/.m4a/.ogg/
+    .flac/.webm set) and magic bytes (covers suffix-less synced blobs).
+
+    Covers MP3, WAV, M4A/AAC, OGG/OPUS, FLAC, WebM audio.
+    """
+    if not file_path:
+        return False
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in _AUDIO_EXTENSIONS:
+        return True
+    try:
+        with open(file_path, "rb") as handle:
+            head = handle.read(16)
+    except OSError:
+        return False
+    if not head:
+        return False
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return True  # WAV
+    if head[:3] == b"ID3" or head[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return True  # MP3 (ID3 tag or MPEG frame sync)
+    if head[:4] == b"OggS":
+        return True  # OGG / OPUS
+    if head[:4] == b"fLaC":
+        return True  # FLAC
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return True  # WebM / Matroska (EBML)
+    return False
+
+
 def _pdf_engine_uses_ocr(document_engine: str) -> bool:
     """Whether PDFs will be routed through Docling (and therefore OCR'd).
 
@@ -1138,6 +1178,35 @@ async def route_stage(state: Source7StageState) -> dict:
             "Link the YouTube URL instead so ON++ can extract the transcript."
         )
 
+    # Audio files → speech-to-text path (heavy/deferred lane).
+    if file_path and _is_audio(file_path):
+        source = state.get("source")
+        language = getattr(source, "language", None) if source else None
+
+        # Short audio (<60s) requires an explicit language — whisper's
+        # auto-detection is unreliable on short clips and produces
+        # mixed-script noise on Tamil/Malay. Long audio may auto-detect.
+        if not language:
+            duration = _audio_duration_seconds(file_path)
+            if duration is not None and duration < 60:
+                raise ValueError(
+                    "Short audio (<60s) requires an explicit language. "
+                    "Set the source's language field (two-letter code, e.g. "
+                    "'en', 'zh', 'ja', 'ta') before processing."
+                )
+
+        # Batch mode defers heavy lanes until Ollama is unloaded.
+        lane = "deferred" if _ollama_blocked() else "heavy"
+
+        return {
+            "content_type": "audio",
+            "lane": lane,
+            "route_reason": (
+                f"audio file detected (language={language or 'auto-detect'})"
+            ),
+            "stage": "route",
+        }
+
     # Media files (by magic bytes, not suffix — blob store uses {sha}.bin)
     if file_path and _is_media(file_path):
         source = state.get("source")
@@ -1380,6 +1449,93 @@ async def _dispatch_extract(
         return _ocr_result_to_extract_dict(
             state, cmd_id, errors, ocr_result, content_state, "image"
         )
+
+    # ── Audio → whisper.cpp STT (Day 5, heavy/deferred lane) ──
+    if content_type == "audio" and file_path:
+        # Gate on whisper-cli (and ffmpeg for non-WAV input) before spawning
+        # any subprocess — fail loudly with an actionable message instead of
+        # spawning doomed subprocesses or returning empty content.
+        require_capability("whisper-cli")
+        if not file_path.lower().endswith(".wav"):
+            require_capability("ffmpeg")
+
+        source = state.get("source")
+        language = getattr(source, "language", None) if source else None
+
+        # Resolve the whisper model: settings → env → default on-disk path.
+        # Raises ValueError("Whisper model not found at ...") if missing.
+        try:
+            settings = await ContentSettings.get_instance()  # type: ignore[assignment]
+            stt_model = getattr(settings, "stt_model", None)
+        except Exception:  # noqa: BLE001 - settings unavailable → use defaults/env
+            stt_model = None
+        model_path = resolve_model_path(stt_model)
+
+        try:
+            stt_result = await transcribe_audio(
+                command_id=cmd_id or "",
+                file_path=file_path,
+                language=language,
+                model_path=model_path,
+                source_language_set=bool(language),
+            )
+        except ValueError as exc:
+            # Short-audio language rule or missing model → loud failure.
+            errors.append(f"extract: {exc}")
+            return {
+                "extraction": None,
+                "normalized_text": "",
+                "errors": errors,
+                "stage": "extract",
+            }
+
+        extraction = _ExtractionOutput(
+            content=stt_result.get("text", ""),
+            title=content_state.get("title", ""),
+        )
+
+        # Propagate STT warnings (partial timeout, etc.).
+        for warning in stt_result.get("warnings", []):
+            errors.append(f"extract: {warning}")
+
+        timed_out = stt_result.get("timed_out_segments", [])
+        if timed_out:
+            errors.append(
+                f"extract: segments {sorted(timed_out)} timed out during STT"
+            )
+
+        if stt_result.get("source_status") == "extracting_partial":
+            errors.append("extract: stt_partial_timeout (extracting_partial)")
+
+        # Persist auto-detected language back to the source for re-processing.
+        detected_language = stt_result.get("detected_language")
+        if detected_language and source and not language:
+            try:
+                source.language = detected_language
+                await source.save()
+                errors.append(
+                    f"extract: Whisper detected {detected_language}. "
+                    f"If incorrect, set language explicitly and re-process."
+                )
+            except Exception as exc:  # noqa: BLE001 - persist failure is non-fatal
+                logger.warning(
+                    f"failed to persist detected language {detected_language}: {exc}"
+                )
+
+        if not extraction.content.strip():
+            errors.append("extract: STT returned no transcript text")
+            return {
+                "extraction": None,
+                "normalized_text": "",
+                "errors": errors,
+                "stage": "extract",
+            }
+
+        return {
+            "extraction": extraction,
+            "errors": errors,
+            "stage": "extract",
+        }
 
     # ── HTML extraction via trafilatura wrapper (Day 3). ──
     # Must come BEFORE pandoc so HTML files don't get swallowed by pandoc.
@@ -2347,6 +2503,7 @@ workflow_7stage.add_conditional_edges(
     lambda state: state.get("content_type", "url"),
     {
         "media": "extract_heavy",      # audio/video → STT path
+        "audio": "extract_heavy",      # audio → whisper.cpp STT path
         "pdf": "extract_heavy",        # scanned PDF → OCR path
         "image": "extract_heavy",      # image → tesseract OCR path
         "url": "extract_instant",      # URL → direct extraction

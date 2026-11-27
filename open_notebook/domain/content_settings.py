@@ -50,3 +50,11 @@ class ContentSettings(RecordModel):
         ["en", "pt", "es", "de", "nl", "en-GB", "fr", "hi", "ja", "zh-CN", "zh-TW"],
         description="Preferred languages for YouTube transcripts",
     )
+    stt_model: Optional[str] = Field(
+        None,
+        description=(
+            "Path to a whisper.cpp model file (e.g. ggml-base-q5_1.bin) used "
+            "for speech-to-text. Falls back to OPEN_NOTEBOOK_WHISPER_MODEL, "
+            "then ~/.onpp/models/ggml-base-q5_1.bin."
+        ),
+    )
