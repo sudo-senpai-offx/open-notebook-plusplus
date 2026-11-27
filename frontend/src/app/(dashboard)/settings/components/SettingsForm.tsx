@@ -19,6 +19,8 @@ import {
   quotaApi,
   deepseekApi,
   processingFlags,
+  ollamaApi,
+  syncApi,
   ttsSttApi,
   preprocessorApi,
   browserAiApi,
@@ -27,13 +29,15 @@ import {
   DeepSeekSessionStatus,
   SupportedLanguages,
 } from '@/lib/types/api'
-import { useEffect, useState } from 'react'
-import { ChevronDownIcon } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { ChevronDownIcon, Loader2, X } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { useOfflineStore } from '@/lib/offline-store'
 import { SystemInfo } from './advanced/SystemInfo'
 import { ProcessingQueue } from './advanced/ProcessingQueue'
 import { RebuildEmbeddings } from './advanced/RebuildEmbeddings'
+import { QueueBacklogPanel } from '@/components/processing/QueueBacklogPanel'
+import { CapabilitiesCard } from '@/components/processing/CapabilitiesCard'
 
 const settingsSchema = z.object({
   default_content_processing_engine_doc: z.enum(['auto', 'docling', 'simple']).optional(),
@@ -94,6 +98,10 @@ export function SettingsForm() {
   const [supportedLanguages, setSupportedLanguages] = useState<SupportedLanguages | null>(null)
   const [ttsSttLoading, setTtsSttLoading] = useState(false)
   const [preprocessGroups, setPreprocessGroups] = useState<Record<string, boolean>>({})
+  const [ttsProvider, setTtsProvider] = useState('browser')
+  const [sttProvider, setSttProvider] = useState('browser')
+  const [ttsLanguage, setTtsLanguage] = useState('')
+  const [sttLanguage, setSttLanguage] = useState('')
   const [browserAiLoading, setBrowserAiLoading] = useState(false)
   const [googleAiModeUrl, setGoogleAiModeUrl] = useState('http://127.0.0.1:18080/v1')
   const [lightpandaCdpUrl, setLightpandaCdpUrl] = useState('http://127.0.0.1:9222')
@@ -117,6 +125,102 @@ export function SettingsForm() {
   const [duckAiDefaultModel, setDuckAiDefaultModel] = useState('gpt-6-luna')
   const [duckAiConfigured, setDuckAiConfigured] = useState(true)
   const [googleAiModeConfigured, setGoogleAiModeConfigured] = useState(true)
+  // Ollama local LLM
+  const [ollamaUrl, setOllamaUrl] = useState('')
+  const [ollamaDefaultModel, setOllamaDefaultModel] = useState('llama3.2:3b')
+  const [ollamaConfigured, setOllamaConfigured] = useState(false)
+  const [ollamaModels, setOllamaModels] = useState<string[]>([])
+  const [ollamaLoadedModels, setOllamaLoadedModels] = useState<string[]>([])
+  const [ollamaPulling, setOllamaPulling] = useState(false)
+  const [ollamaUnloading, setOllamaUnloading] = useState(false)
+  // Sync configuration
+  const [syncDir, setSyncDir] = useState('')
+  const [syncToken, setSyncToken] = useState('')
+  const [syncPairedDevices, setSyncPairedDevices] = useState<string[]>([])
+  const [syncAutoSync, setSyncAutoSync] = useState(false)
+  const [syncUserspaceOnly, setSyncUserspaceOnly] = useState(true)
+  const [syncNotebooks, setSyncNotebooks] = useState(false)
+  const [syncSessions, setSyncSessions] = useState(false)
+  const [syncAnalyticsEnabled, setSyncAnalyticsEnabled] = useState(false)
+  const [syncConflictResolution, setSyncConflictResolution] = useState('last_write_wins')
+  const [syncLastSyncAt, setSyncLastSyncAt] = useState<string | null>(null)
+  const [newSyncDevice, setNewSyncDevice] = useState('')
+  // Sync conflicts
+  const [syncConflicts, setSyncConflicts] = useState<{ collection: string; db_record_id: string; local_updated: string | null; remote_updated: string | null }[]>([])
+  const [showConflictDialog, setShowConflictDialog] = useState(false)
+  // Session-level settings
+  const [sessionCloudLocalSwitching, setSessionCloudLocalSwitching] = useState(true)
+  const [sessionAutoCompactionThreshold, setSessionAutoCompactionThreshold] = useState(0.7)
+  const [sessionAutoCompactionHardLimit, setSessionAutoCompactionHardLimit] = useState(0.95)
+  const [sessionHighPriorityTimeoutDays, setSessionHighPriorityTimeoutDays] = useState(30)
+  const [sessionLazyLoadEnabled, setSessionLazyLoadEnabled] = useState(true)
+
+  // Ollama model management callbacks (defined before useEffect to satisfy
+  // React Rules of Hooks - all hooks must be called in the same order)
+  const fetchOllamaModels = useCallback(async () => {
+    if (!ollamaUrl) return
+    try {
+      const baseUrl = ollamaUrl.replace(/\/$/, '')
+      const response = await fetch(`${baseUrl}/api/tags`)
+      if (response.ok) {
+        const data = await response.json()
+        const models = (data.models || []).map((m: any) => m.name)
+        setOllamaModels(models)
+      }
+    } catch {
+      // Ignore - Ollama may not be running
+    }
+  }, [ollamaUrl])
+
+  const fetchOllamaLoadedModels = useCallback(async () => {
+    if (!ollamaUrl) return
+    try {
+      const data = await ollamaApi.listLoaded()
+      setOllamaLoadedModels((data.models || []).map((m: any) => m.name))
+    } catch {
+      // Ignore
+    }
+  }, [ollamaApi, ollamaUrl])
+
+  const pullOllamaModel = useCallback(async (model: string) => {
+    setOllamaPulling(true)
+    try {
+      await ollamaApi.pullModel(model)
+      setConfigureMessage(`Model ${model} pulled successfully`)
+      await fetchOllamaModels()
+      await fetchOllamaLoadedModels()
+    } catch (e: any) {
+      setConfigureError(e.response?.data?.detail || e.message || `Failed to pull ${model}`)
+    } finally {
+      setOllamaPulling(false)
+    }
+  }, [ollamaApi, fetchOllamaModels, fetchOllamaLoadedModels])
+
+  const unloadOllamaModel = useCallback(async (model: string) => {
+    setOllamaUnloading(true)
+    try {
+      await ollamaApi.unloadModel(model)
+      setConfigureMessage(`Model ${model} unloaded`)
+      await fetchOllamaLoadedModels()
+    } catch (e: any) {
+      setConfigureError(e.response?.data?.detail || e.message || `Failed to unload ${model}`)
+    } finally {
+      setOllamaUnloading(false)
+    }
+  }, [ollamaApi, fetchOllamaLoadedModels])
+
+  const ensureOllamaLoaded = useCallback(async (model: string) => {
+    setOllamaPulling(true)
+    try {
+      const result = await ollamaApi.ensureLoaded(model, true)
+      setConfigureMessage(`Model ${model} ${result.status}`)
+      await fetchOllamaLoadedModels()
+    } catch (e: any) {
+      setConfigureError(e.response?.data?.detail || e.message || `Failed to load ${model}`)
+    } finally {
+      setOllamaPulling(false)
+    }
+  }, [ollamaApi, fetchOllamaLoadedModels])
 
   useEffect(() => {
     let mounted = true
@@ -220,11 +324,39 @@ export function SettingsForm() {
           setGeminiApiKey(data.gemini_api_key ?? '')
           setDuckAiUrl(data.duck_ai_url ?? '')
           setDuckAiDefaultModel(data.duck_ai_default_model ?? 'gpt-6-luna')
+          setOllamaUrl(data.ollama_url ?? '')
+          setOllamaDefaultModel(data.ollama_default_model ?? 'llama3.2:3b')
           setGoogleAiModeConfigured(
             !!data.google_ai_mode_url
             || !!data.lightpanda_cdp_url
             || !!data.gemini_api_key
           )
+          setOllamaConfigured(!!data.ollama_url)
+          // Sync configuration
+          setSyncDir(data.sync_dir ?? '')
+          setSyncToken(data.sync_token ?? '')
+          setSyncPairedDevices(data.sync_paired_devices ?? [])
+          setSyncAutoSync(data.sync_auto_sync ?? false)
+          setSyncUserspaceOnly(data.sync_userspace_only ?? true)
+          setSyncNotebooks(data.sync_notebooks ?? false)
+          setSyncSessions(data.sync_sessions ?? false)
+          setSyncAnalyticsEnabled(data.sync_analytics_enabled ?? false)
+          setSyncConflictResolution(data.sync_conflict_resolution ?? 'last_write_wins')
+          setSyncLastSyncAt(data.sync_last_sync_at ?? null)
+          // Preprocessor group settings
+          setPreprocessGroups({
+            documents: data.preprocess_documents ?? true,
+            audio: data.preprocess_audio ?? true,
+            image: data.preprocess_image ?? true,
+            video: data.preprocess_video ?? true,
+            forceEnabled: data.preprocess_force_enabled ?? true,
+          })
+          // Session-level settings
+          setSessionCloudLocalSwitching(data.session_cloud_local_switching ?? true)
+          setSessionAutoCompactionThreshold(data.session_auto_compaction_threshold ?? 0.7)
+          setSessionAutoCompactionHardLimit(data.session_auto_compaction_hard_limit ?? 0.95)
+          setSessionHighPriorityTimeoutDays(data.session_high_priority_timeout_days ?? 30)
+          setSessionLazyLoadEnabled(data.session_lazy_load_enabled ?? true)
           setDuckAiConfigured(!!data.duck_ai_url)
         }
       } catch {
@@ -232,12 +364,17 @@ export function SettingsForm() {
       }
     }
     fetchProcessingFlags()
+    // Fetch available Ollama models from the local server
+    fetchOllamaModels()
+    // Fetch currently loaded Ollama models
+    fetchOllamaLoadedModels()
     fetchTtsStt()
     fetchPreprocessGroups()
     fetchBrowserAi()
     refreshStorage()
     return () => { mounted = false }
-  }, [refreshStorage])
+  }, [refreshStorage, ollamaUrl, fetchOllamaModels, fetchOllamaLoadedModels])
+
 
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     doc: false,
@@ -294,6 +431,18 @@ export function SettingsForm() {
 
   const onSubmit = async (data: SettingsFormData) => {
     await updateSettings.mutateAsync(data)
+    // Save preprocessor group settings
+    try {
+      await processingFlags.update({
+        preprocess_documents: preprocessGroups.documents,
+        preprocess_audio: preprocessGroups.audio,
+        preprocess_image: preprocessGroups.image,
+        preprocess_video: preprocessGroups.video,
+        preprocess_force_enabled: preprocessGroups.forceEnabled,
+      })
+    } catch {
+      // Non-critical; preprocessor settings will retry on next save
+    }
     setShowRestartModal(true)
   }
 
@@ -329,17 +478,14 @@ export function SettingsForm() {
           <TabsTrigger value="preprocessor" className="px-4 py-2 text-sm font-medium">
             {t('settings.tabPreprocessor')}
           </TabsTrigger>
-          <TabsTrigger value="browser-ai" className="px-4 py-2 text-sm font-medium">
-            {t('settings.tabBrowserAi')}
-          </TabsTrigger>
-          <TabsTrigger value="deepseek" className="px-4 py-2 text-sm font-medium">
-            {t('settings.tabDeepseek')}
-          </TabsTrigger>
           <TabsTrigger value="cache-offline" className="px-4 py-2 text-sm font-medium">
             {t('settings.tabCacheOffline')}
           </TabsTrigger>
           <TabsTrigger value="rate-limits" className="px-4 py-2 text-sm font-medium">
             {t('settings.tabRateLimits')}
+          </TabsTrigger>
+          <TabsTrigger value="sync" className="px-4 py-2 text-sm font-medium">
+            {t('settings.tabSync')}
           </TabsTrigger>
           <TabsTrigger value="advanced" className="px-4 py-2 text-sm font-medium">
             {t('settings.tabAdvanced')}
@@ -591,9 +737,9 @@ export function SettingsForm() {
                 <div className="space-y-3">
                   <Label>{t('settings.ttsProvider')}</Label>
                   <Select
-                    value={ttsSttStatus?.allow_local_processing ? 'piper' : 'browser'}
-                    onValueChange={() => {}}
-                    disabled
+                    value={ttsProvider}
+                    onValueChange={(val) => setTtsProvider(val)}
+                    disabled={ttsSttLoading}
                   >
                     <SelectTrigger className="w-full">
                       <SelectValue placeholder={t('settings.ttsProviderPlaceholder')} />
@@ -607,9 +753,9 @@ export function SettingsForm() {
                   <div className="space-y-2">
                     <Label>{t('settings.ttsLanguage')}</Label>
                     <Select
-                      value=""
-                      onValueChange={() => {}}
-                      disabled
+                      value={ttsLanguage}
+                      onValueChange={(val) => setTtsLanguage(val)}
+                      disabled={ttsSttLoading}
                     >
                       <SelectTrigger className="w-full">
                         <SelectValue placeholder={t('settings.ttsLanguagePlaceholder')} />
@@ -634,9 +780,9 @@ export function SettingsForm() {
                 <div className="space-y-3">
                   <Label>{t('settings.sttProvider')}</Label>
                   <Select
-                    value=""
-                    onValueChange={() => {}}
-                    disabled
+                    value={sttProvider}
+                    onValueChange={(val) => setSttProvider(val)}
+                    disabled={ttsSttLoading}
                   >
                     <SelectTrigger className="w-full">
                       <SelectValue placeholder={t('settings.sttProviderPlaceholder')} />
@@ -649,9 +795,9 @@ export function SettingsForm() {
                   <div className="space-y-2">
                     <Label>{t('settings.sttLanguage')}</Label>
                     <Select
-                      value=""
-                      onValueChange={() => {}}
-                      disabled
+                      value={sttLanguage}
+                      onValueChange={(val) => setSttLanguage(val)}
+                      disabled={ttsSttLoading}
                     >
                       <SelectTrigger className="w-full">
                         <SelectValue placeholder={t('settings.sttLanguagePlaceholder')} />
@@ -692,8 +838,8 @@ export function SettingsForm() {
                     <span className={[
                       'px-2 py-0.5 rounded text-xs font-medium',
                       ttsSttStatus?.allow_local_processing
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-gray-100 text-gray-600',
+                        ? 'bg-fern-tint text-fern-deep'
+                        : 'bg-muted text-muted-foreground',
                     ].join(' ')}>
                       {ttsSttStatus?.allow_local_processing ? t('settings.enabled') : t('settings.disabled')}
                     </span>
@@ -703,7 +849,6 @@ export function SettingsForm() {
             </CardContent>
           </Card>
         </TabsContent>
-
         {/* Preprocessor Tab */}
         <TabsContent value="preprocessor" className="space-y-6">
           <Card>
@@ -721,8 +866,7 @@ export function SettingsForm() {
                     <Checkbox
                       id="preprocess_documents"
                       checked={preprocessGroups.documents ?? true}
-                      onCheckedChange={() => {}}
-                      disabled
+                      onCheckedChange={(val) => setPreprocessGroups(prev => ({ ...prev, documents: val as boolean }))}
                     />
                   </div>
                   <div className="flex items-center justify-between">
@@ -732,8 +876,7 @@ export function SettingsForm() {
                     <Checkbox
                       id="preprocess_audio"
                       checked={preprocessGroups.audio ?? true}
-                      onCheckedChange={() => {}}
-                      disabled
+                      onCheckedChange={(val) => setPreprocessGroups(prev => ({ ...prev, audio: val as boolean }))}
                     />
                   </div>
                   <div className="flex items-center justify-between">
@@ -743,8 +886,7 @@ export function SettingsForm() {
                     <Checkbox
                       id="preprocess_image"
                       checked={preprocessGroups.image ?? true}
-                      onCheckedChange={() => {}}
-                      disabled
+                      onCheckedChange={(val) => setPreprocessGroups(prev => ({ ...prev, image: val as boolean }))}
                     />
                   </div>
                   <div className="flex items-center justify-between">
@@ -754,8 +896,7 @@ export function SettingsForm() {
                     <Checkbox
                       id="preprocess_video"
                       checked={preprocessGroups.video ?? true}
-                      onCheckedChange={() => {}}
-                      disabled
+                      onCheckedChange={(val) => setPreprocessGroups(prev => ({ ...prev, video: val as boolean }))}
                     />
                   </div>
                   <div className="flex items-center justify-between">
@@ -765,8 +906,7 @@ export function SettingsForm() {
                     <Checkbox
                       id="preprocess_force"
                       checked={preprocessGroups.forceEnabled ?? true}
-                      onCheckedChange={() => {}}
-                      disabled
+                      onCheckedChange={(val) => setPreprocessGroups(prev => ({ ...prev, forceEnabled: val as boolean }))}
                     />
                   </div>
                 </div>
@@ -780,628 +920,6 @@ export function SettingsForm() {
                     {t('settings.preprocessorNotice')}
                   </p>
                 </div>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Browser AI Tab */}
-        <TabsContent value="browser-ai" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('settings.browserAiTitle')}</CardTitle>
-              <CardDescription>{t('settings.browserAiDesc')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="google_ai_mode_url">{t('settings.googleAiModeUrl')}</Label>
-                  <input
-                    id="google_ai_mode_url"
-                    type="text"
-                    value={googleAiModeUrl}
-                    onChange={(e) => setGoogleAiModeUrl(e.target.value)}
-                    placeholder={t('settings.googleAiModeUrlPlaceholder')}
-                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
-                    disabled={browserAiLoading}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t('settings.googleAiModeUrlHelp')}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="duck_ai_url">{t('settings.duckAiUrl')}</Label>
-                  <input
-                    id="duck_ai_url"
-                    type="text"
-                    value={duckAiUrl}
-                    onChange={(e) => setDuckAiUrl(e.target.value)}
-                    placeholder={t('settings.duckAiUrlPlaceholder')}
-                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
-                    disabled={browserAiLoading}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t('settings.duckAiUrlHelp')}
-                  </p>
-                </div>
-                {browserAiStatus && (
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between text-sm border-b pb-1">
-                      <span className="text-muted-foreground">
-                        Google AI Mode
-                      </span>
-                      <span className={[
-                        'px-2 py-0.5 rounded text-xs font-medium',
-                        browserAiStatus.google_ai_mode.configured
-                          ? 'bg-green-100 text-green-700'
-                          : 'bg-gray-100 text-gray-600',
-                      ].join(' ')}>
-                        {browserAiStatus.google_ai_mode.configured
-                          ? t('settings.enabled')
-                          : t('settings.disabled')}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm border-b pb-1 last:border-b-0">
-                      <span className="text-muted-foreground">
-                        Duck.ai
-                      </span>
-                      <span className={[
-                        'px-2 py-0.5 rounded text-xs font-medium',
-                        browserAiStatus.duck_ai.configured
-                          ? 'bg-green-100 text-green-700'
-                          : 'bg-gray-100 text-gray-600',
-                      ].join(' ')}>
-                        {browserAiStatus.duck_ai.configured
-                          ? t('settings.enabled')
-                          : t('settings.disabled')}
-                      </span>
-                    </div>
-                  </div>
-                )}
-                <div className="rounded-lg bg-info/10 p-3">
-                  <p className="text-xs text-muted-foreground">
-                    {t('settings.browserAiRateLimitNotice')}
-                  </p>
-                </div>
-                {browserAiConfigureError && (
-                  <Alert variant="destructive">
-                    <AlertTitle>{t('settings.deepseekConfigError')}</AlertTitle>
-                    <AlertDescription>{browserAiConfigureError}</AlertDescription>
-                  </Alert>
-                )}
-                {browserAiConfigureMessage && (
-                  <Alert variant="default">
-                    <AlertTitle>{t('settings.deepseekConfigSuccess')}</AlertTitle>
-                    <AlertDescription>{browserAiConfigureMessage}</AlertDescription>
-                  </Alert>
-                )}
-                <Button
-                  onClick={async () => {
-                    setBrowserAiConfigureError(null)
-                    setBrowserAiConfigureMessage(null)
-                    setBrowserAiLoading(true)
-                    try {
-                      const status = await browserAiApi.status()
-                      setBrowserAiStatus(status)
-                      const googleConfigured = status.google_ai_mode.configured
-                      const duckConfigured = status.duck_ai.configured
-                      if (googleConfigured || duckConfigured) {
-                        setBrowserAiConfigureMessage(
-                          t('settings.deepseekConfigSuccess')
-                        )
-                      } else {
-                        setBrowserAiConfigureError(
-                          'No Browser AI providers are configured. Set GOOGLE_AI_MODE_URL or DUCK_AI_URL environment variables.'
-                        )
-                      }
-                    } catch (e: any) {
-                      setBrowserAiConfigureError(
-                        e?.response?.data?.detail || t('settings.deepseekConfigFailed')
-                      )
-                    } finally {
-                      setBrowserAiLoading(false)
-                    }
-                  }}
-                  disabled={browserAiLoading}
-                >
-                  {browserAiLoading ? t('common.saving') : t('settings.deepseekConfigure')}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* DeepSeek Tab */}
-        <TabsContent value="deepseek" className="space-y-6">
-          {/* Session Status Card */}
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('settings.sessionStatus')}</CardTitle>
-              <CardDescription>{t('settings.sessionStatusDesc')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between text-sm">
-                  <span>{t('settings.sessionId')}</span>
-                  <span className="text-muted-foreground truncate max-w-xs">
-                    {sessionData.session_id || t('settings.sessionNotInitialized')}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="w-24">{t('settings.localProcessing')}</span>
-                  <span className={[
-                    'px-2 py-0.5 rounded text-xs font-medium',
-                    sessionData.local_processing_enabled
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-gray-100 text-gray-600',
-                  ].join(' ')}>
-                    {sessionData.local_processing_enabled
-                      ? t('settings.enabled')
-                      : t('settings.disabled')}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="w-24">{t('settings.cloudProcessing')}</span>
-                  <span className={[
-                    'px-2 py-0.5 rounded text-xs font-medium',
-                    sessionData.cloud_processing_enabled !== false
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-gray-100 text-gray-600',
-                  ].join(' ')}>
-                    {sessionData.cloud_processing_enabled !== false
-                      ? t('settings.enabled')
-                      : t('settings.disabled')}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="w-24">{t('settings.browserSession')}</span>
-                  <span className={[
-                    'px-2 py-0.5 rounded text-xs font-medium',
-                    sessionData.browser_session_active
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-gray-100 text-gray-600',
-                  ].join(' ')}>
-                    {sessionData.browser_session_active
-                      ? t('settings.active')
-                      : t('settings.inactive')}
-                  </span>
-                </div>
-                {sessionData.last_refresh_at && (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span>{t('settings.lastRefreshed')}</span>
-                    <span>{new Date(sessionData.last_refresh_at).toLocaleString()}</span>
-                  </div>
-                )}
-                <Button
-                  onClick={async () => {
-                    setSessionLoading(true)
-                    try {
-                      await sessionApi.refresh()
-                      const data = await sessionApi.getStatus()
-                      setSessionData(data)
-                    } finally {
-                      setSessionLoading(false)
-                    }
-                  }}
-                  disabled={sessionLoading}
-                  size="sm"
-                >
-                  {sessionLoading ? t('common.refreshing') : t('settings.refreshSession')}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Quota Status Card */}
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('settings.quotaStatus')}</CardTitle>
-              <CardDescription>{t('settings.quotaStatusDesc')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between text-sm">
-                  <span>{t('settings.cumulativeUsed')}</span>
-                  <span className={[
-                    'font-mono text-xs',
-                    quotaData.cumulative_exceeded ? 'text-destructive' : 'text-muted-foreground',
-                  ].join(' ')}>
-                    {quotaData.cumulative_used}
-                  </span>
-                  <span className="text-xs text-muted-foreground">/ {quotaData.cumulative_limit || '∞'}</span>
-                </div>
-                {quotaData.cumulative_exceeded && (
-                  <div className="flex items-center gap-2 text-xs text-destructive">
-                    <span className="h-3 w-3 rounded-full bg-destructive/20 text-destructive" />
-                    <span>{t('settings.quotaExceeded')}</span>
-                  </div>
-                )}
-                {Object.entries(quotaData.providers || {}).length > 0 && (
-                  <div className="space-y-2">
-                    {Object.entries(quotaData.providers).map(([provider, stats]) => (
-                      <div key={provider} className="flex items-center justify-between text-sm border-b pb-1 last:border-b-0">
-                        <span className="font-mono text-xs">{provider}</span>
-                        <div className="flex items-center gap-2">
-                          <span className={[
-                            'px-1.5 py-0.5 rounded text-xs font-mono',
-                            stats.exceeded ? 'bg-destructive/10 text-destructive' : 'bg-green-100 text-green-700',
-                          ].join(' ')}>
-                            {stats.used}/{stats.limit || '∞'}
-                          </span>
-                          {stats.remaining !== undefined && stats.remaining !== Infinity && (
-                            <span className="text-xs text-muted-foreground">{t('settings.remaining', { count: stats.remaining })}</span>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {quotaData.updated_at && (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span>{t('settings.lastRefreshed')}</span>
-                    <span>{new Date(quotaData.updated_at).toLocaleString()}</span>
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* DeepSeek-web Credentials Card */}
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('settings.deepseekWebTitle')}</CardTitle>
-              <CardDescription>{t('settings.deepseekWebDesc')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div className="flex items-center justify-between text-sm">
-                  <span>{t('settings.deepseekConfigured')}</span>
-                  <span className={[
-                    'px-2 py-0.5 rounded text-xs font-medium',
-                    deepseekConfigured
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-gray-100 text-gray-600',
-                  ].join(' ')}>
-                    {deepseekConfigured ? t('settings.configured') : t('settings.notConfigured')}
-                  </span>
-                </div>
-
-                {deepseekConfigured ? (
-                  <div className="space-y-3">
-                    <Button
-                      onClick={async () => {
-                        setDeepseekLoading(true)
-                        try {
-                          await deepseekApi.refresh()
-                          setDeepseekConfigured(false)
-                          setConfigureMessage(null)
-                          setConfigureError(null)
-                        } catch {
-                          // ignore
-                        } finally {
-                          setDeepseekLoading(false)
-                        }
-                      }}
-                      disabled={deepseekLoading}
-                      size="sm"
-                      variant="outline"
-                    >
-                      {deepseekLoading ? t('common.refreshing') : t('settings.deepseekClearCredentials')}
-                    </Button>
-                    <p className="text-xs text-muted-foreground">
-                      {t('settings.deepseekClearDesc')}
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="space-y-2">
-                      <Label htmlFor="ds_session_id">{t('settings.deepseekSessionId')}</Label>
-                      <input
-                        id="ds_session_id"
-                        type="text"
-                        value={dsSessionId}
-                        onChange={(e) => setDsSessionId(e.target.value)}
-                        placeholder={t('settings.deepseekSessionIdPlaceholder')}
-                        className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
-                        disabled={deepseekLoading}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        {t('settings.deepseekSessionIdHelp')}
-                      </p>
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="auth_token">{t('settings.deepseekAuthToken')}</Label>
-                      <input
-                        id="auth_token"
-                        type="text"
-                        value={authToken}
-                        onChange={(e) => setAuthToken(e.target.value)}
-                        placeholder={t('settings.deepseekAuthTokenPlaceholder')}
-                        className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
-                        disabled={deepseekLoading}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        {t('settings.deepseekAuthTokenHelp')}
-                      </p>
-                    </div>
-                    {configureError && (
-                      <Alert variant="destructive">
-                        <AlertTitle>{t('settings.deepseekConfigError')}</AlertTitle>
-                        <AlertDescription>{configureError}</AlertDescription>
-                      </Alert>
-                    )}
-                    {configureMessage && (
-                      <Alert variant="default">
-                        <AlertTitle>{t('settings.deepseekConfigSuccess')}</AlertTitle>
-                        <AlertDescription>{configureMessage}</AlertDescription>
-                      </Alert>
-                    )}
-                    <Button
-                      onClick={async () => {
-                        setConfigureError(null)
-                        setConfigureMessage(null)
-                        if (!dsSessionId || !authToken) {
-                          setConfigureError(t('settings.deepseekBothFieldsRequired'))
-                          return
-                        }
-                        setDeepseekLoading(true)
-                        try {
-                          const result = await deepseekApi.configure({
-                            ds_session_id: dsSessionId,
-                            authorization_token: authToken,
-                          })
-                          setConfigureMessage(result.message)
-                          setDeepseekConfigured(true)
-                          setDsSessionId('')
-                          setAuthToken('')
-                        } catch (e) {
-                          const err = e as { response?: { data?: { detail?: string } } };
-                          setConfigureError(err?.response?.data?.detail || t('settings.deepseekConfigFailed'))
-                        } finally {
-                          setDeepseekLoading(false)
-                        }
-                      }}
-                      disabled={deepseekLoading || !dsSessionId || !authToken}
-                    >
-                      {deepseekLoading ? t('common.saving') : t('settings.deepseekConfigure')}
-                    </Button>
-                  </div>
-                )}
-
-                {deepseekStatus?.pow_required && (
-                  <Alert variant="destructive">
-                    <AlertTitle>{t('settings.deepseekPowRequired')}</AlertTitle>
-                    <AlertDescription>{t('settings.deepseekPowRequiredDesc')}</AlertDescription>
-                  </Alert>
-                )}
-                {!deepseekConfigured && !deepseekStatus?.pow_required && (
-                  <Alert variant="default">
-                    <AlertTitle>{t('settings.deepseekSetupNeeded')}</AlertTitle>
-                    <AlertDescription>{t('settings.deepseekSetupNeededDesc')}</AlertDescription>
-                  </Alert>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* PC Fallback URL Card */}
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('settings.pcFallbackTitle')}</CardTitle>
-              <CardDescription>{t('settings.pcFallbackDesc')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="deepseek_pc_url">{t('settings.deepseekPcUrl')}</Label>
-                  <input
-                    id="deepseek_pc_url"
-                    type="text"
-                    value={deepSeekPcUrl}
-                    onChange={(e) => setDeepSeekPcUrl(e.target.value)}
-                    placeholder={t('settings.deepseekPcUrlPlaceholder')}
-                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
-                    disabled={deepseekLoading}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t('settings.deepseekPcUrlHelp')}
-                  </p>
-                </div>
-                <Button
-                  onClick={async () => {
-                    setConfigureError(null)
-                    setConfigureMessage(null)
-                    try {
-                      const result = await processingFlags.update({
-                        deepseek_pc_url: deepSeekPcUrl || null,
-                      })
-                      setConfigureMessage('PC fallback URL saved')
-                      setDeepSeekPcUrl(result.deepseek_pc_url ?? '')
-                    } catch (e) {
-                      const err = e as { response?: { data?: { detail?: string } } };
-                      setConfigureError(err?.response?.data?.detail || t('settings.deepseekPcUrlSaveFailed'))
-                    }
-                  }}
-                  disabled={deepseekLoading}
-                >
-                  {t('settings.deepseekPcUrlSave')}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Google AI Mode Configuration Card */}
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('settings.googleAiModeTitle')}</CardTitle>
-              <CardDescription>{t('settings.googleAiModeDesc')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div className="flex items-center justify-between text-sm">
-                  <span>{t('settings.googleAiModeConfigured')}</span>
-                  <span className={[
-                    'px-2 py-0.5 rounded text-xs font-medium',
-                    googleAiModeConfigured
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-gray-100 text-gray-600',
-                  ].join(' ')}>
-                    {googleAiModeConfigured ? t('settings.configured') : t('settings.notConfigured')}
-                  </span>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="google_ai_mode_url">{t('settings.googleAiModeUrl')}</Label>
-                  <input
-                    id="google_ai_mode_url"
-                    type="text"
-                    value={googleAiModeUrl}
-                    onChange={(e) => setGoogleAiModeUrl(e.target.value)}
-                    placeholder={t('settings.googleAiModeUrlPlaceholder')}
-                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
-                    disabled={deepseekLoading}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t('settings.googleAiModeUrlHelp')}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="lightpanda_cdp_url">{t('settings.lightpandaCdpUrl')}</Label>
-                  <input
-                    id="lightpanda_cdp_url"
-                    type="text"
-                    value={lightpandaCdpUrl}
-                    onChange={(e) => setLightpandaCdpUrl(e.target.value)}
-                    placeholder={t('settings.lightpandaCdpUrlPlaceholder')}
-                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
-                    disabled={deepseekLoading}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t('settings.lightpandaCdpUrlHelp')}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="gemini_api_key">{t('settings.geminiApiKey')}</Label>
-                  <input
-                    id="gemini_api_key"
-                    type="text"
-                    value={geminiApiKey}
-                    onChange={(e) => setGeminiApiKey(e.target.value)}
-                    placeholder={t('settings.geminiApiKeyPlaceholder')}
-                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
-                    disabled={deepseekLoading}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t('settings.geminiApiKeyHelp')}
-                  </p>
-                </div>
-                <Button
-                  onClick={async () => {
-                    setConfigureError(null)
-                    setConfigureMessage(null)
-                    try {
-                      const result = await processingFlags.update({
-                        google_ai_mode_url: googleAiModeUrl || null,
-                        lightpanda_cdp_url: lightpandaCdpUrl || null,
-                        gemini_api_key: geminiApiKey || null,
-                      })
-                      setConfigureMessage('Google AI Mode settings saved')
-                      setGoogleAiModeUrl(result.google_ai_mode_url ?? '')
-                      setLightpandaCdpUrl(result.lightpanda_cdp_url ?? '')
-                      setGeminiApiKey(result.gemini_api_key ?? '')
-                      setGoogleAiModeConfigured(
-                        !!result.google_ai_mode_url
-                        || !!result.lightpanda_cdp_url
-                        || !!result.gemini_api_key
-                      )
-                    } catch (e) {
-                      const err = e as { response?: { data?: { detail?: string } } };
-                      setConfigureError(err?.response?.data?.detail || t('settings.googleAiModeSaveFailed'))
-                    }
-                  }}
-                  disabled={deepseekLoading}
-                >
-                  {t('settings.googleAiModeSave')}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Duck.ai Configuration Card */}
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('settings.duckAiTitle')}</CardTitle>
-              <CardDescription>{t('settings.duckAiDesc')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div className="flex items-center justify-between text-sm">
-                  <span>{t('settings.duckAiConfigured')}</span>
-                  <span className={[
-                    'px-2 py-0.5 rounded text-xs font-medium',
-                    duckAiConfigured
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-gray-100 text-gray-600',
-                  ].join(' ')}>
-                    {duckAiConfigured ? t('settings.configured') : t('settings.notConfigured')}
-                  </span>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="duck_ai_url">{t('settings.duckAiUrl')}</Label>
-                  <input
-                    id="duck_ai_url"
-                    type="text"
-                    value={duckAiUrl}
-                    onChange={(e) => setDuckAiUrl(e.target.value)}
-                    placeholder={t('settings.duckAiUrlPlaceholder')}
-                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
-                    disabled={deepseekLoading}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t('settings.duckAiUrlHelp')}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="duck_ai_default_model">{t('settings.duckAiDefaultModel')}</Label>
-                  <select
-                    id="duck_ai_default_model"
-                    value={duckAiDefaultModel}
-                    onChange={(e) => setDuckAiDefaultModel(e.target.value)}
-                    className="w-full border rounded px-3 py-2 text-sm bg-input disabled:opacity-50"
-                    disabled={deepseekLoading}
-                  >
-                    <option value="gpt-6-luna">GPT-6 Luna (default)</option>
-                    <option value="claude-haiku-5.5">Claude Haiku 5.5</option>
-                    <option value="gpt-5.4-mini">GPT-5.4 mini</option>
-                    <option value="mistral-small-4">Mistral Small 4</option>
-                    <option value="gpt-oss-120b">GPT-OSS 120B</option>
-                    <option value="gemma-4-31b">Gemma 4 31B</option>
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    {t('settings.duckAiModelHelp')}
-                  </p>
-                </div>
-                <Button
-                  onClick={async () => {
-                    setConfigureError(null)
-                    setConfigureMessage(null)
-                    try {
-                      const result = await processingFlags.update({
-                        duck_ai_url: duckAiUrl || null,
-                        duck_ai_default_model: duckAiDefaultModel || null,
-                      })
-                      setConfigureMessage('Duck.ai settings saved')
-                      setDuckAiUrl(result.duck_ai_url ?? '')
-                      setDuckAiDefaultModel(result.duck_ai_default_model ?? 'gpt-6-luna')
-                      setDuckAiConfigured(!!result.duck_ai_url)
-                    } catch (e) {
-                      const err = e as { response?: { data?: { detail?: string } } };
-                      setConfigureError(err?.response?.data?.detail || t('settings.duckAiSaveFailed'))
-                    }
-                  }}
-                  disabled={deepseekLoading}
-                >
-                  {t('settings.duckAiSave')}
-                </Button>
               </div>
             </CardContent>
           </Card>
@@ -1503,10 +1021,10 @@ export function SettingsForm() {
                       </div>
                       <div className="flex items-center justify-between text-sm">
                         <span className="text-muted-foreground">{info.used} / {info.limit}</span>
-                        <span className="font-mono text-xs">{Math.round(((info.used / info.limit) * 100))}%</span>
+                        <span className="font-mono text-xs">{info.limit > 0 ? Math.round(((info.used / info.limit) * 100)) : 0}%</span>
                       </div>
                       <div className="w-full bg-surface-recessed rounded-full h-1.5 mt-1">
-                        <div className="h-1.5 rounded-full bg-primary transition-all" style={{ width: `${Math.min((info.used / info.limit) * 100, 100)}%` }} />
+                        <div className="h-1.5 rounded-full bg-primary transition-all" style={{ width: `${info.limit > 0 ? Math.min((info.used / info.limit) * 100, 100) : 0}%` }} />
                       </div>
                       {info.reset_at && (
                         <p className="text-xs text-muted-foreground mt-1">{t('settings.rateLimitResetsAt', { time: info.reset_at })}</p>
@@ -1581,6 +1099,8 @@ export function SettingsForm() {
 
           <SystemInfo />
           <ProcessingQueue />
+          <QueueBacklogPanel />
+          <CapabilitiesCard />
           <RebuildEmbeddings />
         </TabsContent>
       </Tabs>

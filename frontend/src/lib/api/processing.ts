@@ -70,6 +70,62 @@ export interface RetryFailedResult {
   cleared_count: number
 }
 
+export interface ThrottleResult {
+  enabled: boolean
+  /** The promotion window actually stored, after this device's cap. */
+  window: number
+  /** Always false: the dispatcher reads the window on every pass. */
+  restart_required: boolean
+  /** True when this device's cap lowered what was asked for. */
+  capped: boolean
+  /** Upper bound on when the new window takes effect. */
+  applied_within_seconds: number
+}
+
+/** One queue lane: instant / heavy / deferred. */
+export interface LaneDepth {
+  lane: 'instant' | 'heavy' | 'deferred'
+  held: number
+  running: number
+  cap: number
+  soft_cap: number
+  at_cap: boolean
+  over_soft: boolean
+}
+
+/** GET /processing/queue-depth response. */
+export interface QueueDepthResponse {
+  lanes: LaneDepth[]
+  total_held: number
+  ollama_loaded: boolean
+  chat_idle: boolean
+  estimated_wait_seconds: number
+}
+
+/** POST /processing/batch/run-now response. */
+export interface BatchRunNowResponse {
+  accepted: boolean
+  batch_force_now: boolean
+}
+
+/** Capability status from /health/ready. */
+export interface HealthReadyCapability {
+  pdftotext: boolean
+  pdftoppm: boolean
+  tesseract: boolean
+  pandoc: boolean
+  ssconvert: boolean
+  whisper_cli: boolean
+  ffmpeg: boolean
+  content_core: boolean
+}
+
+/** GET /health/ready response. */
+export interface HealthReadyResponse {
+  status: string
+  capabilities: HealthReadyCapability
+}
+
 export const processingApi = {
   status: async (): Promise<ProcessingStatus> => {
     const response = await apiClient.get<ProcessingStatus>('/processing/status')
@@ -99,16 +155,27 @@ export const processingApi = {
     )
     return response.data
   },
-}
 
-export interface ThrottleResult {
-  enabled: boolean
-  /** The promotion window actually stored, after this device's cap. */
-  window: number
-  /** Always false: the dispatcher reads the window on every pass. */
-  restart_required: boolean
-  /** True when this device's cap lowered what was asked for. */
-  capped: boolean
-  /** Upper bound on when the new window takes effect. */
-  applied_within_seconds: number
+  /** Per-lane queue depth, residency state, chat-idle state, and ETA. */
+  getQueueDepth: async (): Promise<QueueDepthResponse> => {
+    const response = await apiClient.get<QueueDepthResponse>(
+      '/processing/queue-depth'
+    )
+    return response.data
+  },
+
+  /** Bypass the 5-minute chat-idle gate and drain held heavy/deferred jobs now. */
+  runBatchNow: async (): Promise<BatchRunNowResponse> => {
+    const response = await apiClient.post<BatchRunNowResponse>(
+      '/processing/batch/run-now',
+      {}
+    )
+    return response.data
+  },
+
+  /** Readiness probe: dispatcher status + installed capability binaries. */
+  getHealthReady: async (): Promise<HealthReadyResponse> => {
+    const response = await apiClient.get<HealthReadyResponse>('/health/ready')
+    return response.data
+  },
 }

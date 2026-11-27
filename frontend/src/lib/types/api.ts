@@ -40,6 +40,9 @@ export interface SourceListResponse {
   command_id?: string
   status?: string
   processing_info?: Record<string, unknown>
+  // Extraction observability (Week 5 Day 5 / Week 6 Day 1)
+  warnings?: string[]
+  timed_out_pages?: number[]
 }
 
 export interface SourceDetailResponse extends SourceListResponse {
@@ -187,6 +190,8 @@ export interface SourceChatMessage {
   content: string
   timestamp?: string
   thinking?: string | null
+  provider_id?: string | null
+  model_name?: string | null
   edit_count?: number
   original_content?: string | null
   edited_at?: string | null
@@ -275,40 +280,22 @@ export interface SendNotebookChatMessageResponse {
   session_id: string
   messages: NotebookChatMessage[]
   history_selection?: HistorySelection
+  // Provider and model info for frontend display
+  provider_id?: string | null
+  model_name?: string | null
+  // Reasoning message - separate from response for collapsible UI
+  reasoning?: string | null
+  // Fallback notification for cloud/local switching
+  local_fallback_used?: boolean
+  cloud_exhausted?: boolean
+  switch_to_cloud_suggested?: boolean
+  fallback_notification?: {
+    type: string
+    message: string
+    actions: string[]
+  } | null
 }
 
-export interface ChatAttachmentUploadResponse {
-  file_path: string
-  filename: string
-}
-
-// Attachment types (separate from notebooks database)
-export interface AttachmentRecord {
-  id: string
-  file_path: string
-  filename: string
-  mime_type: string
-  file_size: number
-  upload_session_id?: string | null
-  is_orphaned: boolean
-  created?: string | null
-}
-
-export interface AttachmentListResponse {
-  attachments: AttachmentRecord[]
-}
-
-export interface AttachmentContentResponse {
-  file_path: string
-  filename: string
-  mime_type: string
-  content: string
-}
-
-export interface AttachmentDeleteResponse {
-  ok: boolean
-  message: string
-}
 
 export interface EditMessageRequest {
   message_id: string
@@ -381,6 +368,31 @@ export interface ProcessingFlagsResponse {
   gemini_api_key: string | null
   duck_ai_url: string | null
   duck_ai_default_model: string | null
+  ollama_url: string | null
+  ollama_default_model: string | null
+  // Session-level configuration
+  session_cloud_local_switching: boolean
+  session_auto_compaction_threshold: number
+  session_auto_compaction_hard_limit: number
+  session_high_priority_timeout_days: number
+  session_lazy_load_enabled: boolean
+  // Context preprocessor per-group toggles
+  preprocess_documents: boolean
+  preprocess_audio: boolean
+  preprocess_image: boolean
+  preprocess_video: boolean
+  preprocess_force_enabled: boolean
+  // Sync configuration
+  sync_dir: string | null
+  sync_token: string | null
+  sync_paired_devices: string[]
+  sync_auto_sync: boolean
+  sync_userspace_only: boolean
+  sync_notebooks: boolean
+  sync_sessions: boolean
+  sync_analytics_enabled: boolean
+  sync_conflict_resolution: string
+  sync_last_sync_at: string | null
 }
 
 export interface SessionStatusResponse {
@@ -430,14 +442,16 @@ export interface DynamicCourseRequest {
 }
 
 export interface SyncConflictsResponse {
-  conflicts: Array<{
-    collection: string
-    db_record_id: string
-    local_updated?: string
-    remote_updated?: string
-    resolved: boolean
-    resolution?: string
-  }>
+  conflicts: SyncConflictResponse[]
+}
+
+export interface SyncConflictResponse {
+  collection: string
+  db_record_id: string
+  local_updated?: string | null
+  remote_updated?: string | null
+  resolved: boolean
+  resolution?: string | null
 }
 
 export interface SyncOptoutResponse {
@@ -793,4 +807,352 @@ export interface DynamicCourseResponse {
   estimated_duration_days: number
   modules: DynamicCourseModule[]
   exam_mock_topics: string[]
+}
+
+// ============================================================================
+// Course Generation Pipeline Types
+// ============================================================================
+
+export type CourseStatus = 'draft' | 'in_review' | 'published' | 'archived'
+export type DraftStatus = 'draft' | 'approved' | 'abandoned' | 'superseded'
+export type BlockType =
+  | 'source_grounded'
+  | 'transformation_derived'
+  | 'ai_generated'
+  | 'research_gap'
+  | 'social_quote'
+
+export interface BloomMix {
+  remember: number
+  understand: number
+  apply: number
+  analyze: number
+  evaluate: number
+  create: number
+}
+
+export interface CourseObjectiveResponse {
+  id: string
+  course_id: string
+  title: string
+  description: string
+  bloom_level: string
+  bloom_verb: string
+  condition: string | null
+  criterion: string | null
+  order_index: number
+  created: string | null
+  updated: string | null
+}
+
+export interface CourseLessonResponse {
+  id: string
+  course_id: string
+  module_title: string
+  title: string
+  content: string
+  order_index: number
+  prerequisite_lesson_ids: string[]
+  objective_ids: string[]
+  block_type: BlockType
+  source_id: string | null
+  transformation_id: string | null
+  flashcard_ids: string[]
+  remedial_branch: string | null
+  ai_generated: boolean
+  narrator_voice_id: string | null
+  created: string | null
+  updated: string | null
+}
+
+export interface CourseAssessmentResponse {
+  id: string
+  course_id: string
+  lesson_id: string | null
+  objective_id: string
+  item_type: string
+  question: string
+  answer: string
+  options: string[]
+  bloom_level: string
+  points: number
+  order_index: number
+  created: string | null
+  updated: string | null
+}
+
+export interface CourseEnrollmentResponse {
+  id: string
+  course_id: string
+  user_id: string
+  status: string
+  current_lesson_id: string | null
+  completed_lesson_ids: string[]
+  passed_assessment_ids: string[]
+  completion_percent: number
+  started_at: string | null
+  completed_at: string | null
+  updated: string | null
+}
+
+export interface CourseResponse {
+  id: string
+  title: string
+  description: string | null
+  notebook_id: string
+  status: CourseStatus
+  field: string | null
+  estimated_duration_days: number | null
+  narrator_voice_id: string | null
+  narrator_speed: number
+  grounding_minimum_percent: number
+  bloom_mix: Record<string, number>
+  created: string | null
+  updated: string | null
+}
+
+export interface CreateCourseRequest {
+  title: string
+  description?: string
+  notebook_id: string
+  field?: string
+  estimated_duration_days?: number | null
+  bloom_mix?: Record<string, number>
+  grounding_minimum_percent?: number
+  narrator_voice_id?: string | null
+  narrator_speed?: number
+}
+
+export interface UpdateCourseRequest {
+  title?: string
+  description?: string
+  field?: string
+  estimated_duration_days?: number | null
+  narrator_voice_id?: string | null
+  narrator_speed?: number
+  grounding_minimum_percent?: number
+  bloom_mix?: Record<string, number>
+  status?: CourseStatus
+}
+
+export interface CreateDraftRequest {
+  course_id?: string | null
+  topic: string
+  audience: string
+  prior_knowledge: string
+  bloom_mix?: Record<string, number>
+  estimated_duration_days?: number | null
+  notebook_id?: string | null
+  model_tier?: string
+  token_budget?: number
+}
+
+export interface DraftResponse {
+  id: string
+  course_id: string | null
+  stage: string
+  status: DraftStatus
+  version: number
+  payload: Record<string, unknown>
+  alignment_report: Record<string, unknown>
+  created: string | null
+  updated: string | null
+}
+
+export interface DraftAdvanceRequest {
+  model_tier?: string | null
+  token_budget?: number | null
+}
+
+export interface DraftApproveRequest {
+  checkpoint: string
+  approved: boolean
+  feedback?: string | null
+}
+
+export interface ExportRequest {
+  format: 'scorm12' | 'scorm2004' | 'pdf' | 'docx' | 'html' | 'markdown'
+}
+
+export interface EnrollRequest {
+  user_id: string
+}
+
+export interface AlignmentDefect {
+  code: string
+  message: string
+  severity: string
+  objective_id: string | null
+  lesson_id: string | null
+  assessment_id: string | null
+}
+
+export interface AlignmentReportResponse {
+  course_id: string
+  draft_id: string
+  stage: string
+  alignment_report: Record<string, unknown>
+}
+
+// Pipeline checkpoint steps
+export const COURSE_PIPELINE_STEPS = [
+  { number: 0, title: 'Brief', description: 'Topic, audience, Bloom mix' },
+  { number: 1, title: 'Objectives', description: 'Measurable learning objectives' },
+  { number: 2, title: 'Outline', description: 'Module and lesson sequence' },
+  { number: 3, title: 'Lessons', description: 'Lesson content and blocks' },
+  { number: 4, title: 'Assessments', description: 'Aligned assessment items' },
+  { number: 5, title: 'Publish', description: 'Alignment audit and export' },
+] as const
+
+// ── Source Link types (P0-2: Cross-Notebook Source Linking) ──
+export interface SourceLinkResponse {
+  source_id: string
+  notebook_id: string
+}
+
+export interface SourceLinkListResponse {
+  links: SourceLinkResponse[]
+}
+
+export interface SourceLinkCreateRequest {
+  source_id: string
+  notebook_id: string
+}
+
+export interface LinkedSourceInfo {
+  id: string
+  title: string
+  notebook_id: string
+  updated: string
+}
+
+export interface LinkedSourcesInNotebookResponse {
+  sources: LinkedSourceInfo[]
+}
+
+// ── Source Context Level types (P1-3) ──
+export interface SourceContextLevel {
+  source_id: string
+  source_title: string
+  context_level: string
+}
+
+export interface SourceContextLevelList {
+  notebook_id: string
+  sources: SourceContextLevel[]
+}
+
+// ── Notebook Graph types (P0-1: Graph Visualization) ──
+export interface GraphNode {
+  id: string
+  label: string
+  type: 'notebook' | 'source' | 'note' | 'insight' | 'chat_session'
+  subtitle?: string
+  color?: string
+}
+
+export interface GraphEdge {
+  source: string
+  target: string
+  label: string
+  type: 'reference' | 'artifact' | 'source_link' | 'refers_to' | 'insight_of'
+  width?: number
+}
+
+export interface GraphResponse {
+  notebook_id: string
+  notebook_name: string
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
+// ── Save Chat Message as Note types (P0-3) ──
+export interface SaveChatMessageAsNoteRequest {
+  message_id: string
+  notebook_id: string
+  title?: string
+}
+
+// ── Notebook Template types (P2-2) ──
+export interface NotebookTemplateResponse {
+  id: string
+  name: string
+  description?: string | null
+  field?: string | null
+  curated?: boolean | null
+  expected_completion_duration?: number | null
+  default_transformations: string[]
+  is_builtin: boolean
+}
+
+export interface NotebookTemplateCreate {
+  name: string
+  description?: string | null
+  field?: string | null
+  curated?: boolean | null
+  expected_completion_duration?: number | null
+  default_transformations?: string[]
+  is_builtin?: boolean
+}
+
+export interface ApplyTemplateRequest {
+  template_id: string
+  notebook_name?: string | null
+}
+
+// ── Notebook Version History types (P2-1) ──
+export interface NotebookVersionResponse {
+  id: string
+  notebook_id: string
+  version: number
+  name: string
+  description?: string | null
+  archived?: boolean | null
+  field?: string | null
+  expected_completion_duration?: number | null
+  curated?: boolean | null
+  source_count: number
+  note_count: number
+  created_at: string
+  created_by?: string | null
+  change_summary?: string | null
+  parent_version?: number | null
+}
+
+export interface CreateVersionSnapshotRequest {
+  notebook_id: string
+  change_summary?: string | null
+  created_by?: string | null
+}
+
+export interface RestoreVersionRequest {
+  notebook_id: string
+  version: number
+}
+
+// ── Search & Ask History types (P1-1: Notebook-Scoped History) ──
+export interface SearchHistoryItem {
+  id: string
+  notebook_id?: string | null
+  query: string
+  results_count: number
+  created?: string | null
+}
+
+export interface SearchHistoryListResponse {
+  items: SearchHistoryItem[]
+  total: number
+}
+
+export interface AskHistoryItem {
+  id: string
+  notebook_id?: string | null
+  question: string
+  answer_summary?: string | null
+  created?: string | null
+}
+
+export interface AskHistoryListResponse {
+  items: AskHistoryItem[]
+  total: number
 }
