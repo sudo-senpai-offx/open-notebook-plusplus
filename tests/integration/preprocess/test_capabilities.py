@@ -141,15 +141,22 @@ async def test_document_falls_back_to_content_core_when_pandoc_missing(
     monkeypatch.setattr(source_module, "has_capability", fake_has_capability)
 
     # Mock _extract_content_core_stage to record it was called.
+    # Signature must match _dispatch_extract's call:
+    #   _extract_content_core_stage(state, cmd_id, errors, warnings,
+    #                               timed_out_pages, content_state, url)
     called = {}
 
-    async def fake_content_core(state, cmd_id, errors, content_state, url):
+    async def fake_content_core(
+        state, cmd_id, errors, warnings, timed_out_pages, content_state, url
+    ):
         called["yes"] = True
         from open_notebook.graphs.source import _ExtractionOutput
 
         return {
             "extraction": _ExtractionOutput(content="fallback text", title="Test"),
             "errors": errors,
+            "warnings": warnings,
+            "timed_out_pages": timed_out_pages,
             "stage": "extract",
         }
 

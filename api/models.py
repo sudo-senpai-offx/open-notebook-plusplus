@@ -561,6 +561,11 @@ class SourceCreate(BaseModel):
 class SourceUpdate(BaseModel):
     title: Optional[str] = Field(None, description="Source title")
     topics: Optional[List[str]] = Field(None, description="Source topics")
+    language: Optional[str] = Field(
+        None,
+        description="Source language (two-letter code, e.g. 'en', 'zh', 'ja', 'ta'). "
+        "Used when re-processing media after correcting Whisper auto-detection.",
+    )
 
 
 class SourceResponse(BaseModel):

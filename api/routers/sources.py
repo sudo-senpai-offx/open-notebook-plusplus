@@ -1181,6 +1181,8 @@ async def update_source(source_id: str, source_update: SourceUpdate):
             source.title = source_update.title
         if source_update.topics is not None:
             source.topics = source_update.topics
+        if source_update.language is not None:
+            source.language = source_update.language
 
         await source.save()
 

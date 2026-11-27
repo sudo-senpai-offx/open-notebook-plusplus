@@ -82,12 +82,14 @@ function formatTimedOutPages(pages: number[]): string {
   return `Pages ${ranges.join(', ')} timed out`
 }
 
-/** Status badge configuration for each non-ready source status. */
-// i18n-todo: status badge labels
-const STATUS_CONFIG: Record<string, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
-  extracting_partial: { label: 'Partially Processed', variant: 'default' },
-  extracting_failed: { label: 'Extraction Failed', variant: 'destructive' },
-  embedding_pending: { label: 'Indexing Pending', variant: 'secondary' },
+/** Status badge configuration for each non-ready source status.
+ *  Labels are translation keys, resolved via t() at render time.
+ */
+// i18n-todo: status badge label keys
+const STATUS_CONFIG: Record<string, { labelKey: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
+  extracting_partial: { labelKey: 'sources.statusExtractingPartial', variant: 'default' },
+  extracting_failed: { labelKey: 'sources.statusExtractingFailed', variant: 'destructive' },
+  embedding_pending: { labelKey: 'sources.statusEmbeddingPending', variant: 'secondary' },
 }
 
 /** Surfaces structured pipeline outcomes (extracting_partial, extracting_failed,
@@ -152,7 +154,8 @@ export function SourceStatusBanner({
 
   const statusConfig = STATUS_CONFIG[status ?? '']
   const badgeVariant = statusConfig?.variant ?? 'secondary'
-  const badgeLabel = statusConfig?.label ?? status ?? ''
+  // i18n-todo: badge label resolved via t()
+  const badgeLabel = t(statusConfig?.labelKey ?? status ?? '')
 
   // i18n-todo: banner strings
   return (
