@@ -657,13 +657,18 @@ def chunk_markdown(
     current_text = ""
 
     for unit_type, text in final_units:
-        # Headers, code blocks, and forum separators always start a new chunk
+        # Headers and code blocks always start a new chunk when we have content
         if unit_type in ("header", "code") and current_text:
             chunks.append(current_text)
             current_text = ""
-        if page_type == "forum" and unit_type in ("forum_sep", "forum_blockquote") and current_text:
-            chunks.append(current_text)
-            current_text = ""
+
+        # Forum separators ("---") and blockquotes are NOT forced boundaries.
+        # Both are packed greedily with adjacent units up to max_tokens.
+        # This prevents over-splitting short comments into sub-100-token
+        # chunks — benchmark research showed that dropping from ~400-token
+        # chunks to ~43-token chunks dropped retrieval accuracy to 54%.
+        # A forum comment at ~100 tokens should share a chunk with its
+        # neighbors until the chunk approaches the 400-token target.
 
         tentative = current_text + ("\n" if current_text else "") + text
         if token_count(tentative) >= max_tokens and current_text:
