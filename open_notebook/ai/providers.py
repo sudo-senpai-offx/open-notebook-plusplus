@@ -15,8 +15,12 @@ Design goals:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import asyncio
+import time
+
+from loguru import logger
 
 # ---------------------------------------------------------------------------
 # Provider metadata
@@ -26,8 +30,20 @@ PROVIDER_DEEPSEEK_WEB = "deepseek-web"
 PROVIDER_GOOGLE_AI_MODE = "google-ai-mode"
 PROVIDER_DUCK_AI = "duck-ai"
 PROVIDER_OLLAMA = "ollama"
+PROVIDER_GROQ = "groq"
+PROVIDER_NVIDIA = "nvidia"
+PROVIDER_OPENROUTER = "openrouter"
+PROVIDER_SAMBANOVA = "sambanova"
 
-ALL_CLOUD_PROVIDERS = [PROVIDER_DEEPSEEK_WEB, PROVIDER_GOOGLE_AI_MODE, PROVIDER_DUCK_AI]
+ALL_CLOUD_PROVIDERS = [
+    PROVIDER_DEEPSEEK_WEB,
+    PROVIDER_GOOGLE_AI_MODE,
+    PROVIDER_DUCK_AI,
+    PROVIDER_GROQ,
+    PROVIDER_NVIDIA,
+    PROVIDER_OPENROUTER,
+    PROVIDER_SAMBANOVA,
+]
 
 DEFAULT_DUCK_AI_MODELS = [
     "gpt-6-luna",
@@ -72,6 +88,12 @@ class ProviderConfig:
     # Environment configuration for migration checks
     # Returns dict with keys: "required", "required_any", "optional"
     env_config: Optional[Callable[[], Dict[str, List[str]]]] = None
+    # Curated default model whitelist per provider (used for UI default,
+    # fallback routing, and smoke tests). Discovery still runs on /v1/models
+    # but routing prefers these models.
+    default_models: List[str] = field(default_factory=list)
+    # Extra HTTP headers merged into every request (e.g. OpenRouter attribution).
+    extra_headers: Dict[str, str] = field(default_factory=dict)
 
 
 def _default_env_config() -> Dict[str, List[str]]:
@@ -155,6 +177,114 @@ PROVIDER_METADATA: Dict[str, ProviderConfig] = {
         modalities=("language", "embedding"),
         env_config=_default_env_config,
     ),
+    PROVIDER_GROQ: ProviderConfig(
+        provider_id=PROVIDER_GROQ,
+        display_name="Groq",
+        supports_attachments=False,
+        supports_reasoning=True,
+        max_files=0,
+        max_size_mb=0,
+        context_window_tokens=131_072,
+        default_model="openai/gpt-oss-120b",
+        default_models=[
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.8-27b",
+        ],
+        available_models=[],
+        rate_limit_requests=25,
+        rate_limit_window_seconds=60,
+        min_interval_seconds=2.4,
+        test_model="openai/gpt-oss-120b",
+        test_model_type="chat",
+        modalities=("language",),
+        env_config=_default_env_config,
+        openai_compat_discovery_url="https://api.groq.com/openai/v1/models",
+        required_env=("GROQ_API_KEY",),
+        base_url_env="GROQ_API_BASE",
+    ),
+    PROVIDER_NVIDIA: ProviderConfig(
+        provider_id=PROVIDER_NVIDIA,
+        display_name="NVIDIA NIM",
+        supports_attachments=False,
+        supports_reasoning=True,
+        max_files=0,
+        max_size_mb=0,
+        context_window_tokens=131_072,
+        default_model="meta/llama-3.1-70b-instruct",
+        default_models=[
+            "meta/llama-3.1-70b-instruct",
+            "nvidia/nemotron-3.5-super-vl-120b-a12b",
+            "google/gemma-4-31b-it",
+        ],
+        available_models=[],
+        rate_limit_requests=20,
+        rate_limit_window_seconds=60,
+        min_interval_seconds=3.0,
+        test_model="meta/llama-3.1-70b-instruct",
+        test_model_type="chat",
+        modalities=("language",),
+        env_config=_default_env_config,
+        openai_compat_discovery_url="https://integrate.api.nvidia.com/v1/models",
+        required_env=("NVIDIA_API_KEY",),
+        base_url_env="NVIDIA_API_BASE",
+    ),
+    PROVIDER_OPENROUTER: ProviderConfig(
+        provider_id=PROVIDER_OPENROUTER,
+        display_name="OpenRouter",
+        supports_attachments=False,
+        supports_reasoning=True,
+        max_files=0,
+        max_size_mb=0,
+        context_window_tokens=131_072,
+        default_model="openai/gpt-oss-20b",
+        default_models=[
+            "openai/gpt-oss-20b",
+            "google/gemma-4-31b-it:free",
+        ],
+        available_models=[],
+        rate_limit_requests=17,
+        rate_limit_window_seconds=60,
+        min_interval_seconds=3.5,
+        test_model="openai/gpt-oss-20b",
+        test_model_type="chat",
+        modalities=("language",),
+        env_config=_default_env_config,
+        openai_compat_discovery_url="https://openrouter.ai/api/v1/models",
+        required_env=("OPENROUTER_API_KEY",),
+        base_url_env="OPENROUTER_API_BASE",
+        extra_headers={
+            "HTTP-Referer": "https://github.com/sudo-senpai-offx/open-notebook-plusplus",
+            "X-OpenRouter-Title": "Open Notebook++",
+            "X-OpenRouter-Categories": "education,productivity",
+        },
+    ),
+    PROVIDER_SAMBANOVA: ProviderConfig(
+        provider_id=PROVIDER_SAMBANOVA,
+        display_name="SambaNova Cloud",
+        supports_attachments=False,
+        supports_reasoning=True,
+        max_files=0,
+        max_size_mb=0,
+        context_window_tokens=16_384,
+        default_model="Meta-Llama-3.1-8B-Instruct",
+        default_models=[
+            "Meta-Llama-3.1-8B-Instruct",
+            "DeepSeek-R1",
+            "gpt-oss-120b",
+        ],
+        available_models=[],
+        rate_limit_requests=17,
+        rate_limit_window_seconds=60,
+        min_interval_seconds=3.5,
+        test_model="Meta-Llama-3.1-8B-Instruct",
+        test_model_type="chat",
+        modalities=("language",),
+        env_config=_default_env_config,
+        openai_compat_discovery_url="https://api.sambanova.ai/v1/models",
+        required_env=("SAMBANOVA_API_KEY",),
+        base_url_env="SAMBANOVA_API_BASE",
+    ),
 }
 
 
@@ -184,6 +314,7 @@ class ProviderSendResult:
         error: Optional[str] = None,
         manual_login_required: bool = False,
         rate_limited: bool = False,
+        retry_after: Optional[float] = None,
         session_id: Optional[str] = None,
         used_provider: Optional[str] = None,
         ref_file_ids: Optional[List[str]] = None,
@@ -194,6 +325,7 @@ class ProviderSendResult:
         self.error = error
         self.manual_login_required = manual_login_required
         self.rate_limited = rate_limited
+        self.retry_after = retry_after
         self.session_id = session_id
         self.used_provider = used_provider
         self.ref_file_ids = ref_file_ids or []
@@ -208,9 +340,48 @@ class BaseProvider:
     def __init__(self, provider_id: str, config: ProviderConfig):
         self.provider_id = provider_id
         self.config = config
+        # Rate limit tracking: timestamps of requests in the current window
+        self._request_times: List[float] = []
+        self._lock = asyncio.Lock()
+
+    async def _check_rate_limit(self) -> Optional[str]:
+        """Check if a request would exceed the rate limit.
+
+        Returns an error message if rate limited, None otherwise.
+        Proactively returns 429 before hitting the provider's actual limit
+        to avoid client bans and ToS violations.
+        """
+        async with self._lock:
+            now = time.monotonic()
+            # Drop requests outside the window
+            self._request_times = [
+                t for t in self._request_times
+                if now - t < self.config.rate_limit_window_seconds
+            ]
+            if len(self._request_times) >= self.config.rate_limit_requests:
+                return (
+                    f"Rate limit exceeded: {self.config.rate_limit_requests} "
+                    f"requests per {self.config.rate_limit_window_seconds}s. "
+                    f"Wait for quota reset."
+                )
+            self._request_times.append(now)
+        return None
 
     async def is_available(self) -> bool:
         """Return True if the provider is currently reachable and configured."""
+        raise NotImplementedError
+
+    async def _send_message_impl(
+        self,
+        message: str,
+        *,
+        session_id: Optional[str] = None,
+        thinking_enabled: bool = False,
+        ref_file_ids: Optional[List[str]] = None,
+        timeout: float = 120.0,
+        model: Optional[str] = None,
+    ) -> ProviderSendResult:
+        """Send a message and return the result. Implemented by each provider."""
         raise NotImplementedError
 
     async def send_message(
@@ -223,8 +394,58 @@ class BaseProvider:
         timeout: float = 120.0,
         model: Optional[str] = None,
     ) -> ProviderSendResult:
-        """Send a message and return the result."""
-        raise NotImplementedError
+        """Send a message with transient-error retry and exponential backoff.
+
+        Retry classification:
+          - 429 (rate_limited=True), timeout, connection errors → transient,
+            retried with exponential backoff + jitter. Retry-After header
+            (provider sets retry_after on ProviderSendResult) is honored.
+          - 401, 403, 404, invalid API key → permanent, fail fast.
+          - Circuit breaker open → permanent for this call.
+
+        Returns the final ProviderSendResult (ok=True on success, or the
+        last error result if all retries are exhausted).
+        """
+        from open_notebook.utils.retry_classification import should_retry, retry_backoff_seconds
+
+        max_attempts = 3
+        attempt = 0
+
+        while True:
+            attempt += 1
+            result = await self._send_message_impl(
+                message,
+                session_id=session_id,
+                thinking_enabled=thinking_enabled,
+                ref_file_ids=ref_file_ids,
+                timeout=timeout,
+                model=model,
+            )
+
+            if result.ok:
+                return result
+
+            # Classify the error
+            should, delay = should_retry(
+                RuntimeError(result.error or "provider error"),
+                attempt,
+                max_attempts=max_attempts,
+                retry_unknown=False,  # unknown errors → don't retry
+            )
+
+            if not should:
+                return result
+
+            # Honor Retry-After if the provider sent one
+            if result.retry_after is not None:
+                delay = result.retry_after
+
+            logger.debug(
+                f"Provider {self.provider_id}: transient error on attempt "
+                f"{attempt}/{max_attempts}, retrying in {delay:.1f}s: "
+                f"{result.error}"
+            )
+            await asyncio.sleep(delay)
 
     async def upload_attachment(self, file_path: str) -> Optional[str]:
         """Upload a file and return a provider-specific file reference ID."""

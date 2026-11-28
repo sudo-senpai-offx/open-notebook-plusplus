@@ -47,7 +47,7 @@ class DuckAIProvider(BaseProvider):
         flags = await ProcessingFlags.get_instance()
         return bool(flags.duck_ai_url)
 
-    async def send_message(
+    async def _send_message_impl(
         self,
         message: str,
         *,
@@ -58,6 +58,16 @@ class DuckAIProvider(BaseProvider):
         model: Optional[str] = None,
     ) -> ProviderSendResult:
         """Send a message to Duck.ai via p2d-duck or OpenAI-compatible wrapper."""
+        # Proactive rate limit check to avoid client bans / ToS violations
+        rate_limit_error = await self._check_rate_limit()
+        if rate_limit_error:
+            return ProviderSendResult(
+                ok=False,
+                error=rate_limit_error,
+                rate_limited=True,
+                used_provider=self.provider_id,
+            )
+
         model_name = model or await self._get_default_model()
 
         # Try p2d-duck/duck_ai first (sync client, run in thread)

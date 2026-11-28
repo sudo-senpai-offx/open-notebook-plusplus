@@ -111,7 +111,7 @@ class GoogleAIModeProvider(BaseProvider):
     # Send message
     # ------------------------------------------------------------------
 
-    async def send_message(
+    async def _send_message_impl(
         self,
         message: str,
         *,
@@ -128,6 +128,15 @@ class GoogleAIModeProvider(BaseProvider):
         2. Lightpanda CDP server (LIGHTPANDA_CDP_URL)
         3. Direct Gemini API (GEMINI_API_KEY)
         """
+        # Proactive rate limit check to avoid client bans / ToS violations
+        rate_limit_error = await self._check_rate_limit()
+        if rate_limit_error:
+            return ProviderSendResult(
+                ok=False,
+                error=rate_limit_error,
+                rate_limited=True,
+                used_provider=self.provider_id,
+            )
         # --- Option 1: Local wrapper URL ---
         wrapper_url = await self._wrapper_url()
         if wrapper_url:
@@ -266,7 +275,7 @@ class GoogleAIModeProvider(BaseProvider):
         )
 
     # ------------------------------------------------------------------
-    # Lightpanda CDP path (Playwright connect_over_cdp)
+    # Lightpanda CDP path (Lightpanda Python SDK)
     # ------------------------------------------------------------------
 
     async def _send_via_lightpanda_cdp(
@@ -278,84 +287,93 @@ class GoogleAIModeProvider(BaseProvider):
         ref_file_ids: Optional[List[str]],
         timeout: float,
     ) -> ProviderSendResult:
-        """Send via Lightpanda browser over CDP (Playwright connect_over_cdp).
+        """Send via Lightpanda browser using the Python SDK.
 
         Lightpanda is a Zig-based headless browser (~123MB RAM vs Chrome's 2GB+)
-        that speaks CDP. No Playwright binary download needed — it speaks CDP
-        natively. Google sees a real browser TLS fingerprint, bypassing the
-        SG_REL soft-block that curl_cffi-based wrappers hit.
-        """
-        from playwright.async_api import async_playwright
+        that speaks CDP. It executes JavaScript natively, so Google sees a real
+        browser TLS fingerprint, bypassing the SG_REL soft-block that
+        curl_cffi-based wrappers hit.
 
-        ws_url = cdp_url.rstrip("/")
-        if not ws_url.startswith("ws://") and not ws_url.startswith("wss://"):
-            ws_url = f"ws://{ws_url}"
+        No Playwright binary download needed — Lightpanda brings its own
+        binary. Run: lightpanda serve --host 127.0.0.1 --port 9222
+        Then connect via this SDK.
+        """
+        from lightpanda import Browser
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.connect_over_cdp(ws_url, timeout=timeout)
-                context = await browser.new_context()
-                page = await context.new_page()
+            # Lightpanda spawns its own binary; connect to the CDP server
+            # if one is already running, otherwise start a fresh one.
+            browser = Browser(
+                timeout=timeout / 1000.0,  # Lightpanda uses seconds
+                verbose=False,
+            )
+            session = browser.new_session()
 
-                # Navigate to Google AI Mode
-                await page.goto(
-                    "https://www.google.com/search?udm=50&hl=en",
-                    wait_until="networkidle",
-                    timeout=timeout,
-                )
+            # Navigate to Google AI Mode
+            result = session.goto(
+                url="https://www.google.com/search?udm=50&hl=en",
+                wait_until="networkidle",
+                timeout=int(timeout * 1000),
+            )
 
-                # Fill the search box and submit
-                # Google AI Mode search box selector
-                await page.fill('textarea[name="q"]', message)
-                await page.press('textarea[name="q"]', "Enter")
-
-                # Wait for AI Mode response to appear
-                await page.wait_for_selector(
-                    '.n6owBd, .T286Pc, [data-mstk]',
-                    timeout=timeout,
-                )
-
-                # Extract response text
-                response_text = await page.evaluate(
-                    """() => {
-                        const blocks = document.querySelectorAll('.n6owBd, .T286Pc');
-                        return Array.from(blocks).map(b => b.innerText).join('\\n');
-                    }"""
-                )
-
-                await context.close()
-                await browser.close()
-
-                if not response_text or not response_text.strip():
-                    return ProviderSendResult(
-                        ok=False,
-                        error="Empty response from Google AI Mode via Lightpanda CDP.",
-                        used_provider=self.provider_id,
-                    )
-
+            if result.http_status and result.http_status >= 400:
+                session.close()
+                browser.close()
                 return ProviderSendResult(
-                    ok=True,
-                    response=response_text.strip(),
-                    session_id=session_id,
+                    ok=False,
+                    error=f"Google AI Mode returned HTTP {result.http_status}",
                     used_provider=self.provider_id,
-                    ref_file_ids=ref_file_ids or [],
                 )
+
+            # Fill the search box and submit
+            session.fill(
+                value=message,
+                selector='input[name="q"]',
+            )
+            session.press(key="Enter", selector='input[name="q"]')
+
+            # Wait for AI Mode response to appear
+            session.wait_for_selector(
+                selector=".n6owBd, .T286Pc, [data-mstk]",
+                timeout=int(timeout * 1000),
+            )
+
+            # Extract response as markdown
+            response_text = session.markdown() or ""
+
+            session.close()
+            browser.close()
+
+            if not response_text or not response_text.strip():
+                return ProviderSendResult(
+                    ok=False,
+                    error="Empty response from Google AI Mode via Lightpanda.",
+                    used_provider=self.provider_id,
+                )
+
+            return ProviderSendResult(
+                ok=True,
+                response=response_text.strip(),
+                session_id=session_id,
+                used_provider=self.provider_id,
+                ref_file_ids=ref_file_ids or [],
+            )
 
         except ImportError:
-            logger.error("Playwright not installed. Install with: pip install playwright")
+            logger.error("lightpanda package not installed. Install with: pip install lightpanda")
             return ProviderSendResult(
                 ok=False,
                 error=(
-                    "Lightpanda CDP requires Playwright. "
-                    "Install with: pip install playwright && playwright install chromium"
+                    "Lightpanda CDP requires the lightpanda package. "
+                    "Install with: pip install lightpanda"
                 ),
                 used_provider=self.provider_id,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.error(f"Lightpanda CDP request failed: {exc}")
+            logger.error(f"Lightpanda request failed: {exc}")
             return ProviderSendResult(
                 ok=False,
-                error=f"Lightpanda CDP request failed: {exc}",
+                error=f"Lightpanda request failed: {exc}",
                 used_provider=self.provider_id,
             )
 

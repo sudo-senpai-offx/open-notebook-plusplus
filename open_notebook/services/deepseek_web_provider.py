@@ -2,7 +2,8 @@
 DeepSeek-web provider implementation.
 
 Wraps deepseek_direct_service in the BaseProvider interface.
-No Playwright/CDP — uses direct API calls with session cookies + PoW solving.
+Uses direct API calls with session cookies + PoW solving.
+Falls back to PC browser-use automation when PoW solving fails locally.
 """
 
 from __future__ import annotations
@@ -28,20 +29,28 @@ from open_notebook.services.prompter_service import prompter_service
 
 
 class DeepSeekWebProvider(BaseProvider):
-    """DeepSeek-web provider: direct API calls with session cookies + PoW solving."""
+    """DeepSeek-web provider: direct API calls with session cookies + PoW solving.
+
+    Falls back to PC browser-use automation when PoW solving fails locally
+    (e.g. on phone/ARM devices without wasmtime).
+    """
 
     def __init__(self, config: ProviderConfig):
         super().__init__(PROVIDER_DEEPSEEK_WEB, config)
         self._credentials_configured = False
 
     async def is_available(self) -> bool:
-        """DeepSeek-web is available if credentials are configured and PoW solver is installed."""
+        """DeepSeek-web is available if credentials are configured AND
+        either PoW solver is installed OR PC fallback URL is set."""
         flags = await ProcessingFlags.get_instance()
         has_creds = bool(
             flags.deepseek_ds_session_id and flags.deepseek_authorization_token
         )
+        if not has_creds:
+            return False
         has_solver = pow_solver_available()
-        return has_creds and has_solver
+        has_pc_fallback = bool(flags.deepseek_pc_url)
+        return has_solver or has_pc_fallback
 
     def _configure_from_flags(self, flags: ProcessingFlags) -> None:
         """Configure the direct service with stored credentials."""
@@ -51,7 +60,76 @@ class DeepSeekWebProvider(BaseProvider):
             )
             self._credentials_configured = True
 
-    async def send_message(
+    async def _run_pc_browser_use(
+        self,
+        message: str,
+        thinking_enabled: bool,
+        pc_url: Optional[str] = None,
+        session_id: Optional[str] = None,
+        notebook_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run browser-use for DeepSeek-web fallback.
+
+        With ``pc_url`` set, forward the request to the PC's API.
+        Without it, run browser-use locally.
+        """
+        import httpx
+
+        if not pc_url:
+            from open_notebook.services.deepseek_web_service import (
+                deepseek_web_service,
+            )
+            result = await asyncio.to_thread(
+                deepseek_web_service.run_deepseek,
+                message,
+                True,
+                180.0,
+            )
+            return {
+                "response": result.get("response"),
+                "thinking": result.get("thinking"),
+                "error": result.get("error"),
+                "manual_login_required": result.get("manual_login_required", False),
+                "rate_limited": result.get("rate_limited", False),
+            }
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
+                resp = await client.post(
+                    f"{pc_url.rstrip('/')}/api/chat/deepseek-web/pc-fallback",
+                    json={
+                        "message": message,
+                        "thinking_enabled": thinking_enabled,
+                        "session_id": session_id,
+                        "notebook_id": notebook_id,
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return {
+                        "response": data.get("response"),
+                        "thinking": data.get("thinking"),
+                        "error": data.get("error"),
+                        "manual_login_required": data.get("manual_login_required", False),
+                        "rate_limited": data.get("rate_limited", False),
+                    }
+                else:
+                    return {
+                        "response": None,
+                        "error": f"PC fallback returned HTTP {resp.status_code}: {resp.text[:200]}",
+                        "manual_login_required": False,
+                        "rate_limited": False,
+                    }
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"PC browser-use fallback error: {exc}")
+            return {
+                "response": None,
+                "error": str(exc),
+                "manual_login_required": False,
+                "rate_limited": False,
+            }
+
+    async def _send_message_impl(
         self,
         message: str,
         *,
@@ -60,8 +138,13 @@ class DeepSeekWebProvider(BaseProvider):
         ref_file_ids: Optional[List[str]] = None,
         timeout: float = 120.0,
         model: Optional[str] = None,
+        pc_fallback: bool = False,
     ) -> ProviderSendResult:
-        """Send a message to DeepSeek-web via direct API calls."""
+        """Send a message to DeepSeek-web via direct API calls.
+
+        If PoW solving fails locally and pc_fallback=True, delegates to
+        browser-use on a PC (x86 machine with Chromium).
+        """
         flags = await ProcessingFlags.get_instance()
         self._configure_from_flags(flags)
 
@@ -78,13 +161,13 @@ class DeepSeekWebProvider(BaseProvider):
                 used_provider=self.provider_id,
             )
 
-        if not pow_solver_available():
+        # Proactive rate limit check to avoid client bans / ToS violations
+        rate_limit_error = await self._check_rate_limit()
+        if rate_limit_error:
             return ProviderSendResult(
                 ok=False,
-                error=(
-                    "DeepSeek PoW solver unavailable on this device. "
-                    "Install deepseek-pow + wasmtime, or use a different model."
-                ),
+                error=rate_limit_error,
+                rate_limited=True,
                 used_provider=self.provider_id,
             )
 
@@ -136,6 +219,49 @@ class DeepSeekWebProvider(BaseProvider):
                 rate_limited=True,
                 used_provider=self.provider_id,
             )
+
+        # If PoW required and not solved, try PC fallback
+        if result.get("pow_required") and not result.get("pow_solved"):
+            if pc_fallback:
+                logger.info("PoW required, delegating to PC browser-use fallback")
+                pc_result = await self._run_pc_browser_use(
+                    message=transformed_prompt,
+                    thinking_enabled=thinking_enabled,
+                    pc_url=flags.deepseek_pc_url,
+                    session_id=session_id,
+                    notebook_id=None,
+                )
+                if pc_result.get("error"):
+                    return ProviderSendResult(
+                        ok=False,
+                        error=f"PC browser-use fallback failed: {pc_result['error']}",
+                        used_provider=self.provider_id,
+                    )
+                return ProviderSendResult(
+                    ok=True,
+                    response=pc_result.get("response"),
+                    thinking=pc_result.get("thinking"),
+                    session_id=pc_result.get("session_id"),
+                    used_provider=self.provider_id,
+                    ref_file_ids=ref_file_ids or [],
+                    pow_required=True,
+                    pow_solved=False,
+                    used_pc_fallback=True,
+                )
+            else:
+                return ProviderSendResult(
+                    ok=False,
+                    error=(
+                        "DeepSeek-web issued a Proof-of-Work challenge that "
+                        "could not be solved. Install the solver on this "
+                        "device (pip install deepseek-pow wasmtime), enable "
+                        "pc_fallback to use browser-use on the PC, or "
+                        "re-log in to chat.deepseek.com and refresh credentials."
+                    ),
+                    pow_required=True,
+                    pow_solved=False,
+                    used_provider=self.provider_id,
+                )
 
         if result.get("error"):
             return ProviderSendResult(
