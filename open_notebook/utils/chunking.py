@@ -661,6 +661,9 @@ def chunk_markdown(
         if unit_type in ("header", "code") and current_text:
             chunks.append(current_text)
             current_text = ""
+        if page_type == "forum" and unit_type in ("forum_sep", "forum_blockquote") and current_text:
+            chunks.append(current_text)
+            current_text = ""
 
         tentative = current_text + ("\n" if current_text else "") + text
         if token_count(tentative) >= max_tokens and current_text:
