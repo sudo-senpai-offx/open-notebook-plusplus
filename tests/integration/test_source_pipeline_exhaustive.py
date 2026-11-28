@@ -403,7 +403,7 @@ async def test_chunk_stage_success(monkeypatch):
     """Valid text → chunks produced."""
     monkeypatch.setattr(
         source_module, "chunk_text_with_coords",
-        lambda text, file_path=None: [
+        lambda text, file_path=None, page_type=None: [
             {"text": "Chunk one", "char_start": 0, "char_end": 9},
             {"text": "Chunk two", "char_start": 10, "char_end": 17},
         ],

@@ -415,10 +415,283 @@ def _apply_secondary_chunking(chunks: List[str]) -> List[str]:
     return result
 
 
+# ── Priority-order structural chunking (P2) ──────────────────────────────
+
+# Atomic units extracted from markdown, in priority order:
+#   1. code       — fenced code blocks, never split (atomic)
+#   2. header     — markdown headers (# ## ###), forced new-chunk starters
+#   3. paragraph  — blocks of text separated by blank lines
+#   4. list_item  — bulleted/numbered list items, stay together
+#   5. sentence   — . ! ? boundaries (fallback for oversized paragraphs)
+#   6. clause     — , ; boundaries (last resort before word split)
+#   7. word       — space boundaries (when a single sentence exceeds limit)
+#   8. char       — never reached in practice
+
+_CODE_FENCE_RE = re.compile(r"```[\s\S]*?```")
+_HEADER_RE = re.compile(r"^#{1,6}\s+.+$", re.MULTILINE)
+_LIST_ITEM_RE = re.compile(r"^[-*+]\s+.+$|^\d+\.\s+.+$", re.MULTILINE)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+_FORUM_BLOCKQUOTE_RE = re.compile(r"^>\s+", re.MULTILINE)
+_FORUM_SEPARATOR_RE = re.compile(r"^---+\s*$", re.MULTILINE)
+
+
+def _extract_units(
+    content: str, page_type: Optional[str] = None
+) -> List[tuple[str, str]]:
+    """Parse markdown into atomic units in document order.
+
+    Returns list of (unit_type, text) where unit_type is one of:
+    "code", "header", "paragraph", "list_item", "forum_blockquote",
+    "forum_sep".
+
+    For page_type="forum":
+      - Blockquote sections (> ...) are atomic units (keeps comment context)
+      - --- separators force new-chunk boundaries
+    """
+    units: List[tuple[str, str]] = []
+    lines = content.split("\n")
+    i = 0
+    current_paragraph: List[str] = []
+
+    def flush_paragraph() -> None:
+        nonlocal current_paragraph
+        if current_paragraph:
+            para = "\n".join(current_paragraph).strip()
+            if para:
+                units.append(("paragraph", para))
+            current_paragraph = []
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # ── Forum: --- separator — forced new-chunk boundary ─────────────
+        if page_type == "forum" and _FORUM_SEPARATOR_RE.match(line):
+            flush_paragraph()
+            units.append(("forum_sep", line))
+            i += 1
+            continue
+
+        # ── Forum: blockquote section — atomic unit ──────────────────────
+        if page_type == "forum" and stripped.startswith(">"):
+            flush_paragraph()
+            block = [line]
+            i += 1
+            while i < len(lines) and lines[i].strip().startswith(">"):
+                block.append(lines[i])
+                i += 1
+            units.append(("forum_blockquote", "\n".join(block)))
+            continue
+
+        # ── P1: Fenced code blocks — atomic, never split ─────────────────
+        if stripped.startswith("```"):
+            flush_paragraph()
+            fence = stripped[:3]
+            start = i
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith(fence):
+                i += 1
+            if i < len(lines):
+                i += 1  # include closing fence
+            block = "\n".join(lines[start:i])
+            units.append(("code", block))
+            continue
+
+        # ── P2: Headers — forced new-chunk starters ──────────────────────
+        if _HEADER_RE.match(line):
+            flush_paragraph()
+            header_block = [line]
+            i += 1
+            # Include following content until next header, blank line, or code fence
+            while i < len(lines) and lines[i].strip():
+                if lines[i].strip().startswith("```"):
+                    break  # let code-block handler take over
+                if _HEADER_RE.match(lines[i]):
+                    break
+                header_block.append(lines[i])
+                i += 1
+            units.append(("header", "\n".join(header_block)))
+            continue
+
+        # ── P4: List items — stay together ───────────────────────────────
+        if _LIST_ITEM_RE.match(line):
+            flush_paragraph()
+            list_block = [line]
+            i += 1
+            while i < len(lines):
+                nxt = lines[i].strip()
+                # Next list item, or indented continuation of current item
+                if _LIST_ITEM_RE.match(lines[i]) or (
+                    nxt
+                    and not nxt.startswith(("#", "```"))
+                    and lines[i - 1].strip()
+                    and not lines[i - 1].strip().startswith(("#", "```"))
+                ):
+                    list_block.append(lines[i])
+                    i += 1
+                else:
+                    break
+            units.append(("list_item", "\n".join(list_block)))
+            continue
+
+        # ── P3: Paragraphs — accumulate text separated by blank lines ────
+        if stripped:
+            current_paragraph.append(line)
+        else:
+            flush_paragraph()
+        i += 1
+
+    flush_paragraph()
+    return units
+
+
+def _split_oversized(text: str, max_tokens: int) -> List[tuple[str, str]]:
+    """Split a single unit that exceeds max_tokens at sentence/clause/word boundaries.
+
+    Returns list of (unit_type, text) sub-units, each <= max_tokens when possible.
+    A single token > max_tokens (e.g., a very long URL) is returned as-is.
+    """
+    if token_count(text) < max_tokens:
+        return [("sentence", text)]
+
+    # P5: sentence boundaries
+    sentences = _SENTENCE_SPLIT_RE.split(text)
+    if len(sentences) > 1:
+        result: List[tuple[str, str]] = []
+        for s in sentences:
+            result.extend(_split_oversized(s.strip(), max_tokens))
+        return result
+
+    # P6: clause boundaries
+    clauses = re.split(r"(?<=[,;])\s+", text)
+    if len(clauses) > 1:
+        result = []
+        for c in clauses:
+            result.extend(_split_oversized(c.strip(), max_tokens))
+        return result
+
+    # P7: word boundaries
+    words = text.split()
+    if len(words) > 1:
+        result = []
+        for w in words:
+            result.extend(_split_oversized(w, max_tokens))
+        return result
+
+    # P8: character boundary — single token too large, return as-is
+    return [("char", text)]
+
+
+def _last_n_tokens_text(lines: List[str], max_tokens: int) -> str:
+    """Return the trailing portion of ``lines`` totaling <= max_tokens, for overlap."""
+    if not lines or max_tokens <= 0:
+        return ""
+    joined = "\n".join(lines)
+    if token_count(joined) <= max_tokens:
+        return joined
+    # Binary-ish walk from the end
+    for cut in range(len(lines), 0, -1):
+        candidate = "\n".join(lines[-cut:])
+        if token_count(candidate) <= max_tokens:
+            return candidate
+    return lines[-1] if lines else ""
+
+
+_FORUM_BLOCKQUOTE_RE = re.compile(r"^>\s+", re.MULTILINE)
+_FORUM_SEPARATOR_RE = re.compile(r"^---+\s*$", re.MULTILINE)
+
+
+def chunk_markdown(
+    content: str,
+    max_tokens: int = CHUNK_SIZE,
+    overlap_tokens: int = CHUNK_OVERLAP,
+    page_type: Optional[str] = None,
+) -> List[str]:
+    """Structural markdown chunking with atomic code blocks, headers, and list items.
+
+    Priority order (P1–P8):
+      P1: Fenced code blocks — atomic, never split
+      P2: Markdown headers   — forced new-chunk starters
+      P3: Paragraphs         — merge greedily up to max_tokens
+      P4: List items         — stay together; list merges with preceding paragraph if fits
+      P5: Sentences          — split oversized paragraphs at . ! ?
+      P6: Clauses            — split at , ;
+      P7: Words              — split at spaces
+      P8: Characters         — never reached in practice
+
+    Page-type-aware behavior:
+      - forum: blockquote sections (> ...) are atomic units; --- separators
+               flow as normal text (do not force new-chunk boundaries, which
+               would over-split small chunks)
+      - documentation: headers are forced new-chunk starters (already P2)
+      - product/collection/listing: list items stay together (already P4)
+      - article/service: standard structural chunking
+
+    This differs from RecursiveCharacterTextSplitter in that headers and code
+    blocks are *forced* new-chunk starters (never merged with preceding
+    content), preserving section boundaries and code integrity.
+    """
+    if not content or not content.strip():
+        return []
+
+    text_tokens = token_count(content)
+    if text_tokens <= max_tokens:
+        return [content]
+
+    # Step 1: extract atomic units in document order
+    units = _extract_units(content, page_type=page_type)
+
+    # Step 2: split any oversized units at sentence/clause/word boundaries
+    final_units: List[tuple[str, str]] = []
+    for unit_type, text in units:
+        if token_count(text) >= max_tokens:
+            final_units.extend(_split_oversized(text, max_tokens))
+        else:
+            final_units.append((unit_type, text))
+
+    # Step 3: greedy packing respecting max_tokens.
+    # We track the actual token count of the joined text so that spaces,
+    # newlines, and other inter-unit whitespace are counted correctly.
+    chunks: List[str] = []
+    current_text = ""
+
+    for unit_type, text in final_units:
+        # Headers, code blocks, and forum separators always start a new chunk
+        if unit_type in ("header", "code") and current_text:
+            chunks.append(current_text)
+            current_text = ""
+
+        tentative = current_text + ("\n" if current_text else "") + text
+        if token_count(tentative) >= max_tokens and current_text:
+            chunks.append(current_text)
+            current_text = text
+        else:
+            current_text = tentative
+
+    if current_text:
+        chunks.append(current_text)
+
+    # Safety net: if we ended up with a single chunk but the original text
+    # exceeded the token limit (e.g., a token was lost at a sentence-split
+    # boundary), force a split using the secondary recursive splitter.
+    if len(chunks) == 1 and token_count(text) > max_tokens:
+        chunks = _apply_secondary_chunking(chunks)
+
+    # Filter degenerate chunks (below MIN_CHUNK_SIZE), but never empty the result
+    if MIN_CHUNK_SIZE > 0 and len(chunks) > 1:
+        kept = [c for c in chunks if token_count(c) >= MIN_CHUNK_SIZE]
+        if kept:
+            chunks = kept
+
+    return chunks if chunks else [content]
+
+
 def chunk_text(
     text: str,
     content_type: Optional[ContentType] = None,
     file_path: Optional[str] = None,
+    page_type: Optional[str] = None,
 ) -> List[str]:
     """
     Split text into chunks using appropriate splitter for content type.
@@ -427,6 +700,9 @@ def chunk_text(
         text: The text to chunk
         content_type: Optional explicit content type (auto-detected if not provided)
         file_path: Optional file path for content type detection
+        page_type: Optional page type (article, forum, product, collection,
+                   listing, documentation, service) for page-type-aware
+                   chunking strategy
 
     Returns:
         List of text chunks, each approximately <= CHUNK_SIZE tokens
@@ -443,43 +719,41 @@ def chunk_text(
     if content_type is None:
         content_type = detect_content_type(text, file_path)
 
-    logger.debug(f"Chunking text with content type: {content_type.value}")
+    logger.debug(
+        f"Chunking text with content type: {content_type.value}, "
+        f"page_type: {page_type}"
+    )
 
     # Select appropriate splitter
     chunks: List[str]
     if content_type == ContentType.HTML:
+        # Raw HTML: split on HTML headers first (pre-markdown-conversion),
+        # then structurally chunk each section.
         html_splitter = _get_html_splitter()
-        # HTML splitter returns Document objects
         docs = html_splitter.split_text(text)
-        chunks = [
+        raw_sections = [
             doc.page_content if hasattr(doc, "page_content") else str(doc)
             for doc in docs
         ]
+        chunks = []
+        for section in raw_sections:
+            chunks.extend(
+                chunk_markdown(section, CHUNK_SIZE, CHUNK_OVERLAP, page_type=page_type)
+            )
     elif content_type == ContentType.MARKDOWN:
-        md_splitter = _get_markdown_splitter()
-        # Markdown splitter returns Document objects
-        docs = md_splitter.split_text(text)
-        chunks = [
-            doc.page_content if hasattr(doc, "page_content") else str(doc)
-            for doc in docs
-        ]
+        # Markdown: structural chunking with atomic code blocks, headers, list items
+        chunks = chunk_markdown(text, CHUNK_SIZE, CHUNK_OVERLAP, page_type=page_type)
     else:
-        # Plain text - use recursive splitter directly
-        chunks = _get_plain_splitter().split_text(text)
+        # Plain text: same structural chunker, no header/code assumptions
+        chunks = chunk_markdown(text, CHUNK_SIZE, CHUNK_OVERLAP, page_type=page_type)
 
-    # Apply secondary chunking if needed (for HTML/Markdown that may produce large chunks)
-    if content_type in (ContentType.HTML, ContentType.MARKDOWN):
-        chunks = _apply_secondary_chunking(chunks)
+    # Apply secondary chunking as safety net (should rarely trigger now)
+    chunks = _apply_secondary_chunking(chunks)
 
     # Filter out empty chunks
     chunks = [c.strip() for c in chunks if c and c.strip()]
 
-    # Drop chunks below the minimum token threshold. These are typically
-    # punctuation or single-character fragments left over from header-based
-    # splitters; embedding them is wasteful and some providers return null
-    # vector elements for such inputs (which then crash response parsing).
-    # Only filter when more than one chunk exists and at least one chunk
-    # would survive — never return an empty list because of this filter.
+    # Drop chunks below the minimum token threshold...
     if MIN_CHUNK_SIZE > 0 and len(chunks) > 1:
         kept = [c for c in chunks if token_count(c) >= MIN_CHUNK_SIZE]
         if kept:
@@ -506,3 +780,52 @@ def describe_chunks(chunks: List[str]) -> Dict[str, Any]:
         "max_tokens": max(sizes),
         "total_tokens": total,
     }
+
+
+def chunk_text_with_coords(
+    text: str,
+    content_type: Optional[ContentType] = None,
+    file_path: Optional[str] = None,
+    page_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Split text into chunks and return each chunk with character coordinates.
+
+    Returns a list of dicts with keys:
+        - text: the chunk text
+        - char_start: character offset in the original text
+        - char_end: character offset (exclusive) in the original text
+        - chunk_index: 0-based index
+
+    Coordinates are approximate: each chunk's text is located in the original
+    text by searching forward from the previous chunk's end. Overlapping
+    chunks (from the splitter's overlap parameter) may have slightly
+    imprecise coordinates, which is acceptable for citation display.
+    """
+    chunk_strings = chunk_text(
+        text, content_type=content_type, file_path=file_path, page_type=page_type
+    )
+    if not chunk_strings:
+        return []
+
+    result: List[Dict[str, Any]] = []
+    search_from = 0
+    for idx, chunk_text_str in enumerate(chunk_strings):
+        # Find the chunk in the original text, searching from where we left off
+        pos = text.find(chunk_text_str, search_from)
+        if pos == -1:
+            # Chunk not found (e.g., due to whitespace normalization); use
+            # the previous chunk's end as fallback
+            pos = search_from
+        end = pos + len(chunk_text_str)
+        result.append(
+            {
+                "text": chunk_text_str,
+                "char_start": pos,
+                "char_end": end,
+                "chunk_index": idx,
+            }
+        )
+        search_from = end
+
+    return result

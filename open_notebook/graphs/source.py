@@ -36,7 +36,10 @@ from open_notebook.utils.runtime_capabilities import (
 )
 from open_notebook.preprocess.tools.pdf import extract_pdf
 from open_notebook.preprocess.tools.pandoc import convert_document
-from open_notebook.preprocess.tools.trafilatura import extract_html
+from open_notebook.preprocess.tools.trafilatura import (
+    EXTRACTION_QUALITY_THRESHOLD,
+    extract_html,
+)
 from open_notebook.preprocess.tools.ssconvert import (
     convert_spreadsheet,
     is_csv,
@@ -150,6 +153,9 @@ class Source7StageState(TypedDict, total=False):
     content_type: str                     # "media" | "text" | "pdf" | "url" | "spreadsheet" | "csv" | "image" | "html"
     lane: str                             # "instant" | "heavy" — determines stage timeout
     route_reason: str                     # why this route was chosen
+    page_type: str | None                 # article/forum/product/collection/listing/documentation/service (rs-trafilatura)
+    extraction_quality: float             # 0.0-1.0 extraction quality predictor (rs-trafilatura)
+    classification_confidence: float | None  # confidence in page-type classification
     extraction: ExtractionOutput          # content-core result (stage 3: extract)
     normalized_text: str                  # cleaned text (stage 4: normalize)
     chunks: List[str]                     # text chunks (stage 5: chunk)
@@ -1954,6 +1960,14 @@ async def _extract_trafilatura_stage(
             "trafilatura javascript_required — page may need JavaScript to render"
         )
 
+    # Record low extraction quality (decision #3): flag extracting_partial
+    # with a warning but still index the content.
+    eq = result.get("extraction_quality", 1.0)
+    if eq and eq < EXTRACTION_QUALITY_THRESHOLD:
+        warnings.append(
+            f"low_extraction_quality: {eq:.2f} — extraction may be incomplete"
+        )
+
     # Record timed-out pages
     timed_out = result.get("timed_out_pages", [])
     if timed_out:
@@ -1975,6 +1989,9 @@ async def _extract_trafilatura_stage(
 
     return {
         "extraction": extraction,
+        "page_type": result.get("page_type"),
+        "extraction_quality": result.get("extraction_quality", 0.0),
+        "classification_confidence": result.get("classification_confidence"),
         "errors": errors,
         "warnings": warnings,
         "timed_out_pages": timed_out_pages,
@@ -2226,6 +2243,15 @@ async def chunk_stage(state: Source7StageState) -> dict:
     warnings = list(state.get("warnings", []))
     timed_out_pages = list(state.get("timed_out_pages", []))
 
+    # Extraction quality warning (decision #3): extraction_quality < 0.80
+    # flags the source for potential LLM fallback routing. Content is still
+    # indexed — this is an observability signal, not a failure.
+    eq = state.get("extraction_quality")
+    if eq is not None and eq < EXTRACTION_QUALITY_THRESHOLD:
+        warnings.append(
+            f"low_extraction_quality: {eq:.2f} — candidate for LLM fallback"
+        )
+
     normalized_text = state.get("normalized_text") or ""
     if not normalized_text.strip():
         return {
@@ -2242,7 +2268,12 @@ async def chunk_stage(state: Source7StageState) -> dict:
 
     try:
         chunk_infos = await asyncio.wait_for(
-            asyncio.to_thread(chunk_text_with_coords, normalized_text, file_path=file_path),
+            asyncio.to_thread(
+                chunk_text_with_coords,
+                normalized_text,
+                file_path=file_path,
+                page_type=state.get("page_type"),
+            ),
             timeout=STAGE_TIMEOUT_CHUNK,
         )
     except asyncio.TimeoutError:
@@ -2436,6 +2467,13 @@ async def index_stage(state: Source7StageState) -> dict:
     # error strings.
     source.warnings = warnings
     source.timed_out_pages = timed_out_pages
+    # Page-type observability (decision #2): persist page_type,
+    # extraction_quality, and classification_confidence so the UI can show
+    # "extracted as forum, quality 72%" and downstream stages can branch on
+    # page type.
+    source.page_type = state.get("page_type")
+    source.extraction_quality = state.get("extraction_quality")
+    source.classification_confidence = state.get("classification_confidence")
     if timed_out_pages:
         source.status = "extracting_partial"
     else:
