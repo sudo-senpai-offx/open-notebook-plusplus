@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Forum Thread: RAG Chunking Strategies</title>
+</head>
+<body>
+    <h1>Forum Thread: RAG Chunking Strategies</h1>
+    <p><strong>User1</strong> started this thread.</p>
+    <hr>
+    <blockquote>
+        <p><strong>User2</strong> commented:</p>
+        <p>I've been experimenting with different chunk sizes for RAG and found that
+        400-token chunks work well for most documents. However, for technical
+        documentation with code blocks, smaller chunks around 200 tokens preserve
+        code integrity better.</p>
+    </blockquote>
+    <hr>
+    <blockquote>
+        <p><strong>User5</strong> replied:</p>
+        <p>I disagree - I think larger chunks around 800 tokens are better for
+        multi-hop reasoning. Small chunks lose the context needed to connect
+        ideas across the document.</p>
+    </blockquote>
+    <hr>
+    <blockquote>
+        <p><strong>User3</strong> added:</p>
+        <p>What about sentence-boundary chunking? Instead of fixed-size chunks,
+        we could split on sentence boundaries and then merge sentences until
+        we reach the target size.</p>
+    </blockquote>
+    <hr>
+    <blockquote>
+        <p><strong>User1</strong> responded:</p>
+        <p>Great question. Sentence-boundary chunking is definitely worth
+        exploring. The key insight from the research is that extremely small
+        chunks (below 250 tokens) hurt multi-hop retrieval accuracy, while
+        very large chunks dilute relevance. The sweet spot seems to be
+        around 400 tokens with structural awareness.</p>
+    </blockquote>
+    <hr>
+    <blockquote>
+        <p><strong>Moderator</strong> locked this thread.</p>
+        <p>Thanks for the extensive discussion everyone.</p>
+    </blockquote>
+</body>
+</html>
