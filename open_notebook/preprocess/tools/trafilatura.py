@@ -2,20 +2,30 @@
 
 Week 4 Day 3: HTML/web content extraction wrapper.
 
-Extracts article content from HTML via trafilatura with a 30s timeout
-(instant lane). trafilatura automatically strips boilerplate
+Extracts article content from HTML via rs-trafilatura (Rust, page-type-aware)
+with a 30s timeout (instant lane). rs-trafilatura automatically strips boilerplate
 (<nav>, <footer>, <header>, scripts, styles, ads) so the LLM gets clean
-article text, not chrome.
+article text, not chrome. It also classifies the page type
+(article/forum/product/collection/listing/documentation/service) and returns an
+extraction quality score (0.0-1.0).
 
-SPA / JavaScript-required detection:
+Page-type-aware fields (decision #2): page_type, extraction_quality,
+classification_confidence flow into Source7StageState so downstream stages
+(chunk, embed, index) can branch on page type and observability.
+
+Quality threshold (decision #3): extraction_quality < 0.80 flags the source as
+extracting_partial with a warning, but the content is still indexed.
+
+SPA / JavaScript-required detection (decision #4):
 If extracted markdown is < 200 chars AND the raw HTML contains SPA markers
 (id="root", id="app", id="__next", <noscript>, high script ratio),
 the job is marked extracting_partial with warning "javascript_required"
 instead of silently producing an empty source.
 
-Empty / blocked detection:
-If extracted text is empty and no SPA markers exist, raises ValueError
-so extract_stage routes to compensate_extract (extracting_failed).
+Empty / blocked detection (decision #5):
+If rs-trafilatura returns empty AND no SPA markers exist, fall back to Python
+trafilatura. If that also returns empty, raises ValueError so extract_stage
+routes to compensate_extract (extracting_failed).
 
 Returns ExtractResult dict compatible with extract_stage.
 """
@@ -32,8 +42,12 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from open_notebook.ai.models import JobCheckpoint
-from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.utils.job_control import report_progress_record
+
+# Quality threshold below which extraction is considered unreliable
+# (decision #3). Configurable via settings.extraction_quality_threshold,
+# default 0.80.
+EXTRACTION_QUALITY_THRESHOLD = 0.80
 
 # HTML MIME types that should route to trafilatura (not pandoc)
 HTML_CONTENT_TYPES = {
@@ -71,6 +85,11 @@ class ExtractResult:
     javascript_required: bool = False
     extraction_empty: bool = False
 
+    # Page-type-aware fields (decision #2).
+    page_type: Optional[str] = None
+    extraction_quality: float = 0.0
+    classification_confidence: Optional[float] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "text": self.text,
@@ -80,6 +99,9 @@ class ExtractResult:
             "checkpoint_position": self.checkpoint_position,
             "javascript_required": self.javascript_required,
             "extraction_empty": self.extraction_empty,
+            "page_type": self.page_type,
+            "extraction_quality": self.extraction_quality,
+            "classification_confidence": self.classification_confidence,
         }
 
 
@@ -126,9 +148,10 @@ async def _read_checkpoint(command_id: str) -> Optional[Dict[str, Any]]:
 def strip_html_boilerplate(html: str) -> str:
     """Strip <script>, <style>, and inline base64 image URIs from HTML.
 
-    Runs before trafilatura to prevent bloated inline assets from stalling
-    the parser. trafilatura already strips nav/footer/headers, but pre-stripping
-    scripts and base64 reduces parse time and memory on large pages.
+    Runs before rs-trafilatura to prevent bloated inline assets from stalling
+    the parser. rs-trafilatura already strips nav/footer/headers, but
+    pre-stripping scripts and base64 reduces parse time and memory on large
+    pages.
     """
     # Strip <script>...</script>
     html = re.sub(
@@ -176,18 +199,19 @@ async def extract_html(
     html_content: Optional[str] = None,
     url: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Extract article content from HTML via trafilatura.
+    """Extract article content from HTML via rs-trafilatura.
 
     Args:
         command_id: The command id for checkpointing and progress reporting.
         file_path: Path to an HTML file (optional if html_content provided).
         html_content: Raw HTML string (optional if file_path provided).
-        url: Source URL (for logging only).
+        url: Source URL (for page-type classification and logging).
 
     Returns:
         ExtractResult dict with text, pages_processed, pages_total,
         timed_out_pages, checkpoint_position, javascript_required,
-        extraction_empty.
+        extraction_empty, page_type, extraction_quality,
+        classification_confidence.
 
     Raises:
         ValueError: if extracted text is empty and no SPA markers exist
@@ -218,10 +242,14 @@ async def extract_html(
             extraction_empty=True,
         ).to_dict()
 
-    # Pre-strip boilerplate before trafilatura
+    # Pre-strip boilerplate before rs-trafilatura
     html = strip_html_boilerplate(html_content)
 
-    # SPA detection BEFORE trafilatura (trafilatura may strip scripts we need to detect)
+    # SPA detection BEFORE rs-trafilatura (decision #4).
+    # rs-trafilatura extracts whatever HTML it receives; it does not flag
+    # "this page is a React shell with no server-rendered content". The SPA
+    # pre-check catches structurally-valid HTML with no content because
+    # JavaScript hasn't run.
     js_required = has_spa_markers(html) or script_ratio(html) > SCRIPT_RATIO_THRESHOLD
 
     result = ExtractResult(pages_total=1)
@@ -239,39 +267,51 @@ async def extract_html(
     if resume_from >= 1:
         return result.to_dict()
 
-    # Run trafilatura via Python API with a 30s timeout (instant lane)
-    import trafilatura
+    # Run rs-trafilatura via Python API with a 30s timeout (instant lane)
+    import rs_trafilatura
 
     await report_progress_record(command_id, progress=30, stage="extract")
 
     try:
-        extracted = await asyncio.wait_for(
+        rs_result = await asyncio.wait_for(
             asyncio.to_thread(
-                trafilatura.extract,
+                rs_trafilatura.extract,
                 html,
-                output_format="markdown",
+                url=url,
+                output_markdown=True,
                 include_tables=True,
                 include_links=True,
-                fast=True,
+                favor_precision=True,
             ),
             timeout=RANGE_TIMEOUT_SECONDS,
         )
-        if extracted and extracted.strip():
-            result.text = extracted.strip()
+    except asyncio.TimeoutError:
+        logger.warning(f"rs-trafilatura timed out after {RANGE_TIMEOUT_SECONDS}s")
+        result.timed_out_pages.append(1)
+        result.extraction_empty = True
+        rs_result = None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"rs-trafilatura failed: {exc}")
+        result.timed_out_pages.append(1)
+        result.extraction_empty = True
+        rs_result = None
+
+    if rs_result is not None:
+        result.text = rs_result.content_markdown or rs_result.main_content or ""
+        result.page_type = rs_result.page_type
+        result.extraction_quality = rs_result.extraction_quality or 0.0
+        result.classification_confidence = rs_result.classification_confidence
+
+        if result.text.strip():
             result.pages_processed = 1
             logger.info(
-                f"Extracted HTML from {file_path or url} ({len(result.text)} chars)"
+                f"Extracted HTML from {file_path or url} "
+                f"(page_type={result.page_type}, "
+                f"quality={result.extraction_quality:.2f}, "
+                f"{len(result.text)} chars)"
             )
         else:
             result.extraction_empty = True
-    except asyncio.TimeoutError:
-        logger.warning(f"trafilatura timed out after {RANGE_TIMEOUT_SECONDS}s")
-        result.timed_out_pages.append(1)
-        result.extraction_empty = True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"trafilatura failed: {exc}")
-        result.timed_out_pages.append(1)
-        result.extraction_empty = True
 
     # SPA detection after extraction
     if not result.text.strip() and js_required:
@@ -280,9 +320,42 @@ async def extract_html(
     elif not result.text.strip():
         result.extraction_empty = True
 
+    # Empty content fallback (decision #5): if rs-trafilatura returned empty
+    # and SPA detection didn't fire, try Python trafilatura before compensating.
+    if result.extraction_empty and not result.javascript_required:
+        try:
+            import trafilatura  # optional dependency (legacy-html extra)
+
+            fallback = trafilatura.extract(
+                html, url=url, output_format="markdown", include_tables=True
+            )
+            if fallback and fallback.strip():
+                result.text = fallback.strip()
+                result.extraction_empty = False
+                result.pages_processed = 1
+                result.page_type = None
+                result.extraction_quality = 0.0
+                result.classification_confidence = None
+                logger.info(
+                    f"Fallback Python trafilatura extracted content from "
+                    f"{file_path or url} ({len(result.text)} chars)"
+                )
+        except ImportError:
+            # Python trafilatura not installed (legacy-html extra missing);
+            # proceed to compensation below.
+            logger.debug(
+                "Python trafilatura not installed; skipping empty-content fallback."
+            )
+
     # If empty with no SPA markers, raise so extract_stage routes to compensation
     if result.extraction_empty and not result.javascript_required:
         raise ValueError("html_extraction_empty")
+
+    # Quality threshold (decision #3): extraction_quality < 0.80 flags the
+    # source as extracting_partial with a warning, but content is still indexed.
+    # The warning is propagated to _extract_trafilatura_stage via the
+    # extraction_quality field in the result dict; the caller appends it to
+    # the accumulated warnings list.
 
     # Checkpoint after extraction
     result.checkpoint_position = 1
@@ -300,6 +373,7 @@ async def extract_html(
     logger.info(
         f"HTML extraction complete for {command_id or 'unknown'}: "
         f"{result.pages_processed}/{result.pages_total} pages, "
+        f"page_type={result.page_type}, quality={result.extraction_quality:.2f}, "
         f"js_required={result.javascript_required}, empty={result.extraction_empty}"
     )
 

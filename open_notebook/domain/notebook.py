@@ -541,6 +541,26 @@ class Source(ObjectModel):
         default_factory=list,
         description="Page/segment indices that timed out during extraction",
     )
+    #: Page type detected by rs-trafilatura: article, forum, product,
+    #: collection, listing, documentation, or service. Populated by
+    #: extract_stage → index_stage so the UI can show "extracted as forum".
+    page_type: Optional[str] = Field(
+        None,
+        description="Page type: article | forum | product | collection | listing | documentation | service",
+    )
+    #: Extraction quality predictor (0.0-1.0) from rs-trafilatura. Below
+    #: 0.80 flags the source as extracting_partial. Populated by
+    #: extract_stage → index_stage.
+    extraction_quality: Optional[float] = Field(
+        None,
+        description="Extraction quality score 0.0-1.0 from rs-trafilatura",
+    )
+    #: Confidence in the page-type classification (0.0-1.0). Populated by
+    #: extract_stage → index_stage.
+    classification_confidence: Optional[float] = Field(
+        None,
+        description="Page-type classification confidence 0.0-1.0",
+    )
 
     @field_validator("command", mode="before")
     @classmethod
