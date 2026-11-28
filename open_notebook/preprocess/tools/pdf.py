@@ -34,6 +34,7 @@ from loguru import logger
 from open_notebook.ai.models import JobCheckpoint
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.utils.job_control import report_progress_record
+from open_notebook.utils.retry_classification import should_retry
 from open_notebook.utils.subprocess_utils import run_heavy_operation
 
 PAGES_PER_RANGE = 5
@@ -164,35 +165,60 @@ async def extract_pdf(
             stage="extract",
         )
 
-        try:
-            op_result = await run_heavy_operation(
-                cmd,
-                timeout=RANGE_TIMEOUT_SECONDS,
-            )
-            if op_result["returncode"] == 0 and op_result["stdout"].strip():
-                text_accumulator.append(op_result["stdout"])
-                result.pages_processed += (end_page - start_page + 1)
-                logger.debug(
-                    f"Extracted pages {start_page}-{end_page} "
-                    f"({len(op_result['stdout'])} chars)"
+        # Per-range retry loop: transient timeouts are retried with
+        # exponential backoff before marking the range timed out.
+        range_attempt = 0
+        max_range_attempts = 2
+
+        while True:
+            range_attempt += 1
+            try:
+                op_result = await run_heavy_operation(
+                    cmd,
+                    timeout=RANGE_TIMEOUT_SECONDS,
                 )
-            else:
+                if op_result["returncode"] == 0 and op_result["stdout"].strip():
+                    text_accumulator.append(op_result["stdout"])
+                    result.pages_processed += (end_page - start_page + 1)
+                    logger.debug(
+                        f"Extracted pages {start_page}-{end_page} "
+                        f"({len(op_result['stdout'])} chars)"
+                    )
+                    break  # success, move to next range
+                else:
+                    # Non-zero return code — permanent failure for this range
+                    logger.warning(
+                        f"pdftotext returned {op_result['returncode']} for "
+                        f"pages {start_page}-{end_page}: {op_result['stderr']}"
+                    )
+                    result.timed_out_pages.extend(range(start_page, end_page + 1))
+                    break
+            except asyncio.TimeoutError:
+                should, delay = should_retry(
+                    asyncio.TimeoutError(),
+                    range_attempt,
+                    max_attempts=max_range_attempts,
+                )
+                if not should:
+                    logger.warning(
+                        f"pdftotext timed out after {RANGE_TIMEOUT_SECONDS}s for "
+                        f"pages {start_page}-{end_page} "
+                        f"(exhausted {max_range_attempts} attempts)"
+                    )
+                    result.timed_out_pages.extend(range(start_page, end_page + 1))
+                    break
+                logger.debug(
+                    f"pdf: range timeout, retrying in {delay:.1f}s "
+                    f"(attempt {range_attempt}/{max_range_attempts})"
+                )
+                await asyncio.sleep(delay)
+                continue
+            except Exception as exc:  # noqa: BLE001 - one range must not stop all
                 logger.warning(
-                    f"pdftotext returned {op_result['returncode']} for "
-                    f"pages {start_page}-{end_page}: {op_result['stderr']}"
+                    f"pdftotext failed for pages {start_page}-{end_page}: {exc}"
                 )
                 result.timed_out_pages.extend(range(start_page, end_page + 1))
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"pdftotext timed out after {RANGE_TIMEOUT_SECONDS}s for "
-                f"pages {start_page}-{end_page}"
-            )
-            result.timed_out_pages.extend(range(start_page, end_page + 1))
-        except Exception as exc:  # noqa: BLE001 - one range must not stop all
-            logger.warning(
-                f"pdftotext failed for pages {start_page}-{end_page}: {exc}"
-            )
-            result.timed_out_pages.extend(range(start_page, end_page + 1))
+                break
 
         # Write intra-stage checkpoint after each range
         result.text = "\n".join(text_accumulator)

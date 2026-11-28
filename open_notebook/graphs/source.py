@@ -34,6 +34,7 @@ from open_notebook.utils.runtime_capabilities import (
     docling_available,
     engine_runtime_missing,
 )
+from open_notebook.utils.retry_classification import should_retry
 from open_notebook.preprocess.tools.pdf import extract_pdf
 from open_notebook.preprocess.tools.pandoc import convert_document
 from open_notebook.preprocess.tools.trafilatura import (
@@ -1344,42 +1345,74 @@ async def extract_stage(state: Source7StageState) -> dict:
     # Conditional stage timeout: heavy lane (OCR/STT) → 1800s, instant → 300s.
     effective_timeout = STAGE_TIMEOUT_HEAVY if lane == "heavy" else STAGE_TIMEOUT_EXTRACT
 
-    try:
-        result = await asyncio.wait_for(
-            _dispatch_extract(
-                state,
-                cmd_id,
-                errors,
-                warnings,
-                timed_out_pages,
-                content_type,
-                lane,
-                file_path,
-                content_state,
-                url,
-            ),
-            timeout=effective_timeout,
-        )
-    except asyncio.TimeoutError:
-        errors.append(f"extract: timeout after {effective_timeout}s ({lane} lane)")
-        return {
-            "extraction": None,
-            "normalized_text": "",
-            "errors": errors,
-            "warnings": warnings,
-            "timed_out_pages": timed_out_pages,
-            "stage": "extract",
-        }
-    except Exception as exc:  # noqa: BLE001 - capture for compensation
-        errors.append(f"extract: wrapper error: {exc}")
-        return {
-            "extraction": None,
-            "normalized_text": "",
-            "errors": errors,
-            "warnings": warnings,
-            "timed_out_pages": timed_out_pages,
-            "stage": "extract",
-        }
+    # Retry loop with transient/permanent classification.
+    # Transient errors (timeout, connection reset, 502/503/504) are retried
+    # with exponential backoff + jitter. Permanent errors (bad content,
+    # missing language, missing model) fail fast — no wasted cycles.
+    attempt = 0
+    max_attempts = 3
+
+    while True:
+        attempt += 1
+        try:
+            result = await asyncio.wait_for(
+                _dispatch_extract(
+                    state,
+                    cmd_id,
+                    errors,
+                    warnings,
+                    timed_out_pages,
+                    content_type,
+                    lane,
+                    file_path,
+                    content_state,
+                    url,
+                ),
+                timeout=effective_timeout,
+            )
+            break  # success
+        except asyncio.TimeoutError as exc:
+            should, delay = should_retry(
+                exc, attempt, max_attempts=max_attempts
+            )
+            if not should:
+                errors.append(
+                    f"extract: timeout after {effective_timeout}s ({lane} lane)"
+                )
+                return {
+                    "extraction": None,
+                    "normalized_text": "",
+                    "errors": errors,
+                    "warnings": warnings,
+                    "timed_out_pages": timed_out_pages,
+                    "stage": "extract",
+                }
+            logger.debug(
+                f"extract: transient timeout, retrying in {delay:.1f}s "
+                f"(attempt {attempt}/{max_attempts})"
+            )
+            await asyncio.sleep(delay)
+            continue
+        except Exception as exc:  # noqa: BLE001 - capture for compensation
+            should, delay = should_retry(
+                exc, attempt, max_attempts=max_attempts
+            )
+            if not should:
+                errors.append(f"extract: wrapper error: {exc}")
+                return {
+                    "extraction": None,
+                    "normalized_text": "",
+                    "errors": errors,
+                    "warnings": warnings,
+                    "timed_out_pages": timed_out_pages,
+                    "stage": "extract",
+                }
+            logger.debug(
+                f"extract: transient error, retrying in {delay:.1f}s "
+                f"(attempt {attempt}/{max_attempts}): {exc}"
+            )
+            await asyncio.sleep(delay)
+            continue
 
     return result
 
