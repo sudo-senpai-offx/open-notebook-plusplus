@@ -66,13 +66,20 @@ SEGMENT_TIMEOUT_SECONDS = 180  # 3 minutes per whisper-cli invocation
 SAMPLE_RATE = 16000
 CHANNELS = 1
 
-# Whisper model resolution: explicit settings → env var → default on-disk path.
+# Whisper model resolution: explicit settings → env var → RAM-aware default → on-disk path.
 WHISPER_MODEL_ENV = "OPEN_NOTEBOOK_WHISPER_MODEL"
-DEFAULT_MODEL_PATH = os.path.expanduser(
-    "~/.onpp/models/ggml-base-q5_1.bin"
-)
+DEFAULT_MODEL_DIR = os.path.expanduser("~/.onpp/models")
 # Quantized base model (q5_1) specified in Week 1 Q8 for both en and multilingual.
 DEFAULT_MODEL_NAME = "ggml-base-q5_1.bin"
+# RAM-tiered model filenames (all q5_1 quantized).
+WHISPER_TINY_MODEL = "ggml-tiny-q5_1.bin"      # ~32 MB disk, ~500 MB RAM
+WHISPER_BASE_MODEL = "ggml-base-q5_1.bin"      # ~60 MB disk, ~1 GB RAM
+WHISPER_SMALL_MODEL = "ggml-small-q5_1.bin"    # ~190 MB disk, ~2 GB RAM
+
+# RAM thresholds (MB) for model tier selection.
+RAM_TINY_MAX_MB = 2048       # < 2 GB: tiny
+RAM_BASE_MAX_MB = 4096       # 2-4 GB: base
+# > 4 GB: small
 
 # Week 1 Q3 rule message.
 LANGUAGE_REQUIRED_FOR_SHORT_AUDIO = "LANGUAGE_REQUIRED_FOR_SHORT_AUDIO"
@@ -87,13 +94,56 @@ _DETECTED_LANG_RE = re.compile(
 )
 
 
+def _detect_available_ram_mb() -> Optional[int]:
+    """Detect available system RAM in MB.
+
+    Reuses the live ``MemAvailable`` signal from
+    ``open_notebook.utils.capability_tier.mem_available_mb`` so the
+    STT model tier and the training tier gate stay consistent.
+    Returns None when memory cannot be determined (fails safe → base).
+    """
+    try:
+        from open_notebook.utils.capability_tier import mem_available_mb
+
+        return mem_available_mb()
+    except Exception:  # noqa: BLE001 - import failure must not break STT
+        return None
+
+
+def _select_whisper_model_by_ram(available_ram_mb: Optional[int]) -> str:
+    """Select a whisper.cpp model filename based on available RAM.
+
+    Selection tiers:
+      - RAM unknown or < 2048 MB: tiny  (ggml-tiny-q5_1.bin)
+      - 2048-4096 MB:               base (ggml-base-q5_1.bin)
+      - > 4096 MB:                  small (ggml-small-q5_1.bin)
+
+    Unknown RAM fails safe to the base model — the safest default that
+    works on both 2 GB and 4 GB devices without OOMing.
+    """
+    if available_ram_mb is None:
+        return WHISPER_BASE_MODEL
+    if available_ram_mb < RAM_TINY_MAX_MB:
+        return WHISPER_TINY_MODEL
+    if available_ram_mb < RAM_BASE_MAX_MB:
+        return WHISPER_BASE_MODEL
+    return WHISPER_SMALL_MODEL
+
+
+def _model_path_for_name(model_name: str) -> str:
+    """Return the on-disk path for a whisper model name."""
+    return os.path.join(DEFAULT_MODEL_DIR, model_name)
+
+
 def resolve_model_path(stt_model_setting: Optional[str] = None) -> str:
     """Resolve the whisper.cpp model path.
 
     Resolution order (first existing file wins):
       1. ``stt_model_setting`` (persisted ContentSettings.stt_model)
       2. ``OPEN_NOTEBOOK_WHISPER_MODEL`` environment variable
-      3. ``~/.onpp/models/ggml-base-q5_1.bin`` (default on-disk path)
+      3. RAM-aware default model at ``~/.onpp/models/<tier_model>``
+      4. Fallback chain: base → tiny → small (whichever exists on disk)
+      5. Hardcoded default path ``~/.onpp/models/ggml-base-q5_1.bin``
 
     Raises:
         ValueError: if an explicitly-configured path does not exist, or if
@@ -118,13 +168,30 @@ def resolve_model_path(stt_model_setting: Optional[str] = None) -> str:
             f"Download {DEFAULT_MODEL_NAME} or unset {WHISPER_MODEL_ENV}."
         )
 
-    # 3. Default on-disk path.
-    if os.path.isfile(DEFAULT_MODEL_PATH):
-        return DEFAULT_MODEL_PATH
+    # 3. RAM-aware default model selection.
+    ram_mb = _detect_available_ram_mb()
+    selected_name = _select_whisper_model_by_ram(ram_mb)
+    ram_label = f"{ram_mb} MB" if ram_mb is not None else "unknown"
+    logger.debug(
+        f"Whisper RAM-aware model selection: {ram_label} RAM → {selected_name}"
+    )
 
+    # Build a preference chain: selected model first, then fallbacks.
+    preference_order = [selected_name]
+    for fallback in (WHISPER_BASE_MODEL, WHISPER_TINY_MODEL, WHISPER_SMALL_MODEL):
+        if fallback not in preference_order:
+            preference_order.append(fallback)
+
+    for model_name in preference_order:
+        candidate = _model_path_for_name(model_name)
+        if os.path.isfile(candidate):
+            return candidate
+
+    # 4. Nothing on disk — raise with actionable message.
     raise ValueError(
-        f"Whisper model not found at {DEFAULT_MODEL_PATH}. "
-        f"Download {DEFAULT_MODEL_NAME} or set {WHISPER_MODEL_ENV}."
+        f"Whisper model not found at {_model_path_for_name(DEFAULT_MODEL_NAME)}. "
+        f"Download {DEFAULT_MODEL_NAME} (or a RAM-appropriate tier model) "
+        f"or set {WHISPER_MODEL_ENV}."
     )
 
 
