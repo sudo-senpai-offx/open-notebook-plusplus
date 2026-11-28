@@ -11,6 +11,7 @@ ProviderConfig (e.g. OpenRouter attribution headers).
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -185,8 +186,21 @@ class OpenAICompatibleProvider(BaseProvider):
                             try:
                                 retry_after = float(ra_header)
                             except ValueError:
-                                # Retry-After can be an HTTP-date; ignore and let backoff handle it
-                                retry_after = None
+                                # Retry-After can be an HTTP-date, e.g.
+                                # "Wed, 21 Oct 2015 07:28:00 GMT". Parse it
+                                # into seconds from now so the retry cap
+                                # (60s) can be enforced consistently.
+                                try:
+                                    from email.utils import parsedate_to_datetime
+
+                                    retry_dt = parsedate_to_datetime(ra_header)
+                                    if retry_dt is not None:
+                                        now = datetime.now(timezone.utc)
+                                        delta = (retry_dt - now).total_seconds()
+                                        retry_after = max(0.0, delta)
+                                except Exception:
+                                    # Unparseable — fall back to backoff
+                                    retry_after = None
                         return ProviderSendResult(
                             ok=False,
                             error="Provider rate limit exceeded",

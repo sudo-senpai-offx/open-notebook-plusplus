@@ -440,6 +440,31 @@ class BaseProvider:
             if result.retry_after is not None:
                 delay = result.retry_after
 
+            # Cap retry delay — never sleep longer than MAX_RETRY_AFTER_SECONDS.
+            # If a provider asks us to wait longer, open the circuit breaker
+            # and fall to the next provider instead of hanging the pipeline
+            # for an hour (e.g. Retry-After: 3600 on a free tier).
+            MAX_RETRY_AFTER_SECONDS = 60.0
+            if (
+                result.retry_after is not None
+                and result.retry_after > MAX_RETRY_AFTER_SECONDS
+            ):
+                from open_notebook.utils.circuit_breaker import (
+                    get_circuit_breaker,
+                )
+
+                cb = await get_circuit_breaker(self.provider_id)
+                cb._state.state = "open"
+                cb._state.last_failure_time = time.monotonic()
+                logger.warning(
+                    f"Provider {self.provider_id}: Retry-After "
+                    f"{result.retry_after:.0f}s exceeds "
+                    f"{MAX_RETRY_AFTER_SECONDS:.0f}s cap — opening circuit "
+                    f"breaker, falling to next provider"
+                )
+                return result
+
+            delay = min(delay, MAX_RETRY_AFTER_SECONDS)
             logger.debug(
                 f"Provider {self.provider_id}: transient error on attempt "
                 f"{attempt}/{max_attempts}, retrying in {delay:.1f}s: "

@@ -133,7 +133,7 @@ async def surreal_db(surreal_test_url):
             "password": get_database_password(),
         })
         await db.query("DEFINE NAMESPACE IF NOT EXISTS onpp_test")
-        await db.use(namespace="onpp_test")
+        await db.use(namespace="onpp_test", database="main")
         await db.query("DEFINE DATABASE IF NOT EXISTS test")
         await db.use(namespace="onpp_test", database="test")
         yield surreal_test_url

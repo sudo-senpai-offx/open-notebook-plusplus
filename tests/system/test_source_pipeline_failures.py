@@ -41,7 +41,7 @@ async def _upload_source(http_client, *, file_path=None, url=None, content=None)
     else:
         raise ValueError("Must provide file_path, url, or content")
 
-    r = await http_client.post("/api/sources/", files=files, data=data)
+    r = await http_client.post("/api/sources", files=files, data=data)
     assert r.status_code == 200, f"Upload failed: {r.status_code} {r.text}"
     return r.json()["id"]
 
